@@ -1,0 +1,64 @@
+export type NarrationStyleId =
+  | "executive"
+  | "product_demo"
+  | "technical"
+  | "teaser"
+  | "training"
+  | "critique";
+
+export interface NarrationStyleDef {
+  id: NarrationStyleId;
+  label: string;
+  description: string;
+  system_prompt: string;
+  pacing: string;
+  pause_markers: boolean;
+}
+
+export type LanguageCode = "en" | "ja" | "de" | "fr" | "pt-BR" | string;
+
+export interface Language {
+  code: LanguageCode;
+  label: string;
+  flag: string;
+}
+
+export type FrameDensity = "light" | "medium" | "heavy";
+export type AiProvider = "claude" | "openai";
+export type ModelId =
+  | "claude-sonnet-4-20250514"
+  | "claude-opus-4-20250514"
+  | "gpt-4o"
+  | "o3";
+
+export interface AiConfig {
+  provider: AiProvider;
+  model: ModelId;
+  temperature: number;
+}
+
+export interface FrameConfig {
+  density: FrameDensity;
+  scene_threshold: number;
+  max_frames: number;
+}
+
+export interface ProviderKeyStatus {
+  provider: AiProvider;
+  has_key: boolean;
+  models: string[];
+}
+
+export interface GenerationParams {
+  project_id: string;
+  video_path: string;
+  document_paths: string[];
+  title: string;
+  description: string;
+  style: string;
+  primary_language: string;
+  additional_languages: string[];
+  frame_config: FrameConfig;
+  ai_config: AiConfig;
+  custom_prompt: string;
+}
