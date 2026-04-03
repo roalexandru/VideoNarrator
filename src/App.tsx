@@ -5,6 +5,7 @@ import { useProjectStore } from "./stores/projectStore";
 import { useConfigStore } from "./stores/configStore";
 import { useScriptStore } from "./stores/scriptStore";
 import { useProcessingStore } from "./stores/processingStore";
+import { useEditStore } from "./stores/editStore";
 import { ProjectSetupScreen } from "./features/project-setup/ProjectSetupScreen";
 import { ConfigurationScreen } from "./features/configuration/ConfigurationScreen";
 import { ProcessingScreen } from "./features/processing/ProcessingScreen";
@@ -29,6 +30,7 @@ export default function App() {
     useConfigStore.getState().reset();
     useScriptStore.getState().reset();
     useProcessingStore.getState().reset();
+    useEditStore.getState().reset();
     useWizardStore.getState().reset();
     setView("editor");
   };

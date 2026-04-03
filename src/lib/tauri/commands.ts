@@ -112,9 +112,8 @@ export interface RecordingConfig {
 }
 export const openRecorderWindow = () => invoke<void>("open_recorder_window");
 export const closeRecorderWindow = () => invoke<void>("close_recorder_window");
+export const recordScreenNative = (outputPath: string) => invoke<string>("record_screen_native", { outputPath });
 export const listScreens = () => invoke<ScreenDevice[]>("list_screens");
-export interface WindowInfo { id: number; name: string; owner: string; }
-export const listWindows = () => invoke<WindowInfo[]>("list_windows");
 export const startRecording = (config: RecordingConfig) => invoke<string>("start_recording", { config });
 export const stopRecording = () => invoke<void>("stop_recording");
 

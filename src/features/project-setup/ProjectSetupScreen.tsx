@@ -1,10 +1,11 @@
-import { useCallback, useEffect, type CSSProperties } from "react";
+import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "../../stores/projectStore";
-import { probeVideo, openRecorderWindow } from "../../lib/tauri/commands";
+import { probeVideo, recordScreenNative } from "../../lib/tauri/commands";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const C = { text: "#e0e0ea", textDim: "#8b8ba0", textMuted: "#5a5a6e", bg: "rgba(255,255,255,0.03)", border: "rgba(255,255,255,0.07)", accent: "#818cf8", inputBg: "rgba(255,255,255,0.04)" };
 const sectionLabel: CSSProperties = { fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10 };
@@ -13,17 +14,63 @@ const inputStyle: CSSProperties = { width: "100%", padding: "10px 14px", border:
 export function ProjectSetupScreen() {
   const { videoFile, contextDocuments, title, description } = useProjectStore();
   const { setVideoFile, addDocuments, removeDocument, setTitle, setDescription } = useProjectStore();
+  const projectId = useProjectStore((s) => s.projectId);
+  const [isRecording, setIsRecording] = useState(false);
 
-  // Listen for recorder-stopped event from the recorder window
+  const [recSeconds, setRecSeconds] = useState(0);
+
+  // Timer during recording
   useEffect(() => {
-    const unlisten = listen<{ path: string }>("recorder-stopped", async (event) => {
+    if (!isRecording) return;
+    const t = setInterval(() => setRecSeconds((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [isRecording]);
+
+  const handleRecordScreen = useCallback(async () => {
+    const isMac = navigator.userAgent.includes("Mac");
+    const outPath = `/tmp/narrator_recording_${projectId}.${isMac ? "mov" : "mp4"}`;
+    setIsRecording(true);
+    setRecSeconds(0);
+
+    if (isMac) {
+      // macOS: use native screencapture (Cmd+Shift+5 experience)
       try {
-        const m = await probeVideo(event.payload.path);
+        await getCurrentWindow().minimize();
+        await recordScreenNative(outPath);
+        await getCurrentWindow().unminimize();
+        await getCurrentWindow().setFocus();
+        const m = await probeVideo(outPath);
         setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
-      } catch (e) { console.error("Failed to load recording:", e); }
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, [setVideoFile]);
+      } catch (e: any) {
+        try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch {}
+        if (!String(e).includes("Cancelled")) console.error("Recording failed:", e);
+      } finally {
+        setIsRecording(false);
+      }
+    } else {
+      // Windows/Linux: use ffmpeg — minimize, start recording, user clicks Stop to finish
+      try {
+        await getCurrentWindow().minimize();
+        await invoke("start_recording", {
+          config: { output_path: outPath, screen_index: 0, width: 0, height: 0, fps: 30, offset_x: 0, offset_y: 0, capture_audio: false },
+        });
+      } catch (e) { console.error(e); }
+      // Recording is now running in background — user will click Stop
+    }
+  }, [projectId, setVideoFile]);
+
+  const handleStopRecording = useCallback(async () => {
+    try {
+      await invoke("stop_recording");
+      setIsRecording(false);
+      await getCurrentWindow().unminimize();
+      await getCurrentWindow().setFocus();
+      await new Promise((r) => setTimeout(r, 1500));
+      const outPath = `/tmp/narrator_recording_${projectId}.mp4`;
+      const m = await probeVideo(outPath);
+      setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+    } catch (e) { console.error(e); setIsRecording(false); }
+  }, [projectId, setVideoFile]);
 
   const handleVideoSelect = useCallback(async () => {
     const file = await open({ multiple: false, filters: [{ name: "Video", extensions: ["mp4", "mov", "avi", "mkv", "webm"] }] });
@@ -61,6 +108,31 @@ export function ProjectSetupScreen() {
             </div>
             <Button variant="ghost" size="sm" onClick={() => setVideoFile(null)}>Remove</Button>
           </div>
+        ) : isRecording ? (
+          /* Windows recording in progress — clean stop UI */
+          <div style={{
+            padding: "28px 20px", borderRadius: 12,
+            border: "2px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.04)",
+            textAlign: "center",
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 12 }}>
+              <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#ef4444", animation: "recpulse 1s infinite" }} />
+              <span style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 700, color: "#ef4444" }}>
+                {Math.floor(recSeconds / 60)}:{(recSeconds % 60).toString().padStart(2, "0")}
+              </span>
+            </div>
+            <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 16 }}>Recording your screen...</p>
+            <button onClick={handleStopRecording} style={{
+              padding: "10px 32px", borderRadius: 10, border: "none",
+              background: "#ef4444", color: "#fff", fontSize: 14, fontWeight: 600,
+              cursor: "pointer", fontFamily: "inherit",
+              display: "inline-flex", alignItems: "center", gap: 8,
+            }}>
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="12" height="12" rx="2"/></svg>
+              Stop Recording
+            </button>
+            <style>{`@keyframes recpulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`}</style>
+          </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <button onClick={handleVideoSelect} style={{
@@ -77,7 +149,7 @@ export function ProjectSetupScreen() {
               <div style={{ color: C.textMuted, fontSize: 11, marginTop: 3 }}>MP4, MOV, AVI, MKV, WebM</div>
             </button>
 
-            <button onClick={() => openRecorderWindow()} style={{
+            <button onClick={handleRecordScreen} style={{
               padding: "32px 20px", border: `2px dashed rgba(255,255,255,0.1)`, borderRadius: 12,
               background: "rgba(255,255,255,0.02)", cursor: "pointer", textAlign: "center", fontFamily: "inherit",
             }}

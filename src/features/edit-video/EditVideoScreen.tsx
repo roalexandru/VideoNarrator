@@ -14,257 +14,439 @@ const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255
 export function EditVideoScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
-  const { clips, selectedClipIndex, editedVideoPath, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipFps, selectClip, setEditedVideoPath } = useEditStore();
+  const store = useEditStore();
+  const { clips, selectedClipIndex, editedVideoPath, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSkipFrames, moveClip, selectClip, setEditedVideoPath } = store;
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const [videoDuration, setVideoDuration] = useState(0); // actual source video duration
   const [isPlaying, setIsPlaying] = useState(false);
+  const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
   const [thumbs, setThumbs] = useState<string[]>([]);
   const [applying, setApplying] = useState(false);
   const [applyPct, setApplyPct] = useState(0);
-  const [videoHover, setVideoHover] = useState(false);
+  const [zoom, setZoom] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [timelineHeight, setTimelineHeight] = useState(() => {
+    const saved = localStorage.getItem("narrator_timeline_height");
+    return saved ? parseInt(saved) : 130;
+  });
+  const [resizingTimeline, setResizingTimeline] = useState(false);
+  const [dragClipIdx, setDragClipIdx] = useState<number | null>(null);
+
+  // Persist timeline height
+  useEffect(() => { localStorage.setItem("narrator_timeline_height", String(timelineHeight)); }, [timelineHeight]);
 
   const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
   const selClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
+  const outputDuration = store.getOutputDuration();
 
-  // Init timeline from video
+  // Init clips when video loads
   useEffect(() => {
-    if (videoFile?.duration && clips.length === 0) initFromVideo(videoFile.duration);
-  }, [videoFile?.duration, clips.length, initFromVideo]);
+    if (videoDuration > 0) {
+      const clipsEnd = clips.length > 0 ? clips.reduce((s, c) => s + (c.sourceEnd - c.sourceStart), 0) : 0;
+      if (clips.length === 0 || Math.abs(clipsEnd - videoDuration) > 2) {
+        useEditStore.getState().reset();
+        initFromVideo(videoDuration);
+      }
+    }
+  }, [videoDuration]);
 
   // Load video
   useEffect(() => { const v = videoRef.current; if (v && src) { v.src = src; v.load(); } }, [src]);
 
   useEffect(() => {
     const v = videoRef.current; if (!v) return;
-    const h = { time: () => setCurrentTime(v.currentTime), meta: () => setDuration(v.duration || 0), play: () => setIsPlaying(true), pause: () => setIsPlaying(false) };
-    v.addEventListener("timeupdate", h.time); v.addEventListener("loadedmetadata", h.meta); v.addEventListener("play", h.play); v.addEventListener("pause", h.pause);
-    return () => { v.removeEventListener("timeupdate", h.time); v.removeEventListener("loadedmetadata", h.meta); v.removeEventListener("play", h.play); v.removeEventListener("pause", h.pause); };
-  }, []);
+    const onMeta = () => setVideoDuration(v.duration || 0);
+    const onTime = () => {
+      if (dragging) return;
+      // Convert source time back to output time
+      const sourceT = v.currentTime;
+      let cumOut = 0;
+      for (const clip of clips) {
+        const clipSourceDur = clip.sourceEnd - clip.sourceStart;
+        if (sourceT >= clip.sourceStart && sourceT <= clip.sourceEnd) {
+          cumOut += (sourceT - clip.sourceStart) / clip.speed;
+          setOutputTime(cumOut);
+          return;
+        }
+        cumOut += clipSourceDur / clip.speed;
+      }
+      setOutputTime(cumOut);
+    };
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    v.addEventListener("loadedmetadata", onMeta); v.addEventListener("timeupdate", onTime);
+    v.addEventListener("play", onPlay); v.addEventListener("pause", onPause);
+    return () => { v.removeEventListener("loadedmetadata", onMeta); v.removeEventListener("timeupdate", onTime); v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause); };
+  }, [dragging, clips]);
 
-  // Extract thumbnails for editing timeline
+  // Extract thumbnails
   useEffect(() => {
     if (!videoFile?.path) return;
-    // Use a temp dir for edit thumbnails — these are separate from processing frames
-    const dir = `/tmp/narrator_edit_thumbs_${projectId || "tmp"}`;
-    extractEditThumbnails(videoFile.path, dir, 50)
-      .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p))))
-      .catch((e) => console.error("Thumbnail extraction:", e));
+    // Scale thumbnail count: short videos get more detail, long videos fewer to stay fast
+    const dur = videoFile.duration || 120;
+    const thumbCount = dur > 600 ? 30 : dur > 300 ? 40 : 60;
+    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || "tmp"}`, thumbCount)
+      .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p)))).catch(() => {});
   }, [videoFile?.path, projectId]);
+
+  // Seek video to an output timeline position + set correct playback rate
+  const seekToOutput = useCallback((t: number) => {
+    const clamped = Math.max(0, Math.min(outputDuration, t));
+    setOutputTime(clamped);
+    const sourceT = store.outputTimeToSource(clamped);
+    if (videoRef.current) {
+      videoRef.current.currentTime = sourceT;
+      // Find which clip we're in and set playback rate
+      let cum = 0;
+      for (const clip of clips) {
+        const d = (clip.sourceEnd - clip.sourceStart) / clip.speed;
+        if (clamped < cum + d) {
+          videoRef.current.playbackRate = clip.speed;
+          break;
+        }
+        cum += d;
+      }
+    }
+  }, [outputDuration, store, clips]);
+
+  // During playback: handle clip transitions (skip gaps, change speed at boundaries)
+  useEffect(() => {
+    if (!isPlaying || !videoRef.current) return;
+    const v = videoRef.current;
+    const interval = setInterval(() => {
+      const sourceT = v.currentTime;
+      // Find which clip contains current source time
+      let inClip = false;
+      for (let i = 0; i < clips.length; i++) {
+        const clip = clips[i];
+        if (sourceT >= clip.sourceStart - 0.1 && sourceT <= clip.sourceEnd + 0.1) {
+          // In this clip — set correct playback rate
+          if (Math.abs(v.playbackRate - clip.speed) > 0.01) {
+            v.playbackRate = clip.speed;
+          }
+          // If we've reached the end of this clip, jump to next clip's source start
+          if (sourceT >= clip.sourceEnd - 0.05 && i < clips.length - 1) {
+            v.currentTime = clips[i + 1].sourceStart;
+            v.playbackRate = clips[i + 1].speed;
+          }
+          inClip = true;
+          break;
+        }
+      }
+      // If source time is between clips (in a deleted section), skip to the next clip
+      if (!inClip) {
+        for (const clip of clips) {
+          if (sourceT < clip.sourceStart) {
+            v.currentTime = clip.sourceStart;
+            v.playbackRate = clip.speed;
+            break;
+          }
+        }
+      }
+      // If past the last clip, pause
+      if (clips.length > 0 && sourceT >= clips[clips.length - 1].sourceEnd) {
+        v.pause();
+      }
+    }, 50);
+    return () => clearInterval(interval);
+  }, [isPlaying, clips]);
 
   // Keyboard
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
-      const t = (e.target as HTMLElement).tagName;
-      if (t === "INPUT" || t === "TEXTAREA") return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.code === "Space") { e.preventDefault(); togglePlay(); }
-      if (e.code === "KeyS") { e.preventDefault(); handleSplit(); }
-      if ((e.code === "Delete" || e.code === "Backspace") && selectedClipIndex !== null) { e.preventDefault(); deleteClip(selectedClipIndex); }
+      if (e.code === "KeyS") { e.preventDefault(); splitAt(outputTime); }
+      if ((e.code === "Delete" || e.code === "Backspace") && selectedClipIndex !== null && clips.length > 1) { e.preventDefault(); deleteClip(selectedClipIndex); }
+      if (e.code === "ArrowLeft") { e.preventDefault(); seekToOutput(outputTime - 1); }
+      if (e.code === "ArrowRight") { e.preventDefault(); seekToOutput(outputTime + 1); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
-  }, [isPlaying, selectedClipIndex, currentTime]);
+  }, [isPlaying, selectedClipIndex, outputTime, clips.length, seekToOutput]);
 
   const togglePlay = () => { const v = videoRef.current; if (!v) return; isPlaying ? v.pause() : v.play(); };
-  const seekTo = (s: number) => { if (videoRef.current) videoRef.current.currentTime = s; };
-  const handleSplit = useCallback(() => { if (currentTime > 0.5 && currentTime < duration - 0.5) splitAt(currentTime); }, [currentTime, duration, splitAt]);
 
   const handleApply = async () => {
     if (!videoFile?.path || clips.length === 0) return;
     setApplying(true); setApplyPct(0);
     try {
-      const outPath = `/tmp/narrator_edited_${projectId}.mp4`;
       const ch = new Channel<ProgressEvent>();
       ch.onmessage = (e: ProgressEvent) => { if (e.kind === "progress") setApplyPct(e.percent); };
-      const result = await applyVideoEdits(videoFile.path, outPath, {
-        clips: clips.map((c) => ({ start_seconds: c.startSeconds, end_seconds: c.endSeconds, speed: c.speed, fps_override: c.fpsOverride })),
+      const result = await applyVideoEdits(videoFile.path, `/tmp/narrator_edited_${projectId}.mp4`, {
+        clips: clips.map((c) => ({ start_seconds: c.sourceStart, end_seconds: c.sourceEnd, speed: c.speed, skip_frames: c.skipFrames, fps_override: c.fpsOverride })),
       }, ch);
       setEditedVideoPath(result);
-    } catch (err: any) { console.error("Apply failed:", err); }
+    } catch (err) { console.error("Apply failed:", err); }
     finally { setApplying(false); }
   };
 
-  const activeClipIdx = clips.findIndex((c) => currentTime >= c.startSeconds && currentTime < c.endSeconds);
-  const editedDur = clips.reduce((s, c) => s + (c.endSeconds - c.startSeconds) / c.speed, 0);
+  // Timeline layout: clips are contiguous, no gaps
+  const timelineWidth = timelineRef.current?.clientWidth || 800;
+  const pxPerSec = zoom > 0 ? zoom : (outputDuration > 0 ? timelineWidth / outputDuration : 1);
+  const totalPx = outputDuration * pxPerSec;
 
-  // Get thumbnail for a time position
-  const getThumb = (seconds: number): string | undefined => {
-    if (thumbs.length === 0 || duration <= 0) return undefined;
-    return thumbs[Math.min(Math.floor((seconds / duration) * thumbs.length), thumbs.length - 1)];
+  // Click timeline → seek. Use pxPerSec directly, not DOM measurements.
+  const handleTimelineClick = (e: React.MouseEvent) => {
+    if (!timelineRef.current || outputDuration <= 0 || dragging) return;
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left + timelineRef.current.scrollLeft;
+    const t = x / pxPerSec; // direct conversion — no DOM width needed
+    seekToOutput(Math.max(0, Math.min(outputDuration, t)));
+    let cum = 0;
+    for (let i = 0; i < clips.length; i++) {
+      const d = (clips[i].sourceEnd - clips[i].sourceStart) / clips[i].speed;
+      if (t >= cum && t < cum + d) { selectClip(i); break; }
+      cum += d;
+    }
   };
+
+  // Ctrl+Scroll zoom
+  const handleWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      setZoom(Math.max(0.5, Math.min(50, (zoom || pxPerSec) * (1 - e.deltaY * 0.002))));
+    }
+  };
+
+  // Playhead drag — capture pxPerSec at drag start for consistency
+  const handlePlayheadDown = (e: React.MouseEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    setDragging(true);
+    const pps = pxPerSec; // capture current zoom level
+    const dur = outputDuration;
+    const onMove = (me: MouseEvent) => {
+      if (!timelineRef.current) return;
+      const rect = timelineRef.current.getBoundingClientRect();
+      const x = me.clientX - rect.left + timelineRef.current.scrollLeft;
+      seekToOutput(Math.max(0, Math.min(dur, x / pps)));
+    };
+    const onUp = () => { setDragging(false); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
+  };
+
+  // Time ruler ticks based on OUTPUT duration
+  const tickInterval = pxPerSec > 20 ? 1 : pxPerSec > 5 ? 5 : pxPerSec > 2 ? 10 : pxPerSec > 0.5 ? 30 : 60;
+  const ticks: number[] = [];
+  for (let t = 0; t <= outputDuration; t += tickInterval) ticks.push(t);
+
+  const playheadLeft = outputTime * pxPerSec;
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      {/* Header */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexShrink: 0 }}>
-        <div>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text }}>Edit Video</h2>
-          <p style={{ color: C.muted, fontSize: 12 }}>
-            {clips.length} clip{clips.length !== 1 ? "s" : ""} &middot; {secondsToTimestamp(editedDur)} output
-            {editedVideoPath && <span style={{ color: "#4ade80", marginLeft: 8 }}>Applied</span>}
-          </p>
-        </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <Button variant="secondary" size="sm" onClick={() => { useEditStore.getState().reset(); if (videoFile?.duration) initFromVideo(videoFile.duration); }}>Reset</Button>
-          <Button size="sm" onClick={handleApply} disabled={applying || clips.length === 0}>{applying ? "Applying..." : "Apply Edits"}</Button>
-        </div>
+      {/* VIDEO PLAYER */}
+      <div style={{ borderRadius: 8, overflow: "hidden", background: "#000", flex: 1, minHeight: 100 }}>
+        <video ref={videoRef} playsInline style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
+        {!src && <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted }}>Select a video in Project Setup</div>}
       </div>
 
-      {applying && <ProgressBar value={applyPct} height={3} />}
-
-      {/* VIDEO */}
-      <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#000", flexShrink: 0, aspectRatio: "16/9", maxHeight: "40vh" }}
-        onMouseEnter={() => setVideoHover(true)} onMouseLeave={() => setVideoHover(false)}>
-        <video ref={videoRef} playsInline onClick={togglePlay} style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
-        {!src && <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted }}>Select a video in Project Setup first</div>}
-        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "14px 12px 6px", background: "linear-gradient(transparent, rgba(0,0,0,0.7))", opacity: videoHover ? 1 : 0, transition: "opacity 0.15s", display: "flex", alignItems: "center", gap: 8 }}>
-          <button onClick={togglePlay} style={{ background: "none", border: "none", cursor: "pointer", color: "#fff", display: "flex" }}>
-            {isPlaying ? <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-              : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
-          </button>
-          <span style={{ color: "#fff", fontSize: 11, fontFamily: "monospace" }}>{secondsToTimestamp(currentTime)} / {secondsToTimestamp(duration)}</span>
-        </div>
+      {/* TRANSPORT BAR */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+        <button onClick={() => seekToOutput(Math.max(0, outputTime - 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 20L9 12l10-8v16zM7 19V5H5v14h2z"/></svg>
+        </button>
+        <button onClick={togglePlay} style={{ background: "rgba(255,255,255,0.06)", border: "none", color: "#fff", cursor: "pointer", padding: 6, borderRadius: 6, display: "flex" }}>
+          {isPlaying
+            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            : <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
+        </button>
+        <button onClick={() => seekToOutput(Math.min(outputDuration, outputTime + 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M5 4l10 8-10 8V4zm12-1v14h2V5h-2z"/></svg>
+        </button>
+        <span style={{ fontFamily: "monospace", fontSize: 13, color: C.text, fontWeight: 600, minWidth: 110 }}>
+          {secondsToTimestamp(outputTime)} / {secondsToTimestamp(outputDuration)}
+        </span>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 11, color: C.muted }}>
+          {clips.length} clip{clips.length !== 1 ? "s" : ""}
+          {editedVideoPath && <span style={{ color: "#4ade80", marginLeft: 6 }}>Applied</span>}
+        </span>
+        <Button variant="secondary" size="sm" onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Reset</Button>
+        <Button size="sm" onClick={handleApply} disabled={applying || clips.length === 0}>{applying ? `${Math.round(applyPct)}%` : "Apply Edits"}</Button>
       </div>
 
-      {/* TIMELINE + TOOLS */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", marginTop: 10, minHeight: 0 }}>
-        {/* Scrubber */}
-        <div onClick={(e) => { if (!duration) return; const r = e.currentTarget.getBoundingClientRect(); seekTo(((e.clientX - r.left) / r.width) * duration); }}
-          style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, cursor: "pointer", position: "relative", marginBottom: 6, flexShrink: 0 }}>
-          <div style={{ height: "100%", width: duration > 0 ? `${(currentTime / duration) * 100}%` : "0%", background: C.accent, borderRadius: 2 }} />
-          {duration > 0 && <div style={{ position: "absolute", top: -5, left: `${(currentTime / duration) * 100}%`, transform: "translateX(-50%)", width: 14, height: 14, borderRadius: "50%", background: "#ef4444", border: "2px solid #0f0f15" }} />}
-        </div>
+      {applying && <ProgressBar value={applyPct} height={2} />}
 
-        {/* Thumbnail timeline with clip regions */}
-        <div style={{ position: "relative", height: 56, borderRadius: 6, overflow: "hidden", flexShrink: 0, marginBottom: 8 }}>
-          {/* Background thumbnails */}
-          <div style={{ display: "flex", height: "100%", gap: 0 }}>
-            {thumbs.length > 0 ? thumbs.map((t, i) => (
-              <div key={i} style={{ flex: 1, backgroundImage: `url(${t})`, backgroundSize: "cover", backgroundPosition: "center", minWidth: 1, filter: "brightness(0.3)" }} />
-            )) : (
-              <div style={{ flex: 1, background: "rgba(255,255,255,0.03)" }} />
-            )}
-          </div>
+      {/* RESIZE HANDLE */}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          setResizingTimeline(true);
+          const startY = e.clientY;
+          const startH = timelineHeight;
+          const onMove = (me: MouseEvent) => setTimelineHeight(Math.max(90, Math.min(400, startH - (me.clientY - startY))));
+          const onUp = () => { setResizingTimeline(false); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+          document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
+        }}
+        style={{
+          height: 6, cursor: "row-resize", flexShrink: 0,
+          background: resizingTimeline ? "rgba(99,102,241,0.3)" : "transparent",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          transition: resizingTimeline ? "none" : "background 0.15s",
+        }}
+        onMouseEnter={(e) => { if (!resizingTimeline) e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+        onMouseLeave={(e) => { if (!resizingTimeline) e.currentTarget.style.background = "transparent"; }}
+      >
+        <div style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(255,255,255,0.15)" }} />
+      </div>
 
-          {/* Clip overlay regions (bright) */}
-          {clips.map((clip, i) => {
-            const left = duration > 0 ? (clip.startSeconds / duration) * 100 : 0;
-            const width = duration > 0 ? ((clip.endSeconds - clip.startSeconds) / duration) * 100 : 100;
-            const isSelected = i === selectedClipIndex;
-            const isActive = i === activeClipIdx;
-            return (
-              <div key={clip.id} onClick={() => { selectClip(i); seekTo(clip.startSeconds); }}
-                style={{
-                  position: "absolute", top: 0, bottom: 0, left: `${left}%`, width: `${width}%`,
-                  display: "flex", overflow: "hidden", cursor: "pointer",
-                  border: isSelected ? "2px solid #6366f1" : isActive ? "1px solid rgba(99,102,241,0.4)" : "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 3, boxSizing: "border-box",
-                }}>
-                {/* Show actual thumbnails for this clip */}
-                {thumbs.length > 0 && (() => {
-                  const startIdx = Math.floor((clip.startSeconds / duration) * thumbs.length);
-                  const endIdx = Math.ceil((clip.endSeconds / duration) * thumbs.length);
-                  const clipThumbs = thumbs.slice(startIdx, endIdx);
-                  return clipThumbs.map((t, j) => (
-                    <div key={j} style={{ flex: 1, backgroundImage: `url(${t})`, backgroundSize: "cover", backgroundPosition: "center", minWidth: 1 }} />
-                  ));
-                })()}
-                {/* Speed/FPS badge */}
-                {(clip.speed !== 1.0 || clip.fpsOverride) && (
-                  <div style={{ position: "absolute", bottom: 2, left: 4, display: "flex", gap: 3 }}>
-                    {clip.speed !== 1.0 && <span style={{ fontSize: 9, padding: "1px 4px", borderRadius: 3, background: "rgba(168,85,247,0.8)", color: "#fff", fontWeight: 700 }}>{clip.speed}x</span>}
-                    {clip.fpsOverride && <span style={{ fontSize: 9, padding: "1px 4px", borderRadius: 3, background: "rgba(245,158,11,0.8)", color: "#fff", fontWeight: 700 }}>{clip.fpsOverride}fps</span>}
-                  </div>
-                )}
-                {/* Timestamp */}
-                <div style={{ position: "absolute", top: 2, left: 4, fontSize: 9, color: "rgba(255,255,255,0.8)", fontFamily: "monospace", textShadow: "0 1px 2px rgba(0,0,0,0.5)" }}>
-                  {secondsToTimestamp(clip.startSeconds)}
+      {/* TIMELINE */}
+      <div style={{ height: timelineHeight, minHeight: 90, display: "flex", flexDirection: "column", flexShrink: 0 }}>
+        <div ref={timelineRef} onWheel={handleWheel} onClick={handleTimelineClick}
+          style={{ flex: 1, overflowX: "auto", overflowY: "hidden", position: "relative", cursor: "crosshair", background: "rgba(255,255,255,0.01)" }}>
+          <div style={{ width: Math.max(totalPx, timelineWidth), minHeight: "100%", position: "relative" }}>
+            {/* Time ruler */}
+            <div style={{ height: 22, borderBottom: `1px solid ${C.border}`, position: "relative" }}>
+              {ticks.map((t) => (
+                <div key={t} style={{ position: "absolute", left: t * pxPerSec, top: 0, height: "100%", borderLeft: "1px solid rgba(255,255,255,0.06)", paddingLeft: 4 }}>
+                  <span style={{ fontSize: 9, color: C.muted, fontFamily: "monospace" }}>{secondsToTimestamp(t)}</span>
                 </div>
-              </div>
-            );
-          })}
-
-          {/* Playhead */}
-          {duration > 0 && (
-            <div style={{ position: "absolute", top: 0, bottom: 0, left: `${(currentTime / duration) * 100}%`, width: 2, background: "#ef4444", zIndex: 10, pointerEvents: "none" }}>
-              <div style={{ width: 8, height: 8, background: "#ef4444", borderRadius: "50%", position: "absolute", top: -4, left: -3 }} />
+              ))}
             </div>
-          )}
-        </div>
 
-        {/* Tools + Clip list */}
-        <div style={{ flex: 1, display: "grid", gridTemplateColumns: "160px 1fr", gap: 10, minHeight: 0, overflowY: "auto" }}>
-          {/* Tools */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1 }}>Tools</div>
+            {/* Clip blocks — CONTIGUOUS, draggable for reorder */}
+            <div style={{ position: "relative", height: 64 }}>
+              {(() => {
+                let cumPx = 0;
+                return clips.map((clip, i) => {
+                  const clipOutputDur = (clip.sourceEnd - clip.sourceStart) / clip.speed;
+                  const clipPx = clipOutputDur * pxPerSec;
+                  const left = cumPx;
+                  cumPx += clipPx;
+                  const isSel = i === selectedClipIndex;
+                  const isDragging = dragClipIdx === i;
 
-            <button onClick={handleSplit} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 6, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/></svg>
-              Split (S)
-            </button>
+                  const startIdx = Math.floor((clip.sourceStart / videoDuration) * thumbs.length);
+                  const endIdx = Math.ceil((clip.sourceEnd / videoDuration) * thumbs.length);
+                  const clipThumbs = thumbs.slice(startIdx, Math.max(startIdx + 1, endIdx));
 
-            <button onClick={() => { if (selectedClipIndex !== null) deleteClip(selectedClipIndex); }} disabled={selectedClipIndex === null || clips.length <= 1}
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 6, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", color: selectedClipIndex !== null && clips.length > 1 ? "#f87171" : "#2a2a3a", fontSize: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-              Delete (Del)
-            </button>
-
-            {selClip && (
-              <>
-                <div style={{ padding: "8px", borderRadius: 6, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)" }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: C.dim, marginBottom: 4 }}>Speed ({selClip.speed.toFixed(1)}x)</div>
-                  <input type="range" min="0.25" max="4" step="0.25" value={selClip.speed}
-                    onChange={(e) => setClipSpeed(selectedClipIndex!, parseFloat(e.target.value))}
-                    style={{ width: "100%", accentColor: "#6366f1" }} />
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.muted }}><span>0.25x</span><span>1x</span><span>4x</span></div>
-                </div>
-
-                <div style={{ padding: "8px", borderRadius: 6, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)" }}>
-                  <div style={{ fontSize: 10, fontWeight: 600, color: C.dim, marginBottom: 4 }}>FPS ({selClip.fpsOverride ? `${selClip.fpsOverride}` : "Original"})</div>
-                  <input type="range" min="0" max="30" step="5" value={selClip.fpsOverride || 0}
-                    onChange={(e) => { const v = parseInt(e.target.value); setClipFps(selectedClipIndex!, v === 0 ? null : v); }}
-                    style={{ width: "100%", accentColor: "#6366f1" }} />
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: C.muted }}><span>Orig</span><span>15</span><span>30</span></div>
-                  <p style={{ fontSize: 9, color: C.muted, marginTop: 3 }}>Skip loading screens</p>
-                </div>
-              </>
-            )}
-          </div>
-
-          {/* Clip list */}
-          <div style={{ overflowY: "auto" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Clips ({clips.length})</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {clips.map((clip, i) => {
-                const isSel = i === selectedClipIndex;
-                const dur = (clip.endSeconds - clip.startSeconds) / clip.speed;
-                const thumb = getThumb(clip.startSeconds);
-                return (
-                  <div key={clip.id} onClick={() => { selectClip(i); seekTo(clip.startSeconds); }}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 10, padding: "6px 8px", borderRadius: 6, cursor: "pointer",
-                      background: isSel ? "rgba(99,102,241,0.08)" : "transparent",
-                      borderLeft: isSel ? "3px solid #6366f1" : "3px solid transparent",
-                    }}>
-                    {/* Mini thumbnail */}
-                    <div style={{ width: 48, height: 28, borderRadius: 4, overflow: "hidden", flexShrink: 0, background: "#1a1a24" }}>
-                      {thumb && <img src={thumb} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontFamily: "monospace", fontSize: 11, color: isSel ? C.accent : C.dim }}>
-                        {secondsToTimestamp(clip.startSeconds)} - {secondsToTimestamp(clip.endSeconds)}
+                  return (
+                    <div key={clip.id}
+                      draggable
+                      onDragStart={(e) => { setDragClipIdx(i); e.dataTransfer.effectAllowed = "move"; }}
+                      onDragEnd={() => setDragClipIdx(null)}
+                      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; }}
+                      onDrop={(e) => { e.preventDefault(); if (dragClipIdx !== null && dragClipIdx !== i) moveClip(dragClipIdx, i); setDragClipIdx(null); }}
+                      style={{
+                        position: "absolute", top: 2, height: 60, left, width: Math.max(clipPx, 3),
+                        borderRadius: 4, overflow: "hidden",
+                        pointerEvents: "auto", cursor: "grab",
+                        border: isSel ? "2px solid #6366f1" : isDragging ? "2px dashed #6366f1" : "1px solid rgba(255,255,255,0.1)",
+                        opacity: isDragging ? 0.5 : 1,
+                        display: "flex", transition: "opacity 0.15s",
+                      }}>
+                      {clipThumbs.map((t, j) => (
+                        <div key={j} style={{ flex: 1, backgroundImage: `url(${t})`, backgroundSize: "cover", backgroundPosition: "center", minWidth: 1, pointerEvents: "none" }} />
+                      ))}
+                      {clip.speed !== 1.0 && (
+                        <div style={{ position: "absolute", bottom: 2, left: 4, pointerEvents: "none" }}>
+                          <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: clip.skipFrames ? "rgba(245,158,11,0.85)" : "rgba(168,85,247,0.85)", color: "#fff", fontWeight: 700 }}>
+                            {clip.speed}x{clip.skipFrames ? " skip" : ""}
+                          </span>
+                        </div>
+                      )}
+                      {/* Clip number */}
+                      <div style={{ position: "absolute", top: 2, left: 4, fontSize: 9, color: "rgba(255,255,255,0.6)", fontWeight: 600, pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.5)" }}>
+                        {i + 1}
                       </div>
-                      <div style={{ fontSize: 10, color: C.muted }}>{dur.toFixed(1)}s output</div>
                     </div>
-                    <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                      {clip.speed !== 1.0 && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "rgba(168,85,247,0.12)", color: "#a855f7", fontWeight: 700 }}>{clip.speed}x</span>}
-                      {clip.fpsOverride && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "rgba(245,158,11,0.12)", color: "#f59e0b", fontWeight: 700 }}>{clip.fpsOverride}fps</span>}
-                    </div>
+                  );
+                });
+              })()}
+
+              {/* Add media button at end of timeline */}
+              {(() => {
+                let endPx = 0;
+                clips.forEach((c) => { endPx += ((c.sourceEnd - c.sourceStart) / c.speed) * pxPerSec; });
+                return (
+                  <div
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      const { open } = await import("@tauri-apps/plugin-dialog");
+                      const file = await open({ multiple: false, filters: [{ name: "Media", extensions: ["mp4", "mov", "avi", "mkv", "webm", "jpg", "jpeg", "png", "gif"] }] });
+                      if (!file) return;
+                      try {
+                        const { probeVideo } = await import("../../lib/tauri/commands");
+                        const m = await probeVideo(file as string);
+                        // For now, add as a clip from the same source video at the end
+                        // TODO: multi-source support requires backend changes
+                        // For images, this won't work yet - just videos from same source
+                        useEditStore.getState().addClip(file as string, 0, m.duration_seconds);
+                      } catch (err) { console.error("Failed to add media:", err); }
+                    }}
+                    style={{
+                      position: "absolute", top: 2, height: 60, left: endPx, width: 48,
+                      borderRadius: 4, cursor: "pointer", pointerEvents: "auto",
+                      border: "2px dashed rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.02)",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      flexDirection: "column", gap: 2, transition: "all 0.12s",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(99,102,241,0.4)"; e.currentTarget.style.background = "rgba(99,102,241,0.06)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </div>
                 );
-              })}
+              })()}
+            </div>
+
+            {/* Playhead */}
+            <div onMouseDown={handlePlayheadDown} style={{
+              position: "absolute", top: 0, bottom: 0, left: playheadLeft,
+              width: 2, background: "#ef4444", zIndex: 10, cursor: "col-resize",
+              boxShadow: "0 0 6px rgba(239,68,68,0.4)", pointerEvents: "auto",
+            }}>
+              <div style={{ position: "absolute", top: 0, left: -5, width: 12, height: 12, background: "#ef4444", borderRadius: "2px 2px 50% 50%", clipPath: "polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%)" }} />
             </div>
           </div>
+        </div>
+
+        {/* CLIP INSPECTOR */}
+        <div style={{ flexShrink: 0, padding: "8px 12px", borderTop: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12, minHeight: 44 }}>
+          {selClip ? (
+            <>
+              <span style={{ fontSize: 12, color: C.dim, fontWeight: 600 }}>
+                Clip {(selectedClipIndex ?? 0) + 1}/{clips.length}
+              </span>
+              <span style={{ fontSize: 11, color: C.muted }}>
+                src {secondsToTimestamp(selClip.sourceStart)}→{secondsToTimestamp(selClip.sourceEnd)} &middot; {((selClip.sourceEnd - selClip.sourceStart) / selClip.speed).toFixed(1)}s out
+              </span>
+              <div style={{ width: 1, height: 20, background: C.border }} />
+              <Button variant="secondary" size="sm" onClick={() => splitAt(outputTime)}>Split (S)</Button>
+              <Button variant="danger" size="sm" onClick={() => { if (selectedClipIndex !== null && clips.length > 1) deleteClip(selectedClipIndex); }} disabled={clips.length <= 1}>Delete</Button>
+              <div style={{ width: 1, height: 20, background: C.border }} />
+              <span style={{ fontSize: 11, color: C.muted }}>Speed</span>
+              <input type="range" min="0.25" max="10" step="0.25" value={selClip.speed} onChange={(e) => setClipSpeed(selectedClipIndex!, parseFloat(e.target.value))} style={{ width: 80, accentColor: "#6366f1" }} />
+              <span style={{ fontSize: 11, color: selClip.speed !== 1 ? "#a855f7" : C.muted, fontWeight: 600, minWidth: 28 }}>{selClip.speed}x</span>
+              {selClip.speed > 1 && (
+                <>
+                  <span style={{ fontSize: 10, color: C.muted, marginLeft: 2 }}>
+                    ({((selClip.sourceEnd - selClip.sourceStart)).toFixed(0)}s→{((selClip.sourceEnd - selClip.sourceStart) / selClip.speed).toFixed(0)}s)
+                  </span>
+                  <div style={{ width: 1, height: 20, background: C.border }} />
+                  {/* Speed mode vs Skip Frames toggle */}
+                  <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
+                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} style={{
+                      padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
+                      background: !selClip.skipFrames ? "rgba(168,85,247,0.2)" : "transparent",
+                      color: !selClip.skipFrames ? "#a855f7" : C.muted,
+                      cursor: "pointer", fontFamily: "inherit",
+                    }}>Fast</button>
+                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, true)} style={{
+                      padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
+                      background: selClip.skipFrames ? "rgba(245,158,11,0.2)" : "transparent",
+                      color: selClip.skipFrames ? "#f59e0b" : C.muted,
+                      cursor: "pointer", fontFamily: "inherit",
+                    }}>Skip</button>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <span style={{ fontSize: 12, color: C.muted }}>Click timeline to place playhead. Press S to split. Ctrl+Scroll to zoom.</span>
+          )}
         </div>
       </div>
     </div>

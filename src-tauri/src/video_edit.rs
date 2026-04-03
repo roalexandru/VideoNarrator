@@ -14,6 +14,8 @@ pub struct EditClip {
     pub start_seconds: f64,
     pub end_seconds: f64,
     pub speed: f64,
+    #[serde(default)]
+    pub skip_frames: bool,
     pub fps_override: Option<u32>,
 }
 
@@ -64,21 +66,35 @@ pub async fn apply_edits(
 
         // Build video filter chain
         let mut vfilters = Vec::new();
+        let needs_speed = (clip.speed - 1.0).abs() > 0.01;
 
         if let Some(fps) = clip.fps_override {
             vfilters.push(format!("fps={}", fps));
         }
 
-        if (clip.speed - 1.0).abs() > 0.01 {
-            vfilters.push(format!("setpts={:.4}*PTS", 1.0 / clip.speed));
+        if needs_speed {
+            if clip.skip_frames {
+                // Frame dropping mode: select every Nth frame, adjust timestamps
+                // This produces clean jump cuts instead of fast-forward jitter
+                // e.g., at 2x speed, keep every 2nd frame; at 3x, every 3rd
+                let n = clip.speed.round().max(2.0) as u32;
+                vfilters.push(format!("select='not(mod(n\\,{}))'", n));
+                vfilters.push("setpts=N/FRAME_RATE/TB".to_string());
+            } else {
+                // Normal speed mode: play all frames faster
+                vfilters.push(format!("setpts={:.4}*PTS", 1.0 / clip.speed));
+            }
         }
 
         if !vfilters.is_empty() {
             args.extend(["-vf".into(), vfilters.join(",")]);
         }
 
-        // Audio speed (atempo only supports 0.5-2.0 range per filter)
-        if (clip.speed - 1.0).abs() > 0.01 {
+        // Audio handling for speed changes
+        if needs_speed && clip.skip_frames {
+            // Skip frames mode: drop audio entirely (it would be choppy)
+            args.extend(["-an".into()]);
+        } else if needs_speed {
             let mut atempo_chain = Vec::new();
             let mut remaining = clip.speed;
             // Chain atempo filters for speeds outside 0.5-2.0
@@ -209,7 +225,7 @@ pub async fn extract_edit_thumbnails(
 
     let output = Command::new(ffmpeg.as_os_str())
         .args(["-y", "-i", video_path,
-            "-vf", &format!("fps=1/{:.3},scale=160:-1", interval),
+            "-vf", &format!("fps=1/{:.3},scale=120:-1", interval),
             "-q:v", "5",
             &format!("{}/thumb_%04d.jpg", output_dir)])
         .output().await

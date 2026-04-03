@@ -565,14 +565,15 @@ pub async fn open_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorE
     }
     tauri::WebviewWindowBuilder::new(
         &app, "recorder",
-        WebviewUrl::App("index.html?view=recorder".into()),
+        WebviewUrl::App("recorder.html".into()),
     )
-    .title("Narrator Recorder")
-    .inner_size(440.0, 320.0)
+    .title("")
+    .inner_size(520.0, 58.0)
     .resizable(false)
     .decorations(false)
     .always_on_top(true)
-    .center()
+    .skip_taskbar(true)
+    .position(400.0, 800.0)
     .build()
     .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
     Ok(())
@@ -589,16 +590,13 @@ pub async fn close_recorder_window(app: tauri::AppHandle) -> Result<(), Narrator
 
 // ── Screen recording commands ──
 
+/// Native screen recording: opens macOS Cmd+Shift+5 UI, blocks until done
 #[tauri::command]
-pub async fn list_screens() -> Result<Vec<screen_recorder::ScreenDevice>, NarratorError> {
-    screen_recorder::list_screens().await
+pub async fn record_screen_native(output_path: String) -> Result<String, NarratorError> {
+    screen_recorder::record_native(&output_path).await
 }
 
-#[tauri::command]
-pub async fn list_windows() -> Result<Vec<screen_recorder::WindowInfo>, NarratorError> {
-    screen_recorder::list_windows().await
-}
-
+/// Legacy ffmpeg recording (Windows fallback)
 #[tauri::command]
 pub async fn start_recording(
     state: tauri::State<'_, AppState>,
@@ -614,7 +612,6 @@ pub async fn stop_recording(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);
-    // Give ffmpeg time to finalize the file
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Ok(())
 }
