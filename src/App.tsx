@@ -8,6 +8,7 @@ import { useProcessingStore } from "./stores/processingStore";
 import { ProjectSetupScreen } from "./features/project-setup/ProjectSetupScreen";
 import { ConfigurationScreen } from "./features/configuration/ConfigurationScreen";
 import { ProcessingScreen } from "./features/processing/ProcessingScreen";
+import { EditVideoScreen } from "./features/edit-video/EditVideoScreen";
 import { ReviewScreen } from "./features/review/ReviewScreen";
 import { ExportScreen } from "./features/export/ExportScreen";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
@@ -23,13 +24,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   const handleNewProject = () => {
-    // Reset all stores for a fresh project with a new ID
     useProjectStore.getState().reset();
     useProjectStore.getState().setProjectId(crypto.randomUUID());
     useConfigStore.getState().reset();
     useScriptStore.getState().reset();
     useProcessingStore.getState().reset();
-    useWizardStore.getState().goToStep(0);
+    useWizardStore.getState().reset();
     setView("editor");
   };
 
@@ -38,41 +38,29 @@ export default function App() {
       const loaded = await loadProjectFull(id);
       const cfg = loaded.config;
 
-      // Populate project store
       const ps = useProjectStore.getState();
       ps.setProjectId(cfg.id);
       ps.setTitle(cfg.title);
       ps.setDescription(cfg.description);
 
-      // Try to probe video to get metadata
       try {
         const meta = await probeVideo(cfg.video_path);
         ps.setVideoFile({
-          path: meta.path,
-          name: meta.path.split("/").pop() || "video",
-          size: meta.file_size,
-          duration: meta.duration_seconds,
+          path: meta.path, name: meta.path.split("/").pop() || "video",
+          size: meta.file_size, duration: meta.duration_seconds,
           resolution: { width: meta.width, height: meta.height },
-          codec: meta.codec,
-          fps: meta.fps,
+          codec: meta.codec, fps: meta.fps,
         });
       } catch {
-        // Video file might have moved; still load the project
         ps.setVideoFile({
-          path: cfg.video_path,
-          name: cfg.video_path.split("/").pop() || "video",
-          size: 0, duration: 0,
-          resolution: { width: 0, height: 0 },
-          codec: "unknown", fps: 0,
+          path: cfg.video_path, name: cfg.video_path.split("/").pop() || "video",
+          size: 0, duration: 0, resolution: { width: 0, height: 0 }, codec: "unknown", fps: 0,
         });
       }
 
-      // Populate config store
       const cs = useConfigStore.getState();
       cs.setStyle(cfg.style as any);
-      cfg.languages.forEach((l) => {
-        if (!cs.languages.includes(l)) cs.toggleLanguage(l);
-      });
+      cfg.languages.forEach((l) => { if (!cs.languages.includes(l)) cs.toggleLanguage(l); });
       cs.setPrimaryLanguage(cfg.primary_language);
       cs.setFrameDensity(cfg.frame_config.density as FrameDensity);
       cs.setSceneThreshold(cfg.frame_config.scene_threshold);
@@ -82,42 +70,28 @@ export default function App() {
       cs.setTemperature(cfg.ai_config.temperature);
       cs.setCustomPrompt(cfg.custom_prompt);
 
-      // Populate script store
       const ss = useScriptStore.getState();
       ss.reset();
-      for (const [lang, script] of Object.entries(loaded.scripts)) {
-        ss.setScript(lang, script);
-      }
+      for (const [lang, script] of Object.entries(loaded.scripts)) ss.setScript(lang, script);
       if (cfg.primary_language) ss.setActiveLanguage(cfg.primary_language);
 
-      // Navigate to review if has scripts, otherwise project setup
+      // Navigate: has scripts → Review (step 4), otherwise → Project Setup (step 0)
       const hasScripts = Object.keys(loaded.scripts).length > 0;
-      useWizardStore.getState().goToStep(hasScripts ? 3 : 0);
-      // Mark previous steps as completed
+      const ws = useWizardStore.getState();
+      ws.reset();
       if (hasScripts) {
-        useWizardStore.getState().markCompleted(0);
-        useWizardStore.getState().markCompleted(1);
-        useWizardStore.getState().markCompleted(2);
+        for (let i = 0; i <= 3; i++) ws.markCompleted(i);
+        ws.goToStep(4); // Review
       }
 
       setView("editor");
-    } catch (err) {
-      console.error("Failed to load project:", err);
-    }
-  };
-
-  const handleBackToLibrary = () => {
-    setView("library");
+    } catch (err) { console.error("Failed to load project:", err); }
   };
 
   if (view === "library") {
     return (
       <>
-        <ProjectLibrary
-          onNewProject={handleNewProject}
-          onOpenProject={handleOpenProject}
-          onOpenSettings={() => setShowSettings(true)}
-        />
+        <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
         {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
       </>
     );
@@ -125,15 +99,13 @@ export default function App() {
 
   return (
     <>
-      <WizardLayout
-        onOpenSettings={() => setShowSettings(true)}
-        onBackToLibrary={handleBackToLibrary}
-      >
+      <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
         {currentStep === 0 && <ProjectSetupScreen />}
-        {currentStep === 1 && <ConfigurationScreen />}
-        {currentStep === 2 && <ProcessingScreen />}
-        {currentStep === 3 && <ReviewScreen />}
-        {currentStep === 4 && <ExportScreen />}
+        {currentStep === 1 && <EditVideoScreen />}
+        {currentStep === 2 && <ConfigurationScreen />}
+        {currentStep === 3 && <ProcessingScreen />}
+        {currentStep === 4 && <ReviewScreen />}
+        {currentStep === 5 && <ExportScreen />}
       </WizardLayout>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </>

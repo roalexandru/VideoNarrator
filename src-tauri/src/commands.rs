@@ -1,6 +1,6 @@
 use crate::error::NarratorError;
 use crate::models::*;
-use crate::{ai_client, doc_processor, elevenlabs_client, export_engine, project_store, video_engine};
+use crate::{ai_client, doc_processor, elevenlabs_client, export_engine, project_store, screen_recorder, video_edit, video_engine};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -407,75 +407,88 @@ pub async fn generate_tts(
 
         channel.send(ProgressEvent::Progress { percent: 85.0 }).ok();
 
-        // Merge: two-step approach — create silence base file, then overlay segments
+        // Merge using concat demuxer: silence gaps + segments in sequence
+        // This preserves full volume for each segment (no amix normalization)
         if !segment_files.is_empty() {
             let final_path = out.join("narration_full.mp3");
-            let silence_path = out.join("_tmp_silence.mp3");
             let ffmpeg = video_engine::detect_ffmpeg().unwrap_or_else(|_| PathBuf::from("ffmpeg"));
             let video_dur = segments.last().map(|s| s.end_seconds).unwrap_or(60.0);
-            let n = segment_files.len();
 
-            tracing::info!("Merging {} segments into {:.0}s audio", n, video_dur);
+            tracing::info!("Concat-merging {} segments into {:.0}s audio", segment_files.len(), video_dur);
 
-            // Step 1: Create silence base file matching video duration
-            let silence_ok = tokio::process::Command::new(ffmpeg.as_os_str())
-                .args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                    "-t", &format!("{:.3}", video_dur),
-                    "-codec:a", "libmp3lame", "-q:a", "2"])
-                .arg(silence_path.as_os_str())
-                .output().await
-                .map(|o| o.status.success()).unwrap_or(false);
+            // Build ordered list of files: silence gaps interleaved with segments
+            let mut concat_parts: Vec<PathBuf> = Vec::new();
+            let mut silence_idx = 0;
 
-            if !silence_ok {
-                tracing::error!("Failed to create silence base");
+            for (i, (_seg_idx, seg_path, start, end)) in segment_files.iter().enumerate() {
+                // Gap before this segment
+                let prev_end = if i == 0 { 0.0 } else { segment_files[i - 1].3 };
+                let gap = start - prev_end;
+
+                if gap > 0.05 {
+                    // Create a silence file for this gap
+                    let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                    let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                        .args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                            "-t", &format!("{:.3}", gap),
+                            "-codec:a", "libmp3lame", "-q:a", "2"])
+                        .arg(sil_path.as_os_str())
+                        .output().await;
+                    concat_parts.push(sil_path);
+                    silence_idx += 1;
+                }
+
+                // The segment audio itself
+                concat_parts.push(seg_path.clone());
             }
 
-            // Step 2: Overlay all segments at their timestamps onto the silence base
-            let mut merge_args: Vec<String> = vec!["-y".into()];
-            merge_args.push("-i".into());
-            merge_args.push(silence_path.to_string_lossy().to_string());
-
-            for (_, path, _, _) in &segment_files {
-                merge_args.push("-i".into());
-                merge_args.push(path.to_string_lossy().to_string());
+            // Trailing silence to reach full video duration
+            let last_end = segment_files.last().map(|s| s.3).unwrap_or(0.0);
+            if video_dur > last_end + 0.1 {
+                let trail = video_dur - last_end;
+                let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                    .args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                        "-t", &format!("{:.3}", trail),
+                        "-codec:a", "libmp3lame", "-q:a", "2"])
+                    .arg(sil_path.as_os_str())
+                    .output().await;
+                concat_parts.push(sil_path);
             }
 
-            // Build filter: delay each segment to its start time, then amix
-            let mut filter = String::new();
-            for (i, (_, _, start, _)) in segment_files.iter().enumerate() {
-                let delay_ms = (*start * 1000.0) as u64;
-                filter.push_str(&format!("[{}]adelay={}|{}[d{}];", i + 1, delay_ms, delay_ms, i));
-            }
-            filter.push_str("[0:a]");
-            for i in 0..n { filter.push_str(&format!("[d{}]", i)); }
-            filter.push_str(&format!("amix=inputs={}:duration=first:dropout_transition=0[out]", n + 1));
+            // Write concat list file
+            let concat_list_path = out.join("_concat_list.txt");
+            let concat_content: String = concat_parts.iter()
+                .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&concat_list_path, &concat_content)?;
 
-            merge_args.extend([
-                "-filter_complex".into(), filter,
-                "-map".into(), "[out]".into(),
-                "-codec:a".into(), "libmp3lame".into(),
-                "-q:a".into(), "2".into(),
-            ]);
-            merge_args.push(final_path.to_string_lossy().to_string());
+            channel.send(ProgressEvent::Progress { percent: 92.0 }).ok();
 
-            channel.send(ProgressEvent::Progress { percent: 90.0 }).ok();
+            // Run concat
+            let concat_output = tokio::process::Command::new(ffmpeg.as_os_str())
+                .args(["-y", "-f", "concat", "-safe", "0", "-i"])
+                .arg(concat_list_path.as_os_str())
+                .args(["-codec:a", "libmp3lame", "-q:a", "2"])
+                .arg(final_path.as_os_str())
+                .output().await;
 
-            match tokio::process::Command::new(ffmpeg.as_os_str()).args(&merge_args).output().await {
+            match concat_output {
                 Ok(o) if o.status.success() => {
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: 0,
                         file_path: final_path.to_string_lossy().to_string(),
-                        success: true,
-                        error: None,
+                        success: true, error: None,
                     });
                 }
                 Ok(o) => {
                     let stderr = String::from_utf8_lossy(&o.stderr);
-                    tracing::error!("ffmpeg merge failed: {}", &stderr[..stderr.len().min(500)]);
+                    tracing::error!("ffmpeg concat failed: {}", &stderr[..stderr.len().min(500)]);
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
                             segment_index: *idx, file_path: path.to_string_lossy().to_string(),
-                            success: true, error: Some("Merge failed — kept individual file".into()),
+                            success: true, error: Some("Concat failed — kept individual file".into()),
                         });
                     }
                 }
@@ -484,14 +497,19 @@ pub async fn generate_tts(
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
                             segment_index: *idx, file_path: path.to_string_lossy().to_string(),
-                            success: true, error: Some("Merge failed — kept individual file".into()),
+                            success: true, error: Some("Concat failed — kept individual file".into()),
                         });
                     }
                 }
             }
 
             // Clean up temp files
-            let _ = std::fs::remove_file(&silence_path);
+            let _ = std::fs::remove_file(&concat_list_path);
+            for part in &concat_parts {
+                if part.to_string_lossy().contains("_tmp_sil_") {
+                    let _ = std::fs::remove_file(part);
+                }
+            }
             for (_, path, _, _) in &segment_files {
                 let _ = std::fs::remove_file(path);
             }
@@ -528,6 +546,121 @@ pub async fn generate_tts(
 
     channel.send(ProgressEvent::Progress { percent: 100.0 }).ok();
     Ok(results)
+}
+
+#[tauri::command]
+pub async fn get_home_dir() -> Result<String, NarratorError> {
+    let dir = project_store::get_narrator_dir();
+    // Return parent of .narrator (= home dir)
+    Ok(dir.parent().unwrap_or(&dir).to_string_lossy().to_string())
+}
+
+// ── Recorder window ──
+
+#[tauri::command]
+pub async fn open_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
+    use tauri::{Manager, WebviewUrl};
+    if app.get_webview_window("recorder").is_some() {
+        return Ok(());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app, "recorder",
+        WebviewUrl::App("index.html?view=recorder".into()),
+    )
+    .title("Narrator Recorder")
+    .inner_size(440.0, 320.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .center()
+    .build()
+    .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("recorder") {
+        let _ = win.close();
+    }
+    Ok(())
+}
+
+// ── Screen recording commands ──
+
+#[tauri::command]
+pub async fn list_screens() -> Result<Vec<screen_recorder::ScreenDevice>, NarratorError> {
+    screen_recorder::list_screens().await
+}
+
+#[tauri::command]
+pub async fn list_windows() -> Result<Vec<screen_recorder::WindowInfo>, NarratorError> {
+    screen_recorder::list_windows().await
+}
+
+#[tauri::command]
+pub async fn start_recording(
+    state: tauri::State<'_, AppState>,
+    config: screen_recorder::RecordingConfig,
+) -> Result<String, NarratorError> {
+    state.cancel_flag.store(false, Ordering::SeqCst);
+    let flag = state.cancel_flag.clone();
+    screen_recorder::start_recording(&config, flag).await
+}
+
+#[tauri::command]
+pub async fn stop_recording(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), NarratorError> {
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    // Give ffmpeg time to finalize the file
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    Ok(())
+}
+
+// ── Video edit commands ──
+
+#[tauri::command]
+pub async fn apply_video_edits(
+    input_path: String,
+    output_path: String,
+    edits: video_edit::VideoEditPlan,
+    channel: Channel<ProgressEvent>,
+) -> Result<String, NarratorError> {
+    video_edit::apply_edits(&input_path, &output_path, &edits, |pct| {
+        channel.send(ProgressEvent::Progress { percent: pct }).ok();
+    }).await
+}
+
+#[tauri::command]
+pub async fn extract_edit_thumbnails(
+    video_path: String,
+    output_dir: String,
+    count: usize,
+) -> Result<Vec<String>, NarratorError> {
+    video_edit::extract_edit_thumbnails(&video_path, &output_dir, count).await
+}
+
+#[tauri::command]
+pub async fn merge_audio_video(
+    video_path: String,
+    audio_path: String,
+    output_path: String,
+    replace_audio: bool,
+) -> Result<String, NarratorError> {
+    video_edit::merge_audio_video(&video_path, &audio_path, &output_path, replace_audio).await
+}
+
+#[tauri::command]
+pub async fn open_folder(path: String) -> Result<(), NarratorError> {
+    #[cfg(target_os = "macos")]
+    { let _ = std::process::Command::new("open").arg(&path).spawn(); }
+    #[cfg(target_os = "windows")]
+    { let _ = std::process::Command::new("explorer").arg(&path).spawn(); }
+    #[cfg(target_os = "linux")]
+    { let _ = std::process::Command::new("xdg-open").arg(&path).spawn(); }
+    Ok(())
 }
 
 // ── Frame commands ──

@@ -100,6 +100,39 @@ export const loadProjectFull = (id: string) =>
 export const listProjectFrames = (projectId: string) =>
   invoke<{ index: number; path: string }[]>("list_project_frames", { projectId });
 
+// System
+export const getHomeDir = () => invoke<string>("get_home_dir");
+
+// Screen recording
+export interface ScreenDevice { index: number; name: string; is_screen: boolean; }
+export interface RecordingConfig {
+  output_path: string; screen_index: number;
+  width: number; height: number; fps: number;
+  offset_x: number; offset_y: number; capture_audio: boolean;
+}
+export const openRecorderWindow = () => invoke<void>("open_recorder_window");
+export const closeRecorderWindow = () => invoke<void>("close_recorder_window");
+export const listScreens = () => invoke<ScreenDevice[]>("list_screens");
+export interface WindowInfo { id: number; name: string; owner: string; }
+export const listWindows = () => invoke<WindowInfo[]>("list_windows");
+export const startRecording = (config: RecordingConfig) => invoke<string>("start_recording", { config });
+export const stopRecording = () => invoke<void>("stop_recording");
+
+// Video editing
+export interface VideoEditPlan {
+  clips: { start_seconds: number; end_seconds: number; speed: number; fps_override: number | null }[];
+}
+export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>
+  invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel });
+
+export const extractEditThumbnails = (videoPath: string, outputDir: string, count: number) =>
+  invoke<string[]>("extract_edit_thumbnails", { videoPath, outputDir, count });
+
+export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean) =>
+  invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio });
+
+export const openFolder = (path: string) => invoke<void>("open_folder", { path });
+
 // ElevenLabs
 export interface ElevenLabsConfig {
   api_key: string;

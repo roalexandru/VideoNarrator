@@ -6,6 +6,8 @@ mod error;
 mod export_engine;
 mod models;
 mod project_store;
+mod screen_recorder;
+mod video_edit;
 mod video_engine;
 
 use commands::AppState;
@@ -45,6 +47,17 @@ pub fn run() {
             commands::list_elevenlabs_voices,
             commands::validate_elevenlabs_key,
             commands::generate_tts,
+            commands::get_home_dir,
+            commands::open_recorder_window,
+            commands::close_recorder_window,
+            commands::list_screens,
+            commands::list_windows,
+            commands::start_recording,
+            commands::stop_recording,
+            commands::apply_video_edits,
+            commands::extract_edit_thumbnails,
+            commands::merge_audio_video,
+            commands::open_folder,
             commands::list_project_frames,
             commands::export_script,
             commands::list_styles,
