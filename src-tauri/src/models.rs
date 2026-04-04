@@ -152,7 +152,6 @@ pub enum Pace {
     Fast,
 }
 
-
 impl std::fmt::Display for Pace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
