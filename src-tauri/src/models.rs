@@ -1,3 +1,5 @@
+//! Data models and types shared between frontend and backend.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -243,16 +245,6 @@ pub struct GenerationParams {
     pub frame_config: FrameConfig,
     pub ai_config: AiConfig,
     pub custom_prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegenerateParams {
-    pub frames: Vec<Frame>,
-    pub context: String,
-    pub segment_index: usize,
-    pub style: String,
-    pub language: String,
-    pub ai_config: AiConfig,
 }
 
 // ── Export ──

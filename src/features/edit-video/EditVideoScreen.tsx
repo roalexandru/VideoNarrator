@@ -19,6 +19,7 @@ export function EditVideoScreen() {
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+  const dragHandlersRef = useRef<{ onMove: (e: MouseEvent) => void; onUp: () => void } | null>(null);
   const [videoDuration, setVideoDuration] = useState(0); // actual source video duration
   const [isPlaying, setIsPlaying] = useState(false);
   const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
@@ -28,14 +29,18 @@ export function EditVideoScreen() {
   const [zoom, setZoom] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(() => {
-    const saved = localStorage.getItem("narrator_timeline_height");
-    return saved ? parseInt(saved) : 130;
+    try {
+      const saved = localStorage.getItem("narrator_timeline_height");
+      return saved ? parseInt(saved) : 130;
+    } catch {
+      return 130;
+    }
   });
   const [resizingTimeline, setResizingTimeline] = useState(false);
   const [dragClipIdx, setDragClipIdx] = useState<number | null>(null);
 
   // Persist timeline height
-  useEffect(() => { localStorage.setItem("narrator_timeline_height", String(timelineHeight)); }, [timelineHeight]);
+  useEffect(() => { try { localStorage.setItem("narrator_timeline_height", String(timelineHeight)); } catch { /* storage full or unavailable */ } }, [timelineHeight]);
 
   const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
   const selClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
@@ -211,6 +216,17 @@ export function EditVideoScreen() {
     }
   };
 
+  // Clean up any lingering drag listeners on unmount
+  useEffect(() => {
+    return () => {
+      if (dragHandlersRef.current) {
+        document.removeEventListener("mousemove", dragHandlersRef.current.onMove);
+        document.removeEventListener("mouseup", dragHandlersRef.current.onUp);
+        dragHandlersRef.current = null;
+      }
+    };
+  }, []);
+
   // Playhead drag — capture pxPerSec at drag start for consistency
   const handlePlayheadDown = (e: React.MouseEvent) => {
     e.preventDefault(); e.stopPropagation();
@@ -223,7 +239,8 @@ export function EditVideoScreen() {
       const x = me.clientX - rect.left + timelineRef.current.scrollLeft;
       seekToOutput(Math.max(0, Math.min(dur, x / pps)));
     };
-    const onUp = () => { setDragging(false); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+    const onUp = () => { setDragging(false); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); dragHandlersRef.current = null; };
+    dragHandlersRef.current = { onMove, onUp };
     document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
   };
 
@@ -244,15 +261,15 @@ export function EditVideoScreen() {
 
       {/* TRANSPORT BAR */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
-        <button onClick={() => seekToOutput(Math.max(0, outputTime - 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+        <button aria-label="Skip back" onClick={() => seekToOutput(Math.max(0, outputTime - 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 20L9 12l10-8v16zM7 19V5H5v14h2z"/></svg>
         </button>
-        <button onClick={togglePlay} style={{ background: "rgba(255,255,255,0.06)", border: "none", color: "#fff", cursor: "pointer", padding: 6, borderRadius: 6, display: "flex" }}>
+        <button aria-label={isPlaying ? "Pause" : "Play"} onClick={togglePlay} style={{ background: "rgba(255,255,255,0.06)", border: "none", color: "#fff", cursor: "pointer", padding: 6, borderRadius: 6, display: "flex" }}>
           {isPlaying
             ? <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
             : <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
         </button>
-        <button onClick={() => seekToOutput(Math.min(outputDuration, outputTime + 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+        <button aria-label="Skip forward" onClick={() => seekToOutput(Math.min(outputDuration, outputTime + 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M5 4l10 8-10 8V4zm12-1v14h2V5h-2z"/></svg>
         </button>
         <span style={{ fontFamily: "monospace", fontSize: 13, color: C.text, fontWeight: 600, minWidth: 110 }}>

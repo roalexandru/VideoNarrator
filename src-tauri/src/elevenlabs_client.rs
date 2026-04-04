@@ -1,3 +1,5 @@
+//! ElevenLabs text-to-speech client for audio narration generation.
+
 use crate::error::NarratorError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -43,7 +45,10 @@ pub struct TtsResult {
 }
 
 pub async fn list_voices(api_key: &str) -> Result<Vec<ElevenLabsVoice>, NarratorError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
     let resp = client
         .get("https://api.elevenlabs.io/v2/voices?page_size=100")
         .header("xi-api-key", api_key)
@@ -97,7 +102,10 @@ pub async fn generate_speech(
     text: &str,
     output_path: &PathBuf,
 ) -> Result<(), NarratorError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format=mp3_44100_128",
         config.voice_id
@@ -145,7 +153,10 @@ pub async fn generate_speech(
 }
 
 pub async fn validate_key(api_key: &str) -> Result<bool, NarratorError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
     let key = api_key.trim();
 
     // Test with a minimal TTS request — this works even with restricted keys

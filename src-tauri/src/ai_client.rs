@@ -1,3 +1,5 @@
+//! Multi-provider AI client supporting Claude and OpenAI for narration generation.
+
 use crate::error::NarratorError;
 use crate::models::*;
 use crate::video_engine;
@@ -31,7 +33,10 @@ impl AiProvider for ClaudeProvider {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
 
         let body = json!({
             "model": self.model,
@@ -83,8 +88,9 @@ impl AiProvider for ClaudeProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
+                let truncated = if error_text.len() > 200 { &error_text[..200] } else { &error_text };
                 return Err(NarratorError::ApiError(format!(
-                    "Claude API error ({status}): {error_text}"
+                    "Claude API error ({status}): {truncated}"
                 )));
             }
         }
@@ -114,7 +120,10 @@ impl AiProvider for OpenAiProvider {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_default();
 
         // Convert user_message to OpenAI format
         let user_content = if user_message.is_array() {
@@ -192,8 +201,9 @@ impl AiProvider for OpenAiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
+                let truncated = if error_text.len() > 200 { &error_text[..200] } else { &error_text };
                 return Err(NarratorError::ApiError(format!(
-                    "OpenAI API error ({status}): {error_text}"
+                    "OpenAI API error ({status}): {truncated}"
                 )));
             }
         }
@@ -471,7 +481,10 @@ pub async fn validate_api_key(
     provider: &AiProviderKind,
     key: &str,
 ) -> Result<bool, NarratorError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_default();
 
     match provider {
         AiProviderKind::Claude => {

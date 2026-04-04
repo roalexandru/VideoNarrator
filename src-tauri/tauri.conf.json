@@ -20,11 +20,11 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob: data: stream:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://api.anthropic.com https://api.openai.com",
+      "csp": "default-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data:; media-src 'self' asset: http://asset.localhost blob: data: stream:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://api.anthropic.com https://api.openai.com https://api.elevenlabs.io",
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$HOME/.narrator/**", "$HOME/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**", "$VIDEO/**", "$TEMP/**", "/Users/**", "/tmp/**"],
+          "allow": ["$HOME/.narrator/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**", "$VIDEO/**", "$TEMP/**", "/tmp/**"],
           "deny": []
         }
       }

@@ -1,3 +1,5 @@
+//! Narrator - AI-powered video narration generator. Tauri application entry point.
+
 mod ai_client;
 mod commands;
 mod doc_processor;

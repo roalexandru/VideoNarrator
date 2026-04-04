@@ -1,3 +1,5 @@
+//! Video editing operations: trim, speed, frame dropping, and concatenation.
+
 use crate::error::NarratorError;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};

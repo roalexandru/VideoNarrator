@@ -1,5 +1,8 @@
+//! Error types for the Narrator application.
+
 use serde::Serialize;
 
+#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum NarratorError {
     #[error("ffmpeg not found. Install ffmpeg or configure the sidecar path.")]
@@ -40,6 +43,15 @@ pub enum NarratorError {
 
     #[error("No API key configured for provider: {0}")]
     NoApiKey(String),
+
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    #[error("Invalid response: {0}")]
+    InvalidResponse(String),
 }
 
 impl Serialize for NarratorError {

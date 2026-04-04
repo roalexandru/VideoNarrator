@@ -1,3 +1,5 @@
+//! Document processing for context extraction from MD, TXT, and PDF files.
+
 use crate::error::NarratorError;
 use crate::models::ProcessedDocument;
 use std::path::Path;

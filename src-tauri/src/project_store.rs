@@ -1,3 +1,5 @@
+//! Project persistence and management on the local filesystem.
+
 use crate::error::NarratorError;
 use crate::models::*;
 use std::path::{Path, PathBuf};
@@ -46,6 +48,7 @@ pub fn create_project(config: &ProjectConfig) -> Result<String, NarratorError> {
     Ok(config.id.clone())
 }
 
+#[allow(dead_code)]
 pub fn save_project(config: &ProjectConfig) -> Result<(), NarratorError> {
     let base = get_narrator_dir();
     let project_dir = base.join("projects").join(&config.id);

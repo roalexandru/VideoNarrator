@@ -13,9 +13,10 @@ import { EditVideoScreen } from "./features/edit-video/EditVideoScreen";
 import { ReviewScreen } from "./features/review/ReviewScreen";
 import { ExportScreen } from "./features/export/ExportScreen";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo } from "./lib/tauri/commands";
-import type { FrameDensity, AiProvider, ModelId } from "./types/config";
+import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 type AppView = "library" | "editor";
 
@@ -61,7 +62,8 @@ export default function App() {
       }
 
       const cs = useConfigStore.getState();
-      cs.setStyle(cfg.style as any);
+      const validStyles: NarrationStyleId[] = ["executive", "product_demo", "technical", "teaser", "training", "critique"];
+      if (validStyles.includes(cfg.style as NarrationStyleId)) cs.setStyle(cfg.style as NarrationStyleId);
       cfg.languages.forEach((l) => { if (!cs.languages.includes(l)) cs.toggleLanguage(l); });
       cs.setPrimaryLanguage(cfg.primary_language);
       cs.setFrameDensity(cfg.frame_config.density as FrameDensity);
@@ -102,12 +104,14 @@ export default function App() {
   return (
     <>
       <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
-        {currentStep === 0 && <ProjectSetupScreen />}
-        {currentStep === 1 && <EditVideoScreen />}
-        {currentStep === 2 && <ConfigurationScreen />}
-        {currentStep === 3 && <ProcessingScreen />}
-        {currentStep === 4 && <ReviewScreen />}
-        {currentStep === 5 && <ExportScreen />}
+        <ErrorBoundary>
+          {currentStep === 0 && <ProjectSetupScreen />}
+          {currentStep === 1 && <EditVideoScreen />}
+          {currentStep === 2 && <ConfigurationScreen />}
+          {currentStep === 3 && <ProcessingScreen />}
+          {currentStep === 4 && <ReviewScreen />}
+          {currentStep === 5 && <ExportScreen />}
+        </ErrorBoundary>
       </WizardLayout>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
     </>

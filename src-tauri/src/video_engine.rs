@@ -1,3 +1,5 @@
+//! Video processing engine using ffmpeg for frame extraction and probing.
+
 use crate::error::NarratorError;
 use crate::models::{Frame, FrameConfig, VideoMetadata};
 use std::path::{Path, PathBuf};

@@ -1,3 +1,6 @@
+//! Screen recording using native OS tools (macOS screencapture, Windows ffmpeg).
+#![allow(dead_code)]
+
 use crate::error::NarratorError;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
@@ -29,14 +32,6 @@ pub struct WindowInfo {
     pub id: u32,
     pub name: String,
     pub owner: String,
-}
-
-pub async fn list_screens() -> Result<Vec<ScreenDevice>, NarratorError> {
-    Ok(vec![ScreenDevice { index: 1, name: "Main Screen".into(), is_screen: true }])
-}
-
-pub async fn list_windows() -> Result<Vec<WindowInfo>, NarratorError> {
-    Ok(Vec::new())
 }
 
 /// macOS: Use native `screencapture -v` which opens Apple's Cmd+Shift+5 UI

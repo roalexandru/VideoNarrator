@@ -1,3 +1,5 @@
+//! Export formatters for narration scripts in JSON, SRT, VTT, TXT, MD, and SSML.
+
 use crate::models::{NarrationScript, Pace};
 
 pub fn export_json(script: &NarrationScript) -> String {

@@ -1,3 +1,5 @@
+//! Tauri command handlers for the Narrator application.
+
 use crate::error::NarratorError;
 use crate::models::*;
 use crate::{ai_client, doc_processor, elevenlabs_client, export_engine, project_store, screen_recorder, video_edit, video_engine};
@@ -47,12 +49,19 @@ fn load_config() -> PersistentConfig {
 fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     let path = config_path();
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(&path, json)?;
-    // Set file permissions to owner-only (600)
+    // Write atomically with restrictive permissions from the start
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(&path)?;
+        file.write_all(json.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, json)?;
     }
     Ok(())
 }
@@ -143,6 +152,9 @@ pub async fn validate_api_key_cmd(
 
 #[tauri::command]
 pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
+    if !Path::new(&path).exists() {
+        return Err(NarratorError::VideoProbeError("File not found".to_string()));
+    }
     video_engine::probe_video(Path::new(&path)).await
 }
 
@@ -166,6 +178,17 @@ pub async fn generate_narration(
     params: GenerationParams,
     channel: Channel<ProgressEvent>,
 ) -> Result<NarrationScript, NarratorError> {
+    // Input validation
+    if params.title.len() > 500 {
+        return Err(NarratorError::ApiError("Title must be 500 characters or fewer".to_string()));
+    }
+    if params.description.len() > 5000 {
+        return Err(NarratorError::ApiError("Description must be 5000 characters or fewer".to_string()));
+    }
+    if params.custom_prompt.len() > 10000 {
+        return Err(NarratorError::ApiError("Custom prompt must be 10000 characters or fewer".to_string()));
+    }
+
     state.cancel_flag.store(false, Ordering::SeqCst);
 
     let keys = state.api_keys.lock().await;
@@ -420,7 +443,7 @@ pub async fn generate_tts(
             let mut concat_parts: Vec<PathBuf> = Vec::new();
             let mut silence_idx = 0;
 
-            for (i, (_seg_idx, seg_path, start, end)) in segment_files.iter().enumerate() {
+            for (i, (_seg_idx, seg_path, start, _end)) in segment_files.iter().enumerate() {
                 // Gap before this segment
                 let prev_end = if i == 0 { 0.0 } else { segment_files[i - 1].3 };
                 let gap = start - prev_end;
