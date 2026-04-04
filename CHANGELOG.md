@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add CI/CD: PR quality gate and tag-triggered release pipelines
+- Add 90 component and store tests with coverage reporting
+
 ## v0.1.0 - Initial Release
 
 - 6-step wizard workflow: Project Setup, Edit Video, Configuration, Processing, Review, Export
