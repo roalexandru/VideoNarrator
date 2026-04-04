@@ -61,7 +61,9 @@ pub async fn record_native(output_path: &str) -> Result<String, NarratorError> {
             if stderr.is_empty() {
                 return Err(NarratorError::Cancelled);
             }
-            return Err(NarratorError::FfmpegFailed(format!("screencapture error: {stderr}")));
+            return Err(NarratorError::FfmpegFailed(format!(
+                "screencapture error: {stderr}"
+            )));
         }
 
         // Check if file was actually created (user might have cancelled)
@@ -77,10 +79,24 @@ pub async fn record_native(output_path: &str) -> Result<String, NarratorError> {
         // Windows fallback: use ffmpeg gdigrab
         let ffmpeg = video_engine::detect_ffmpeg()?;
         let output = tokio::process::Command::new(ffmpeg.as_os_str())
-            .args(["-y", "-f", "gdigrab", "-framerate", "30", "-i", "desktop",
-                "-vcodec", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                "-t", "300", // max 5 minutes
-                output_path])
+            .args([
+                "-y",
+                "-f",
+                "gdigrab",
+                "-framerate",
+                "30",
+                "-i",
+                "desktop",
+                "-vcodec",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-t",
+                "300", // max 5 minutes
+                output_path,
+            ])
             .output()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
@@ -94,7 +110,9 @@ pub async fn record_native(output_path: &str) -> Result<String, NarratorError> {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        Err(NarratorError::FfmpegFailed("Screen recording not supported on this platform".into()))
+        Err(NarratorError::FfmpegFailed(
+            "Screen recording not supported on this platform".into(),
+        ))
     }
 }
 
@@ -118,7 +136,10 @@ pub async fn start_recording(
         if config.width > 0 && config.height > 0 {
             cmd.args(["-offset_x", &config.offset_x.to_string()]);
             cmd.args(["-offset_y", &config.offset_y.to_string()]);
-            cmd.args(["-video_size", &format!("{}x{}", config.width, config.height)]);
+            cmd.args([
+                "-video_size",
+                &format!("{}x{}", config.width, config.height),
+            ]);
         }
         cmd.args(["-i", "desktop"]);
     }
@@ -126,17 +147,40 @@ pub async fn start_recording(
     #[cfg(target_os = "macos")]
     {
         let input = format!("{}:none", config.screen_index);
-        cmd.args(["-y", "-f", "avfoundation", "-capture_cursor", "1",
-            "-framerate", &config.fps.to_string(), "-i", &input]);
+        cmd.args([
+            "-y",
+            "-f",
+            "avfoundation",
+            "-capture_cursor",
+            "1",
+            "-framerate",
+            &config.fps.to_string(),
+            "-i",
+            &input,
+        ]);
         if config.width > 0 && config.height > 0 {
-            cmd.args(["-vf", &format!("crop={}:{}:{}:{}", config.width, config.height, config.offset_x, config.offset_y)]);
+            cmd.args([
+                "-vf",
+                &format!(
+                    "crop={}:{}:{}:{}",
+                    config.width, config.height, config.offset_x, config.offset_y
+                ),
+            ]);
         }
     }
 
-    cmd.args(["-vcodec", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"]);
+    cmd.args([
+        "-vcodec",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+    ]);
     cmd.arg(output_path);
 
-    let mut child = cmd.stdin(std::process::Stdio::piped())
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to start recording: {e}")))?;
 

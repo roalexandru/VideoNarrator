@@ -37,23 +37,26 @@ pub fn process_document(path: &Path) -> Result<ProcessedDocument, NarratorError>
 }
 
 fn process_markdown(path: &Path) -> Result<String, NarratorError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| NarratorError::DocumentError(format!("Failed to read {}: {e}", path.display())))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        NarratorError::DocumentError(format!("Failed to read {}: {e}", path.display()))
+    })?;
     // Return raw markdown — Claude handles markdown well
     Ok(raw)
 }
 
 fn process_text(path: &Path) -> Result<String, NarratorError> {
-    std::fs::read_to_string(path)
-        .map_err(|e| NarratorError::DocumentError(format!("Failed to read {}: {e}", path.display())))
+    std::fs::read_to_string(path).map_err(|e| {
+        NarratorError::DocumentError(format!("Failed to read {}: {e}", path.display()))
+    })
 }
 
 fn process_pdf(path: &Path) -> Result<String, NarratorError> {
     // Basic PDF text extraction — read the file bytes and try to extract text
     // Using a simple approach: if pdf-extract is available, use it
     // For now, return an error suggesting the user convert to text
-    let bytes = std::fs::read(path)
-        .map_err(|e| NarratorError::DocumentError(format!("Failed to read PDF {}: {e}", path.display())))?;
+    let bytes = std::fs::read(path).map_err(|e| {
+        NarratorError::DocumentError(format!("Failed to read PDF {}: {e}", path.display()))
+    })?;
 
     // Try basic text extraction from PDF bytes
     // Look for text between BT and ET markers (simplified PDF text extraction)
@@ -99,7 +102,7 @@ fn extract_pdf_text_basic(bytes: &[u8]) -> String {
     // If BT/ET extraction fails, just grab printable ASCII
     if result.trim().is_empty() {
         for &byte in bytes {
-            if byte >= 32 && byte < 127 {
+            if (32..127).contains(&byte) {
                 result.push(byte as char);
             } else if byte == b'\n' || byte == b'\r' {
                 result.push('\n');
@@ -139,7 +142,8 @@ pub fn truncate_to_budget(
             let char_budget = budget_remaining * 4;
             if doc.content.len() > char_budget {
                 doc.content = doc.content[..char_budget].to_string();
-                doc.content.push_str("\n\n[... document truncated to fit token budget ...]");
+                doc.content
+                    .push_str("\n\n[... document truncated to fit token budget ...]");
                 doc.token_estimate = budget_remaining;
             }
             result.push(doc);

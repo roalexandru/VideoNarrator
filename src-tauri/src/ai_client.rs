@@ -88,7 +88,11 @@ impl AiProvider for ClaudeProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = if error_text.len() > 200 { &error_text[..200] } else { &error_text };
+                let truncated = if error_text.len() > 200 {
+                    &error_text[..200]
+                } else {
+                    &error_text
+                };
                 return Err(NarratorError::ApiError(format!(
                     "Claude API error ({status}): {truncated}"
                 )));
@@ -201,7 +205,11 @@ impl AiProvider for OpenAiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = if error_text.len() > 200 { &error_text[..200] } else { &error_text };
+                let truncated = if error_text.len() > 200 {
+                    &error_text[..200]
+                } else {
+                    &error_text
+                };
                 return Err(NarratorError::ApiError(format!(
                     "OpenAI API error ({status}): {truncated}"
                 )));
@@ -220,10 +228,7 @@ impl AiProvider for OpenAiProvider {
 
 // ── Provider factory ──
 
-pub fn create_provider(
-    config: &AiConfig,
-    api_key: String,
-) -> Box<dyn AiProvider> {
+pub fn create_provider(config: &AiConfig, api_key: String) -> Box<dyn AiProvider> {
     match config.provider {
         AiProviderKind::Claude => Box::new(ClaudeProvider {
             api_key,
@@ -240,7 +245,11 @@ pub fn create_provider(
 
 // ── Narration generation ──
 
-pub fn build_system_prompt(style: &NarrationStyle, context_docs: &[ProcessedDocument], custom_prompt: &str) -> String {
+pub fn build_system_prompt(
+    style: &NarrationStyle,
+    context_docs: &[ProcessedDocument],
+    custom_prompt: &str,
+) -> String {
     let mut prompt = String::new();
 
     // Base instructions
@@ -396,7 +405,9 @@ pub async fn generate_narration(
             let scale = target / last_end;
             tracing::warn!(
                 "Script only covers {:.0}s of {:.0}s video. Scaling timestamps by {:.2}x",
-                last_end, target, scale
+                last_end,
+                target,
+                scale
             );
             for seg in &mut script.segments {
                 seg.start_seconds *= scale;
@@ -417,9 +428,10 @@ pub async fn generate_narration(
 
         // Even if not scaled, ensure gaps exist between contiguous segments
         // If all segments are back-to-back, add gaps
-        let all_contiguous = script.segments.windows(2).all(|w| {
-            (w[1].start_seconds - w[0].end_seconds).abs() < 0.1
-        });
+        let all_contiguous = script
+            .segments
+            .windows(2)
+            .all(|w| (w[1].start_seconds - w[0].end_seconds).abs() < 0.1);
         if all_contiguous && script.segments.len() > 1 {
             let total = script.total_duration_seconds;
             let n = script.segments.len() as f64;
@@ -477,10 +489,7 @@ pub async fn translate_script(
     Ok(translated)
 }
 
-pub async fn validate_api_key(
-    provider: &AiProviderKind,
-    key: &str,
-) -> Result<bool, NarratorError> {
+pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bool, NarratorError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -523,10 +532,7 @@ pub fn get_available_models(provider: &AiProviderKind) -> Vec<String> {
             "claude-sonnet-4-20250514".to_string(),
             "claude-opus-4-20250514".to_string(),
         ],
-        AiProviderKind::OpenAi => vec![
-            "gpt-4o".to_string(),
-            "o3".to_string(),
-        ],
+        AiProviderKind::OpenAi => vec!["gpt-4o".to_string(), "o3".to_string()],
     }
 }
 

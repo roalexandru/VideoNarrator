@@ -69,8 +69,9 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
         return Err(NarratorError::VideoProbeError(stderr.to_string()));
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}")))?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}"))
+    })?;
 
     let video_stream = json["streams"]
         .as_array()
@@ -167,7 +168,7 @@ pub async fn extract_frames(
         .filter(|e| {
             e.path()
                 .extension()
-                .map_or(false, |ext| ext == "jpg" || ext == "jpeg")
+                .is_some_and(|ext| ext == "jpg" || ext == "jpeg")
         })
         .collect();
 

@@ -22,8 +22,9 @@ pub fn ensure_directories() -> Result<(), NarratorError> {
         base.join("context_library"),
     ];
     for dir in &dirs {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| NarratorError::ProjectError(format!("Failed to create {}: {e}", dir.display())))?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            NarratorError::ProjectError(format!("Failed to create {}: {e}", dir.display()))
+        })?;
     }
     Ok(())
 }
@@ -130,24 +131,35 @@ pub fn list_projects() -> Result<Vec<ProjectSummary>, NarratorError> {
 }
 
 fn find_thumbnail(frames_dir: &Path) -> Option<String> {
-    if !frames_dir.exists() { return None; }
-    let mut entries: Vec<_> = std::fs::read_dir(frames_dir).ok()?
+    if !frames_dir.exists() {
+        return None;
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(frames_dir)
+        .ok()?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "jpg" || x == "jpeg" || x == "png"))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == "jpg" || x == "jpeg" || x == "png")
+        })
         .collect();
     entries.sort_by_key(|e| e.file_name());
-    entries.first().map(|e| e.path().to_string_lossy().to_string())
+    entries
+        .first()
+        .map(|e| e.path().to_string_lossy().to_string())
 }
 
 fn list_script_languages(scripts_dir: &Path) -> Vec<String> {
-    if !scripts_dir.exists() { return Vec::new(); }
+    if !scripts_dir.exists() {
+        return Vec::new();
+    }
     let mut langs = Vec::new();
     if let Ok(entries) = std::fs::read_dir(scripts_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             // Files like v1_en.json → extract "en"
             if let Some(stem) = name.strip_suffix(".json") {
-                if let Some(lang) = stem.split('_').last() {
+                if let Some(lang) = stem.split('_').next_back() {
                     if !langs.contains(&lang.to_string()) {
                         langs.push(lang.to_string());
                     }
@@ -168,15 +180,16 @@ pub fn load_project_full(id: &str) -> Result<LoadedProject, NarratorError> {
     if scripts_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
             // For each language, load the latest version
-            let mut files: Vec<_> = entries.flatten()
-                .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+            let mut files: Vec<_> = entries
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
                 .collect();
             files.sort_by_key(|e| e.file_name());
 
             for entry in files {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(stem) = name.strip_suffix(".json") {
-                    if let Some(lang) = stem.split('_').last() {
+                    if let Some(lang) = stem.split('_').next_back() {
                         if let Ok(json) = std::fs::read_to_string(entry.path()) {
                             if let Ok(script) = serde_json::from_str::<NarrationScript>(&json) {
                                 scripts.insert(lang.to_string(), script);
@@ -220,7 +233,8 @@ fn find_next_version(scripts_dir: &Path, language: &str) -> u32 {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.contains(language) && name.starts_with('v') {
-                if let Some(version_str) = name.strip_prefix('v').and_then(|s| s.split('_').next()) {
+                if let Some(version_str) = name.strip_prefix('v').and_then(|s| s.split('_').next())
+                {
                     if let Ok(v) = version_str.parse::<u32>() {
                         max_version = max_version.max(v);
                     }
@@ -242,7 +256,11 @@ pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
 pub fn load_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
     let styles_dir = get_narrator_dir().join("styles");
 
-    if !styles_dir.exists() || std::fs::read_dir(&styles_dir).map(|mut d| d.next().is_none()).unwrap_or(true) {
+    if !styles_dir.exists()
+        || std::fs::read_dir(&styles_dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    {
         return Ok(default_styles());
     }
 
@@ -252,7 +270,7 @@ pub fn load_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
         .map_err(|e| NarratorError::ProjectError(format!("Failed to read styles dir: {e}")))?
     {
         let entry = entry.map_err(|e| NarratorError::ProjectError(e.to_string()))?;
-        if entry.path().extension().map_or(false, |e| e == "toml") {
+        if entry.path().extension().is_some_and(|e| e == "toml") {
             let content = std::fs::read_to_string(entry.path())
                 .map_err(|e| NarratorError::ProjectError(e.to_string()))?;
             if let Ok(style) = toml::from_str::<NarrationStyle>(&content) {
@@ -378,9 +396,10 @@ mod tests {
         std::fs::write(project_dir.join("project.json"), &json).unwrap();
 
         // Verify we can read it back
-        let loaded: ProjectConfig =
-            serde_json::from_str(&std::fs::read_to_string(project_dir.join("project.json")).unwrap())
-                .unwrap();
+        let loaded: ProjectConfig = serde_json::from_str(
+            &std::fs::read_to_string(project_dir.join("project.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(loaded.title, "Test Project");
         assert_eq!(loaded.id, project_id);
     }

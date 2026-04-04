@@ -2,7 +2,10 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
-use crate::{ai_client, doc_processor, elevenlabs_client, export_engine, project_store, screen_recorder, video_edit, video_engine};
+use crate::{
+    ai_client, doc_processor, elevenlabs_client, export_engine, project_store, screen_recorder,
+    video_edit, video_engine,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,10 +55,13 @@ fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     // Write atomically with restrictive permissions from the start
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
         use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
         let mut file = std::fs::OpenOptions::new()
-            .write(true).create(true).truncate(true).mode(0o600)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
             .open(&path)?;
         file.write_all(json.as_bytes())?;
     }
@@ -80,8 +86,12 @@ impl AppState {
         let mut keys = std::collections::HashMap::new();
         for (k, v) in &config.api_keys {
             match k.as_str() {
-                "claude" => { keys.insert(AiProviderKind::Claude, v.clone()); }
-                "openai" => { keys.insert(AiProviderKind::OpenAi, v.clone()); }
+                "claude" => {
+                    keys.insert(AiProviderKind::Claude, v.clone());
+                }
+                "openai" => {
+                    keys.insert(AiProviderKind::OpenAi, v.clone());
+                }
                 _ => {}
             }
         }
@@ -161,7 +171,9 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
 // ── Document commands ──
 
 #[tauri::command]
-pub async fn process_documents(paths: Vec<String>) -> Result<Vec<ProcessedDocument>, NarratorError> {
+pub async fn process_documents(
+    paths: Vec<String>,
+) -> Result<Vec<ProcessedDocument>, NarratorError> {
     let mut docs = Vec::new();
     for path in paths {
         let doc = doc_processor::process_document(Path::new(&path))?;
@@ -180,13 +192,19 @@ pub async fn generate_narration(
 ) -> Result<NarrationScript, NarratorError> {
     // Input validation
     if params.title.len() > 500 {
-        return Err(NarratorError::ApiError("Title must be 500 characters or fewer".to_string()));
+        return Err(NarratorError::ApiError(
+            "Title must be 500 characters or fewer".to_string(),
+        ));
     }
     if params.description.len() > 5000 {
-        return Err(NarratorError::ApiError("Description must be 5000 characters or fewer".to_string()));
+        return Err(NarratorError::ApiError(
+            "Description must be 5000 characters or fewer".to_string(),
+        ));
     }
     if params.custom_prompt.len() > 10000 {
-        return Err(NarratorError::ApiError("Custom prompt must be 10000 characters or fewer".to_string()));
+        return Err(NarratorError::ApiError(
+            "Custom prompt must be 10000 characters or fewer".to_string(),
+        ));
     }
 
     state.cancel_flag.store(false, Ordering::SeqCst);
@@ -201,7 +219,11 @@ pub async fn generate_narration(
     let provider = ai_client::create_provider(&params.ai_config, api_key);
 
     // Phase 1: Extract frames
-    channel.send(ProgressEvent::PhaseChange { phase: "extracting_frames".to_string() }).ok();
+    channel
+        .send(ProgressEvent::PhaseChange {
+            phase: "extracting_frames".to_string(),
+        })
+        .ok();
 
     // Reuse project_id if provided, otherwise create a new one
     let project_id = if params.project_id.is_empty() {
@@ -216,9 +238,19 @@ pub async fn generate_narration(
     let channel_clone = channel.clone();
     let frames_dir_cleanup = frames_dir.clone();
     let frames = match video_engine::extract_frames(
-        Path::new(&params.video_path), &params.frame_config, &frames_dir,
-        move |frame| { channel_clone.send(ProgressEvent::FrameExtracted { frame: frame.clone() }).ok(); },
-    ).await {
+        Path::new(&params.video_path),
+        &params.frame_config,
+        &frames_dir,
+        move |frame| {
+            channel_clone
+                .send(ProgressEvent::FrameExtracted {
+                    frame: frame.clone(),
+                })
+                .ok();
+        },
+    )
+    .await
+    {
         Ok(f) => f,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&frames_dir_cleanup);
@@ -232,36 +264,74 @@ pub async fn generate_narration(
     }
 
     // Phase 2: Process documents
-    channel.send(ProgressEvent::PhaseChange { phase: "processing_docs".to_string() }).ok();
+    channel
+        .send(ProgressEvent::PhaseChange {
+            phase: "processing_docs".to_string(),
+        })
+        .ok();
 
     let mut docs = Vec::new();
     for path in &params.document_paths {
         match doc_processor::process_document(Path::new(path)) {
             Ok(doc) => docs.push(doc),
-            Err(e) => { channel.send(ProgressEvent::Error { message: format!("Warning: {e}") }).ok(); }
+            Err(e) => {
+                channel
+                    .send(ProgressEvent::Error {
+                        message: format!("Warning: {e}"),
+                    })
+                    .ok();
+            }
         }
     }
     let docs = doc_processor::truncate_to_budget(docs, 50000);
 
-    if state.cancel_flag.load(Ordering::SeqCst) { return Err(NarratorError::Cancelled); }
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        return Err(NarratorError::Cancelled);
+    }
 
     // Phase 3: Generate narration
-    channel.send(ProgressEvent::PhaseChange { phase: "generating_narration".to_string() }).ok();
+    channel
+        .send(ProgressEvent::PhaseChange {
+            phase: "generating_narration".to_string(),
+        })
+        .ok();
 
     let style = project_store::load_styles()?
-        .into_iter().find(|s| s.id == params.style)
+        .into_iter()
+        .find(|s| s.id == params.style)
         .unwrap_or_else(|| project_store::default_styles()[1].clone());
 
     let video_metadata = video_engine::probe_video(Path::new(&params.video_path)).await?;
     let system_prompt = ai_client::build_system_prompt(&style, &docs, &params.custom_prompt);
-    let user_message = ai_client::build_user_message(&frames, &params.title, &params.description, &video_metadata, &params.primary_language)?;
+    let user_message = ai_client::build_user_message(
+        &frames,
+        &params.title,
+        &params.description,
+        &video_metadata,
+        &params.primary_language,
+    )?;
 
-    let script = ai_client::generate_narration(provider.as_ref(), &system_prompt, user_message, &params.style, &params.primary_language).await?;
+    let script = ai_client::generate_narration(
+        provider.as_ref(),
+        &system_prompt,
+        user_message,
+        &params.style,
+        &params.primary_language,
+    )
+    .await?;
 
     for segment in &script.segments {
-        channel.send(ProgressEvent::SegmentStreamed { segment: segment.clone() }).ok();
+        channel
+            .send(ProgressEvent::SegmentStreamed {
+                segment: segment.clone(),
+            })
+            .ok();
     }
-    channel.send(ProgressEvent::PhaseChange { phase: "done".to_string() }).ok();
+    channel
+        .send(ProgressEvent::PhaseChange {
+            phase: "done".to_string(),
+        })
+        .ok();
 
     // Auto-save project
     let project_config = ProjectConfig {
@@ -296,8 +366,10 @@ pub async fn translate_script(
     ai_config: AiConfig,
 ) -> Result<NarrationScript, NarratorError> {
     let keys = state.api_keys.lock().await;
-    let api_key = keys.get(&ai_config.provider)
-        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?.clone();
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
     drop(keys);
     let provider = ai_client::create_provider(&ai_config, api_key);
     ai_client::translate_script(provider.as_ref(), &script, &target_lang).await
@@ -344,21 +416,26 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
 // ── ElevenLabs commands ──
 
 #[tauri::command]
-pub async fn get_elevenlabs_config() -> Result<Option<elevenlabs_client::ElevenLabsConfig>, NarratorError> {
+pub async fn get_elevenlabs_config(
+) -> Result<Option<elevenlabs_client::ElevenLabsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config.elevenlabs.map(|e| elevenlabs_client::ElevenLabsConfig {
-        api_key: e.api_key,
-        voice_id: e.voice_id,
-        model_id: e.model_id,
-        stability: e.stability,
-        similarity_boost: e.similarity_boost,
-        style: e.style,
-        speed: e.speed,
-    }))
+    Ok(config
+        .elevenlabs
+        .map(|e| elevenlabs_client::ElevenLabsConfig {
+            api_key: e.api_key,
+            voice_id: e.voice_id,
+            model_id: e.model_id,
+            stability: e.stability,
+            similarity_boost: e.similarity_boost,
+            style: e.style,
+            speed: e.speed,
+        }))
 }
 
 #[tauri::command]
-pub async fn save_elevenlabs_config(config: elevenlabs_client::ElevenLabsConfig) -> Result<(), NarratorError> {
+pub async fn save_elevenlabs_config(
+    config: elevenlabs_client::ElevenLabsConfig,
+) -> Result<(), NarratorError> {
     let mut persistent = load_config();
     persistent.elevenlabs = Some(ElevenLabsPersisted {
         api_key: config.api_key,
@@ -373,7 +450,9 @@ pub async fn save_elevenlabs_config(config: elevenlabs_client::ElevenLabsConfig)
 }
 
 #[tauri::command]
-pub async fn list_elevenlabs_voices(api_key: String) -> Result<Vec<elevenlabs_client::ElevenLabsVoice>, NarratorError> {
+pub async fn list_elevenlabs_voices(
+    api_key: String,
+) -> Result<Vec<elevenlabs_client::ElevenLabsVoice>, NarratorError> {
     elevenlabs_client::list_voices(&api_key).await
 }
 
@@ -390,10 +469,18 @@ pub async fn generate_tts(
     channel: Channel<ProgressEvent>,
 ) -> Result<Vec<elevenlabs_client::TtsResult>, NarratorError> {
     let config = load_config();
-    let el_config = config.elevenlabs.map(|e| elevenlabs_client::ElevenLabsConfig {
-        api_key: e.api_key, voice_id: e.voice_id, model_id: e.model_id,
-        stability: e.stability, similarity_boost: e.similarity_boost, style: e.style, speed: e.speed,
-    }).ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
+    let el_config = config
+        .elevenlabs
+        .map(|e| elevenlabs_client::ElevenLabsConfig {
+            api_key: e.api_key,
+            voice_id: e.voice_id,
+            model_id: e.model_id,
+            stability: e.stability,
+            similarity_boost: e.similarity_boost,
+            style: e.style,
+            speed: e.speed,
+        })
+        .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
 
     let out = PathBuf::from(&output_dir);
     std::fs::create_dir_all(&out)?;
@@ -408,7 +495,11 @@ pub async fn generate_tts(
         // Generate each segment individually
         let mut segment_files: Vec<(usize, PathBuf, f64, f64)> = Vec::new(); // (index, path, start, end)
         for (i, seg) in segments.iter().enumerate() {
-            channel.send(ProgressEvent::Progress { percent: (i as f64 / total as f64) * 80.0 }).ok();
+            channel
+                .send(ProgressEvent::Progress {
+                    percent: (i as f64 / total as f64) * 80.0,
+                })
+                .ok();
 
             let filename = format!("_tmp_seg_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
@@ -437,7 +528,11 @@ pub async fn generate_tts(
             let ffmpeg = video_engine::detect_ffmpeg().unwrap_or_else(|_| PathBuf::from("ffmpeg"));
             let video_dur = segments.last().map(|s| s.end_seconds).unwrap_or(60.0);
 
-            tracing::info!("Concat-merging {} segments into {:.0}s audio", segment_files.len(), video_dur);
+            tracing::info!(
+                "Concat-merging {} segments into {:.0}s audio",
+                segment_files.len(),
+                video_dur
+            );
 
             // Build ordered list of files: silence gaps interleaved with segments
             let mut concat_parts: Vec<PathBuf> = Vec::new();
@@ -452,11 +547,22 @@ pub async fn generate_tts(
                     // Create a silence file for this gap
                     let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
                     let _ = tokio::process::Command::new(ffmpeg.as_os_str())
-                        .args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                            "-t", &format!("{:.3}", gap),
-                            "-codec:a", "libmp3lame", "-q:a", "2"])
+                        .args([
+                            "-y",
+                            "-f",
+                            "lavfi",
+                            "-i",
+                            "anullsrc=r=44100:cl=stereo",
+                            "-t",
+                            &format!("{:.3}", gap),
+                            "-codec:a",
+                            "libmp3lame",
+                            "-q:a",
+                            "2",
+                        ])
                         .arg(sil_path.as_os_str())
-                        .output().await;
+                        .output()
+                        .await;
                     concat_parts.push(sil_path);
                     silence_idx += 1;
                 }
@@ -471,17 +577,29 @@ pub async fn generate_tts(
                 let trail = video_dur - last_end;
                 let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
                 let _ = tokio::process::Command::new(ffmpeg.as_os_str())
-                    .args(["-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                        "-t", &format!("{:.3}", trail),
-                        "-codec:a", "libmp3lame", "-q:a", "2"])
+                    .args([
+                        "-y",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        "anullsrc=r=44100:cl=stereo",
+                        "-t",
+                        &format!("{:.3}", trail),
+                        "-codec:a",
+                        "libmp3lame",
+                        "-q:a",
+                        "2",
+                    ])
                     .arg(sil_path.as_os_str())
-                    .output().await;
+                    .output()
+                    .await;
                 concat_parts.push(sil_path);
             }
 
             // Write concat list file
             let concat_list_path = out.join("_concat_list.txt");
-            let concat_content: String = concat_parts.iter()
+            let concat_content: String = concat_parts
+                .iter()
                 .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -495,14 +613,16 @@ pub async fn generate_tts(
                 .arg(concat_list_path.as_os_str())
                 .args(["-codec:a", "libmp3lame", "-q:a", "2"])
                 .arg(final_path.as_os_str())
-                .output().await;
+                .output()
+                .await;
 
             match concat_output {
                 Ok(o) if o.status.success() => {
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: 0,
                         file_path: final_path.to_string_lossy().to_string(),
-                        success: true, error: None,
+                        success: true,
+                        error: None,
                     });
                 }
                 Ok(o) => {
@@ -510,8 +630,10 @@ pub async fn generate_tts(
                     tracing::error!("ffmpeg concat failed: {}", &stderr[..stderr.len().min(500)]);
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
-                            segment_index: *idx, file_path: path.to_string_lossy().to_string(),
-                            success: true, error: Some("Concat failed — kept individual file".into()),
+                            segment_index: *idx,
+                            file_path: path.to_string_lossy().to_string(),
+                            success: true,
+                            error: Some("Concat failed — kept individual file".into()),
                         });
                     }
                 }
@@ -519,8 +641,10 @@ pub async fn generate_tts(
                     tracing::error!("ffmpeg exec failed: {e}");
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
-                            segment_index: *idx, file_path: path.to_string_lossy().to_string(),
-                            success: true, error: Some("Concat failed — kept individual file".into()),
+                            segment_index: *idx,
+                            file_path: path.to_string_lossy().to_string(),
+                            success: true,
+                            error: Some("Concat failed — kept individual file".into()),
                         });
                     }
                 }
@@ -541,7 +665,11 @@ pub async fn generate_tts(
         // Per-segment mode
         let total = segments.len();
         for (i, seg) in segments.iter().enumerate() {
-            channel.send(ProgressEvent::Progress { percent: (i as f64 / total as f64) * 100.0 }).ok();
+            channel
+                .send(ProgressEvent::Progress {
+                    percent: (i as f64 / total as f64) * 100.0,
+                })
+                .ok();
 
             let filename = format!("segment_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
@@ -567,7 +695,9 @@ pub async fn generate_tts(
         }
     }
 
-    channel.send(ProgressEvent::Progress { percent: 100.0 }).ok();
+    channel
+        .send(ProgressEvent::Progress { percent: 100.0 })
+        .ok();
     Ok(results)
 }
 
@@ -586,19 +716,16 @@ pub async fn open_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorE
     if app.get_webview_window("recorder").is_some() {
         return Ok(());
     }
-    tauri::WebviewWindowBuilder::new(
-        &app, "recorder",
-        WebviewUrl::App("recorder.html".into()),
-    )
-    .title("")
-    .inner_size(520.0, 58.0)
-    .resizable(false)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .position(400.0, 800.0)
-    .build()
-    .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
+    tauri::WebviewWindowBuilder::new(&app, "recorder", WebviewUrl::App("recorder.html".into()))
+        .title("")
+        .inner_size(520.0, 58.0)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .position(400.0, 800.0)
+        .build()
+        .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
     Ok(())
 }
 
@@ -631,9 +758,7 @@ pub async fn start_recording(
 }
 
 #[tauri::command]
-pub async fn stop_recording(
-    state: tauri::State<'_, AppState>,
-) -> Result<(), NarratorError> {
+pub async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Ok(())
@@ -650,7 +775,8 @@ pub async fn apply_video_edits(
 ) -> Result<String, NarratorError> {
     video_edit::apply_edits(&input_path, &output_path, &edits, |pct| {
         channel.send(ProgressEvent::Progress { percent: pct }).ok();
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -675,11 +801,17 @@ pub async fn merge_audio_video(
 #[tauri::command]
 pub async fn open_folder(path: String) -> Result<(), NarratorError> {
     #[cfg(target_os = "macos")]
-    { let _ = std::process::Command::new("open").arg(&path).spawn(); }
+    {
+        let _ = std::process::Command::new("open").arg(&path).spawn();
+    }
     #[cfg(target_os = "windows")]
-    { let _ = std::process::Command::new("explorer").arg(&path).spawn(); }
+    {
+        let _ = std::process::Command::new("explorer").arg(&path).spawn();
+    }
     #[cfg(target_os = "linux")]
-    { let _ = std::process::Command::new("xdg-open").arg(&path).spawn(); }
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+    }
     Ok(())
 }
 
@@ -695,7 +827,11 @@ pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>
     let mut entries: Vec<_> = std::fs::read_dir(&frames_dir)
         .map_err(|e| NarratorError::ProjectError(e.to_string()))?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "jpg" || x == "jpeg" || x == "png"))
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == "jpg" || x == "jpeg" || x == "png")
+        })
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
@@ -704,10 +840,7 @@ pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>
         let path = entry.path().to_string_lossy().to_string();
         // Parse timestamp from filename pattern frame_NNNN.jpg → index * interval
         // We don't know the exact interval, but frames are sequential
-        frames.push(ProjectFrame {
-            index: i,
-            path,
-        });
+        frames.push(ProjectFrame { index: i, path });
     }
     Ok(frames)
 }
@@ -735,8 +868,20 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                 let filename = format!("narration_{language}.{format}");
                 let filepath = output_dir.join(&filename);
                 match std::fs::write(&filepath, &content) {
-                    Ok(()) => results.push(ExportResult { format: format.to_string(), language: language.clone(), file_path: filepath.to_string_lossy().to_string(), success: true, error: None }),
-                    Err(e) => results.push(ExportResult { format: format.to_string(), language: language.clone(), file_path: filepath.to_string_lossy().to_string(), success: false, error: Some(e.to_string()) }),
+                    Ok(()) => results.push(ExportResult {
+                        format: format.to_string(),
+                        language: language.clone(),
+                        file_path: filepath.to_string_lossy().to_string(),
+                        success: true,
+                        error: None,
+                    }),
+                    Err(e) => results.push(ExportResult {
+                        format: format.to_string(),
+                        language: language.clone(),
+                        file_path: filepath.to_string_lossy().to_string(),
+                        success: false,
+                        error: Some(e.to_string()),
+                    }),
                 }
             }
         }

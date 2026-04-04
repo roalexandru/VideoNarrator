@@ -39,11 +39,20 @@ pub async fn apply_edits(
     if total == 1 && plan.clips[0].speed == 1.0 && plan.clips[0].fps_override.is_none() {
         let clip = &plan.clips[0];
         let output = Command::new(ffmpeg.as_os_str())
-            .args(["-y", "-i", input_path,
-                "-ss", &format!("{:.3}", clip.start_seconds),
-                "-to", &format!("{:.3}", clip.end_seconds),
-                "-c", "copy", output_path])
-            .output().await
+            .args([
+                "-y",
+                "-i",
+                input_path,
+                "-ss",
+                &format!("{:.3}", clip.start_seconds),
+                "-to",
+                &format!("{:.3}", clip.end_seconds),
+                "-c",
+                "copy",
+                output_path,
+            ])
+            .output()
+            .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
         if !output.status.success() {
@@ -119,13 +128,17 @@ pub async fn apply_edits(
 
         let output = Command::new(ffmpeg.as_os_str())
             .args(&args)
-            .output().await
+            .output()
+            .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::error!("Clip {} failed: {}", i, &stderr[..stderr.len().min(300)]);
-            return Err(NarratorError::FfmpegFailed(format!("Clip {i} failed: {}", &stderr[..stderr.len().min(200)])));
+            return Err(NarratorError::FfmpegFailed(format!(
+                "Clip {i} failed: {}",
+                &stderr[..stderr.len().min(200)]
+            )));
         }
 
         clip_files.push(clip_path);
@@ -138,16 +151,19 @@ pub async fn apply_edits(
         std::fs::rename(&clip_files[0], output_path)?;
     } else {
         let concat_list = out_dir.join("_edit_concat.txt");
-        let list_content: String = clip_files.iter()
+        let list_content: String = clip_files
+            .iter()
             .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
-            .collect::<Vec<_>>().join("\n");
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&concat_list, &list_content)?;
 
         let output = Command::new(ffmpeg.as_os_str())
             .args(["-y", "-f", "concat", "-safe", "0", "-i"])
             .arg(concat_list.as_os_str())
             .args(["-c", "copy", output_path])
-            .output().await
+            .output()
+            .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
         if !output.status.success() {
@@ -156,12 +172,16 @@ pub async fn apply_edits(
                 .args(["-y", "-f", "concat", "-safe", "0", "-i"])
                 .arg(concat_list.as_os_str())
                 .args(["-c:v", "libx264", "-c:a", "aac", output_path])
-                .output().await
+                .output()
+                .await
                 .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
             if !output2.status.success() {
                 let stderr = String::from_utf8_lossy(&output2.stderr);
-                return Err(NarratorError::FfmpegFailed(format!("Concat failed: {}", &stderr[..stderr.len().min(300)])));
+                return Err(NarratorError::FfmpegFailed(format!(
+                    "Concat failed: {}",
+                    &stderr[..stderr.len().min(300)]
+                )));
             }
         }
 
@@ -188,27 +208,58 @@ pub async fn merge_audio_video(
     let output = if replace_audio {
         // Replace original audio entirely with narration
         Command::new(ffmpeg.as_os_str())
-            .args(["-y", "-i", video_path, "-i", audio_path,
-                "-c:v", "copy", "-c:a", "aac",
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-shortest", output_path])
-            .output().await
+            .args([
+                "-y",
+                "-i",
+                video_path,
+                "-i",
+                audio_path,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-shortest",
+                output_path,
+            ])
+            .output()
+            .await
     } else {
         // Mix original + narration audio
         Command::new(ffmpeg.as_os_str())
-            .args(["-y", "-i", video_path, "-i", audio_path,
-                "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]",
-                "-map", "0:v", "-map", "[a]",
-                "-c:v", "copy", "-c:a", "aac",
-                output_path])
-            .output().await
+            .args([
+                "-y",
+                "-i",
+                video_path,
+                "-i",
+                audio_path,
+                "-filter_complex",
+                "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]",
+                "-map",
+                "0:v",
+                "-map",
+                "[a]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                output_path,
+            ])
+            .output()
+            .await
     };
 
     let output = output.map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::FfmpegFailed(format!("Audio merge failed: {}", &stderr[..stderr.len().min(300)])));
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Audio merge failed: {}",
+            &stderr[..stderr.len().min(300)]
+        )));
     }
 
     Ok(output_path.to_string())
@@ -226,11 +277,18 @@ pub async fn extract_edit_thumbnails(
     std::fs::create_dir_all(output_dir)?;
 
     let output = Command::new(ffmpeg.as_os_str())
-        .args(["-y", "-i", video_path,
-            "-vf", &format!("fps=1/{:.3},scale=120:-1", interval),
-            "-q:v", "5",
-            &format!("{}/thumb_%04d.jpg", output_dir)])
-        .output().await
+        .args([
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            &format!("fps=1/{:.3},scale=120:-1", interval),
+            "-q:v",
+            "5",
+            &format!("{}/thumb_%04d.jpg", output_dir),
+        ])
+        .output()
+        .await
         .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
     if !output.status.success() {
@@ -240,7 +298,7 @@ pub async fn extract_edit_thumbnails(
 
     let mut paths: Vec<String> = std::fs::read_dir(output_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "jpg"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
         .map(|e| e.path().to_string_lossy().to_string())
         .collect();
     paths.sort();

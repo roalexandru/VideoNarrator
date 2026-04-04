@@ -84,16 +84,56 @@ pub async fn list_voices(api_key: &str) -> Result<Vec<ElevenLabsVoice>, Narrator
 
 pub fn default_voices() -> Vec<ElevenLabsVoice> {
     vec![
-        ElevenLabsVoice { voice_id: "JBFqnCBsd6RMkjVDRZzb".into(), name: "George".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "onwK4e9ZLuTAKqWW03F9".into(), name: "Daniel".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "EXAVITQu4vr4xnSDxMaL".into(), name: "Sarah".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "FGY2WhTYpPnrIDTdsKH5".into(), name: "Laura".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "IKne3meq5aSn9XLyUdCD".into(), name: "Charlie".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "TX3LPaxmHKxFdv7VOQHJ".into(), name: "Liam".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "pFZP5JQG7iQjIQuC4Bku".into(), name: "Lily".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "bIHbv24MWmeRgasZH58o".into(), name: "Will".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "nPczCjzI2devNBz1zQrb".into(), name: "Brian".into(), category: "premade".into() },
-        ElevenLabsVoice { voice_id: "XB0fDUnXU5powFXDhCwa".into(), name: "Charlotte".into(), category: "premade".into() },
+        ElevenLabsVoice {
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".into(),
+            name: "George".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "onwK4e9ZLuTAKqWW03F9".into(),
+            name: "Daniel".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "EXAVITQu4vr4xnSDxMaL".into(),
+            name: "Sarah".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "FGY2WhTYpPnrIDTdsKH5".into(),
+            name: "Laura".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "IKne3meq5aSn9XLyUdCD".into(),
+            name: "Charlie".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "TX3LPaxmHKxFdv7VOQHJ".into(),
+            name: "Liam".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "pFZP5JQG7iQjIQuC4Bku".into(),
+            name: "Lily".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "bIHbv24MWmeRgasZH58o".into(),
+            name: "Will".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "nPczCjzI2devNBz1zQrb".into(),
+            name: "Brian".into(),
+            category: "premade".into(),
+        },
+        ElevenLabsVoice {
+            voice_id: "XB0fDUnXU5powFXDhCwa".into(),
+            name: "Charlotte".into(),
+            category: "premade".into(),
+        },
     ]
 }
 

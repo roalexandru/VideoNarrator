@@ -61,9 +61,7 @@ pub fn export_markdown(script: &NarrationScript) -> String {
     output.push_str(&format!("# {}\n\n", script.title));
     output.push_str(&format!(
         "**Duration:** {:.0}s | **Style:** {} | **Language:** {}\n\n",
-        script.total_duration_seconds,
-        script.metadata.style,
-        script.metadata.language
+        script.total_duration_seconds, script.metadata.style, script.metadata.language
     ));
     output.push_str("---\n\n");
     output.push_str("| # | Time | Text | Pace |\n");
@@ -133,7 +131,10 @@ pub fn export_ssml(script: &NarrationScript) -> String {
         output.push_str("  </prosody>\n");
 
         if segment.pause_after_ms > 0 {
-            output.push_str(&format!("  <break time=\"{}ms\"/>\n", segment.pause_after_ms));
+            output.push_str(&format!(
+                "  <break time=\"{}ms\"/>\n",
+                segment.pause_after_ms
+            ));
         }
     }
 
