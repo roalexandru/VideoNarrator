@@ -66,7 +66,7 @@ export function ProcessingScreen() {
 
   const phases = ["extracting_frames", "processing_docs", "generating_narration"] as const;
   const pi = phases.indexOf(proc.phase as any);
-  const pct = showCompleted ? 100 : proc.phase === "done" ? 100 : pi >= 0 ? ((pi + 0.5) / 3) * 100 : 5;
+  const pct = showCompleted ? 100 : proc.phase === "done" ? 100 : (proc.phase === "extracting_frames" && proc.frames.length === 0) ? 5 : pi >= 0 ? ((pi + 0.5) / 3) * 100 : 5;
   const elapsed = proc.frames.length > 0 ? `${proc.frames.length} frames extracted` : "";
   const segCount = proc.streamingSegments.length;
   const scriptSegCount = Object.values(useScriptStore.getState().scripts)[0]?.segments.length || 0;

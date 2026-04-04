@@ -50,8 +50,6 @@ pub fn run() {
             commands::validate_elevenlabs_key,
             commands::generate_tts,
             commands::get_home_dir,
-            commands::open_recorder_window,
-            commands::close_recorder_window,
             commands::record_screen_native,
             commands::start_recording,
             commands::stop_recording,

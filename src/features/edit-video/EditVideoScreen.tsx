@@ -258,7 +258,15 @@ export function EditVideoScreen() {
       {/* VIDEO PLAYER */}
       <div style={{ borderRadius: 8, overflow: "hidden", background: "#000", flex: 1, minHeight: 100 }}>
         <video ref={videoRef} playsInline style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
-        {!src && <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted }}>Select a video in Project Setup</div>}
+        {!src && (
+          <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.muted, gap: 8 }}>
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5, marginBottom: 4 }}>
+              <rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
+            </svg>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.dim }}>No video loaded</div>
+            <div style={{ fontSize: 13 }}>Select a video file in the Project Setup step to start editing.</div>
+          </div>
+        )}
       </div>
 
       {/* TRANSPORT BAR */}
@@ -375,7 +383,7 @@ export function EditVideoScreen() {
                       {clip.speed !== 1.0 && (
                         <div style={{ position: "absolute", bottom: 2, left: 4, pointerEvents: "none" }}>
                           <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: clip.skipFrames ? "rgba(245,158,11,0.85)" : "rgba(168,85,247,0.85)", color: "#fff", fontWeight: 700 }}>
-                            {clip.speed}x{clip.skipFrames ? " skip" : ""}
+                            {clip.speed}x{clip.skipFrames ? " TL" : ""}
                           </span>
                         </div>
                       )}
@@ -460,18 +468,18 @@ export function EditVideoScreen() {
                   <div style={{ width: 1, height: 20, background: C.border }} />
                   {/* Speed mode vs Skip Frames toggle */}
                   <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
-                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} style={{
+                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} title="Plays all frames faster (fast-forward effect)" style={{
                       padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
                       background: !selClip.skipFrames ? "rgba(168,85,247,0.2)" : "transparent",
                       color: !selClip.skipFrames ? "#a855f7" : C.muted,
                       cursor: "pointer", fontFamily: "inherit",
-                    }}>Fast</button>
-                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, true)} style={{
+                    }}>Speed up</button>
+                    <button onClick={() => setClipSkipFrames(selectedClipIndex!, true)} title="Drops frames for clean jump-cuts (no jitter)" style={{
                       padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
                       background: selClip.skipFrames ? "rgba(245,158,11,0.2)" : "transparent",
                       color: selClip.skipFrames ? "#f59e0b" : C.muted,
                       cursor: "pointer", fontFamily: "inherit",
-                    }}>Skip</button>
+                    }}>Time-lapse</button>
                   </div>
                 </>
               )}

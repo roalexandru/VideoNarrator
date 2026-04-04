@@ -233,6 +233,6 @@ describe("ReviewScreen", () => {
     // No script seeded
 
     render(<ReviewScreen />);
-    expect(screen.getByText("No segments.")).toBeInTheDocument();
+    expect(screen.getByText("No narration generated yet")).toBeInTheDocument();
   });
 });

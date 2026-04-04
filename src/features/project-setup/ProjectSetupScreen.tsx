@@ -194,7 +194,23 @@ export function ProjectSetupScreen() {
                   <span style={{ fontSize: 10, fontWeight: 700, color: C.accent, background: "rgba(99,102,241,0.1)", padding: "2px 7px", borderRadius: 5, textTransform: "uppercase", fontFamily: "monospace" }}>{doc.type}</span>
                   <span style={{ fontSize: 13, color: C.textDim }}>{doc.name}</span>
                 </div>
-                <Button variant="ghost" size="sm" onClick={() => removeDocument(doc.id)}>&times;</Button>
+                <button
+                  onClick={() => removeDocument(doc.id)}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 4,
+                    padding: "4px 8px", borderRadius: 6, border: "none",
+                    background: "transparent", color: C.textMuted,
+                    cursor: "pointer", fontSize: 12, fontFamily: "inherit", fontWeight: 500,
+                    transition: "color 0.15s, background 0.15s",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = C.textMuted; e.currentTarget.style.background = "transparent"; }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2"/>
+                  </svg>
+                  Remove
+                </button>
               </div>
             ))}
           </div>

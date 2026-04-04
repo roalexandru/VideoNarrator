@@ -213,7 +213,13 @@ export function ReviewScreen() {
       {/* SEGMENT EDITOR */}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
         {segments.length === 0 ? (
-          <div style={{ textAlign: "center", padding: 40, color: C.muted }}>No segments.</div>
+          <div style={{ textAlign: "center", padding: 48, color: C.muted }}>
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: "0 auto 12px", display: "block", opacity: 0.5 }}>
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+            </svg>
+            <div style={{ fontSize: 15, fontWeight: 600, color: C.dim, marginBottom: 6 }}>No narration generated yet</div>
+            <div style={{ fontSize: 13 }}>Go to Processing to generate narration for your video.</div>
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             {segments.map((seg, i) => {

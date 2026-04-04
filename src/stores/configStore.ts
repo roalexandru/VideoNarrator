@@ -12,6 +12,7 @@ interface ConfigStore {
   languages: LanguageCode[];
   primaryLanguage: LanguageCode;
   frameDensity: FrameDensity;
+  // Scene threshold — reserved for future use, not exposed in UI
   sceneThreshold: number;
   maxFrames: number;
   customPrompt: string;
@@ -23,6 +24,7 @@ interface ConfigStore {
   toggleLanguage: (lang: LanguageCode) => void;
   setPrimaryLanguage: (lang: LanguageCode) => void;
   setFrameDensity: (density: FrameDensity) => void;
+  // Scene threshold — reserved for future use, not exposed in UI
   setSceneThreshold: (threshold: number) => void;
   setMaxFrames: (max: number) => void;
   setCustomPrompt: (prompt: string) => void;

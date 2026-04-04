@@ -708,36 +708,6 @@ pub async fn get_home_dir() -> Result<String, NarratorError> {
     Ok(dir.parent().unwrap_or(&dir).to_string_lossy().to_string())
 }
 
-// ── Recorder window ──
-
-#[tauri::command]
-pub async fn open_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
-    use tauri::{Manager, WebviewUrl};
-    if app.get_webview_window("recorder").is_some() {
-        return Ok(());
-    }
-    tauri::WebviewWindowBuilder::new(&app, "recorder", WebviewUrl::App("recorder.html".into()))
-        .title("")
-        .inner_size(520.0, 58.0)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .position(400.0, 800.0)
-        .build()
-        .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn close_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
-    use tauri::Manager;
-    if let Some(win) = app.get_webview_window("recorder") {
-        let _ = win.close();
-    }
-    Ok(())
-}
-
 // ── Screen recording commands ──
 
 /// Native screen recording: opens macOS Cmd+Shift+5 UI, blocks until done
