@@ -29,10 +29,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Create placeholder binaries for Tauri build script
+      - name: Create placeholders for Tauri build script
         run: |
           touch src-tauri/binaries/ffmpeg-x86_64-unknown-linux-gnu
           touch src-tauri/binaries/ffprobe-x86_64-unknown-linux-gnu
+          mkdir -p dist
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
