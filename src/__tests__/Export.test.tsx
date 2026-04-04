@@ -119,13 +119,13 @@ describe("ExportScreen", () => {
   it("shows Final Video section", () => {
     render(<ExportScreen />);
 
-    expect(screen.getByText("Final Video")).toBeInTheDocument();
+    expect(screen.getByText("3. Final Video")).toBeInTheDocument();
   });
 
   it("shows the Scripts section label", () => {
     render(<ExportScreen />);
 
-    expect(screen.getByText("Scripts")).toBeInTheDocument();
+    expect(screen.getByText("1. Scripts")).toBeInTheDocument();
   });
 
   it("shows Export and Copy buttons", () => {

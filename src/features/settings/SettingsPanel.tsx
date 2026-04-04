@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { setApiKey, getProviderStatus, validateApiKey, getElevenLabsConfig, saveElevenLabsConfig } from "../../lib/tauri/commands";
 import { PROVIDERS } from "../../lib/constants";
 import { Button } from "../../components/ui/Button";
@@ -20,6 +20,15 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     getProviderStatus().then(setStatuses).catch(() => {});
     getElevenLabsConfig().then((cfg) => { if (cfg) setElHasKey(!!cfg.api_key); }).catch(() => {});
   }, []);
+
+  const handleEscKey = useCallback((e: KeyboardEvent) => {
+    if (e.key === "Escape") onClose();
+  }, [onClose]);
+
+  useEffect(() => {
+    window.addEventListener("keydown", handleEscKey);
+    return () => window.removeEventListener("keydown", handleEscKey);
+  }, [handleEscKey]);
 
   const handleSaveAiKey = async (provider: AiProvider) => {
     const key = keys[provider]; if (!key.trim()) return;
@@ -50,8 +59,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 100, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div style={{ background: "#16161e", borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)", boxShadow: "0 32px 64px rgba(0,0,0,0.5)", padding: "28px 32px", width: 480, maxHeight: "85vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text }}>API Keys</h2>
@@ -98,7 +106,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
         {error && <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, fontSize: 13, color: "#f87171" }}>{error}</div>}
 
-        <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 11, color: C.muted }}>Press Esc to close</span>
           <Button variant="secondary" onClick={onClose}>Done</Button>
         </div>
       </div>

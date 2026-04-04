@@ -18,6 +18,15 @@ const sLabel = { fontSize: 11, fontWeight: 700 as const, color: C.muted, textTra
 const sliderLabel = { display: "block" as const, fontSize: 11, fontWeight: 600 as const, color: C.dim, marginBottom: 4 };
 const selectStyle = { width: "100%", padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "inherit", cursor: "pointer", appearance: "none" as const };
 
+const FORMAT_TOOLTIPS: Record<string, string> = {
+  json: "Structured data",
+  srt: "Subtitle file",
+  vtt: "Web subtitles",
+  txt: "Plain text",
+  md: "Markdown",
+  ssml: "Speech markup for TTS",
+};
+
 const ELEVEN_MODELS = [
   { id: "eleven_multilingual_v2", label: "Multilingual v2" },
   { id: "eleven_flash_v2_5", label: "Flash v2.5" },
@@ -151,13 +160,13 @@ export function ExportScreen() {
         <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
           <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
-            Scripts
+            1. Scripts
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
             {EXPORT_FORMATS.map((f) => {
               const sel = exp.selectedFormats.includes(f.id);
               return (
-                <button key={f.id} onClick={() => exp.toggleFormat(f.id)} style={{
+                <button key={f.id} onClick={() => exp.toggleFormat(f.id)} title={FORMAT_TOOLTIPS[f.id]} style={{
                   padding: "3px 8px", borderRadius: 5, fontSize: 10, fontFamily: "inherit", fontWeight: sel ? 600 : 400,
                   border: sel ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
                   background: sel ? "rgba(99,102,241,0.1)" : "transparent", color: sel ? C.accent : C.muted, cursor: "pointer",
@@ -194,7 +203,7 @@ export function ExportScreen() {
         <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
           <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>
-            Audio
+            2. Audio
           </div>
           {!hasEL ? (
             <p style={{ fontSize: 11, color: C.muted, flex: 1 }}>Add ElevenLabs key in Settings.</p>
@@ -244,11 +253,11 @@ export function ExportScreen() {
         <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
           <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/></svg>
-            Final Video
+            3. Final Video
           </div>
 
           {!hasTtsAudio && !videoPath ? (
-            <p style={{ fontSize: 11, color: C.muted, flex: 1 }}>Generate audio first, then merge with video.</p>
+            <p style={{ fontSize: 11, color: C.muted, flex: 1 }}>Generate audio first (step 2), then merge with video.</p>
           ) : (
             <>
               <p style={{ fontSize: 11, color: C.dim, marginBottom: 10, lineHeight: 1.4 }}>
@@ -272,6 +281,9 @@ export function ExportScreen() {
                 </label>
               </div>
 
+              {!hasTtsAudio && (
+                <p style={{ fontSize: 11, color: C.muted, marginBottom: 6, fontStyle: "italic" }}>Generate audio first (step 2)</p>
+              )}
               <Button onClick={doMerge} disabled={merging || !hasTtsAudio} size="sm" style={{ width: "100%", marginTop: "auto", fontSize: 11 }}>
                 {merging ? "Merging..." : "Create Final Video"}
               </Button>

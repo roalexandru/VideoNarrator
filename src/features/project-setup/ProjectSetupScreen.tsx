@@ -16,6 +16,8 @@ export function ProjectSetupScreen() {
   const { setVideoFile, addDocuments, removeDocument, setTitle, setDescription } = useProjectStore();
   const projectId = useProjectStore((s) => s.projectId);
   const [isRecording, setIsRecording] = useState(false);
+  const [probing, setProbing] = useState(false);
+  const [titleTouched, setTitleTouched] = useState(false);
 
   const [recSeconds, setRecSeconds] = useState(0);
 
@@ -75,10 +77,12 @@ export function ProjectSetupScreen() {
   const handleVideoSelect = useCallback(async () => {
     const file = await open({ multiple: false, filters: [{ name: "Video", extensions: ["mp4", "mov", "avi", "mkv", "webm"] }] });
     if (!file) return;
+    setProbing(true);
     try {
       const m = await probeVideo(file as string);
       setVideoFile({ path: m.path, name: m.path.split("/").pop() || "video", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
     } catch (err) { console.error("Probe failed:", err); }
+    finally { setProbing(false); }
   }, [setVideoFile]);
 
   const handleDocSelect = useCallback(async () => {
@@ -135,18 +139,28 @@ export function ProjectSetupScreen() {
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <button onClick={handleVideoSelect} style={{
+            <button onClick={handleVideoSelect} disabled={probing} style={{
               padding: "32px 20px", border: `2px dashed rgba(255,255,255,0.1)`, borderRadius: 12,
-              background: "rgba(255,255,255,0.02)", cursor: "pointer", textAlign: "center", fontFamily: "inherit",
+              background: "rgba(255,255,255,0.02)", cursor: probing ? "wait" : "pointer", textAlign: "center", fontFamily: "inherit",
+              opacity: probing ? 0.7 : 1,
             }}
-              onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(99,102,241,0.4)"; e.currentTarget.style.background = "rgba(99,102,241,0.04)"; }}
+              onMouseEnter={(e) => { if (!probing) { e.currentTarget.style.borderColor = "rgba(99,102,241,0.4)"; e.currentTarget.style.background = "rgba(99,102,241,0.04)"; } }}
               onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
             >
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="1.5" strokeLinecap="round" style={{ margin: "0 auto 8px", display: "block" }}>
-                <rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
-              </svg>
-              <div style={{ fontWeight: 600, color: C.textDim, fontSize: 13 }}>Select Video File</div>
-              <div style={{ color: C.textMuted, fontSize: 11, marginTop: 3 }}>MP4, MOV, AVI, MKV, WebM</div>
+              {probing ? (
+                <>
+                  <div style={{ fontWeight: 600, color: C.accent, fontSize: 13 }}>Probing video...</div>
+                  <div style={{ color: C.textMuted, fontSize: 11, marginTop: 3 }}>Analyzing file metadata</div>
+                </>
+              ) : (
+                <>
+                  <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="1.5" strokeLinecap="round" style={{ margin: "0 auto 8px", display: "block" }}>
+                    <rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/>
+                  </svg>
+                  <div style={{ fontWeight: 600, color: C.textDim, fontSize: 13 }}>Select Video File</div>
+                  <div style={{ color: C.textMuted, fontSize: 11, marginTop: 3 }}>MP4, MOV, AVI, MKV, WebM</div>
+                </>
+              )}
             </button>
 
             <button onClick={handleRecordScreen} style={{
@@ -195,8 +209,13 @@ export function ProjectSetupScreen() {
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>Title *</label>
-            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g., UiPath Studio Walkthrough" style={inputStyle}
-              onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"} onBlur={(e) => e.target.style.borderColor = C.border} />
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g., UiPath Studio Walkthrough"
+              style={{ ...inputStyle, borderColor: titleTouched && !title.trim() ? "rgba(239,68,68,0.5)" : inputStyle.borderColor }}
+              onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"}
+              onBlur={(e) => { setTitleTouched(true); e.target.style.borderColor = !title.trim() ? "rgba(239,68,68,0.5)" : C.border; }} />
+            {titleTouched && !title.trim() && (
+              <p style={{ fontSize: 11, color: "#f87171", marginTop: 4 }}>Title is required</p>
+            )}
           </div>
           <div>
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>Description</label>

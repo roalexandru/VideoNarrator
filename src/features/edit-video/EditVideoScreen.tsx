@@ -15,7 +15,7 @@ export function EditVideoScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
   const store = useEditStore();
-  const { clips, selectedClipIndex, editedVideoPath, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSkipFrames, moveClip, selectClip, setEditedVideoPath } = store;
+  const { clips, selectedClipIndex, editedVideoPath, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSkipFrames, moveClip, selectClip, setEditedVideoPath, undo, redo, canUndo, canRedo } = store;
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -168,6 +168,8 @@ export function EditVideoScreen() {
       if ((e.code === "Delete" || e.code === "Backspace") && selectedClipIndex !== null && clips.length > 1) { e.preventDefault(); deleteClip(selectedClipIndex); }
       if (e.code === "ArrowLeft") { e.preventDefault(); seekToOutput(outputTime - 1); }
       if (e.code === "ArrowRight") { e.preventDefault(); seekToOutput(outputTime + 1); }
+      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) { e.preventDefault(); undo(); }
+      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
   }, [isPlaying, selectedClipIndex, outputTime, clips.length, seekToOutput]);
@@ -280,6 +282,19 @@ export function EditVideoScreen() {
           {clips.length} clip{clips.length !== 1 ? "s" : ""}
           {editedVideoPath && <span style={{ color: "#4ade80", marginLeft: 6 }}>Applied</span>}
         </span>
+        {/* Undo/Redo */}
+        <button onClick={undo} disabled={!canUndo()} title="Undo (Cmd+Z)" aria-label="Undo" style={{
+          background: "none", border: "none", color: canUndo() ? C.dim : C.muted, cursor: canUndo() ? "pointer" : "default",
+          padding: 4, display: "flex", opacity: canUndo() ? 1 : 0.3,
+        }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+        </button>
+        <button onClick={redo} disabled={!canRedo()} title="Redo (Cmd+Shift+Z)" aria-label="Redo" style={{
+          background: "none", border: "none", color: canRedo() ? C.dim : C.muted, cursor: canRedo() ? "pointer" : "default",
+          padding: 4, display: "flex", opacity: canRedo() ? 1 : 0.3,
+        }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.13-9.36L23 10"/></svg>
+        </button>
         <Button variant="secondary" size="sm" onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Reset</Button>
         <Button size="sm" onClick={handleApply} disabled={applying || clips.length === 0}>{applying ? `${Math.round(applyPct)}%` : "Apply Edits"}</Button>
       </div>

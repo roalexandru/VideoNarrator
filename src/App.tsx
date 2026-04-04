@@ -14,6 +14,7 @@ import { ReviewScreen } from "./features/review/ReviewScreen";
 import { ExportScreen } from "./features/export/ExportScreen";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ToastContainer } from "./components/ui/Toast";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo } from "./lib/tauri/commands";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
@@ -97,6 +98,7 @@ export default function App() {
       <>
         <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
         {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+        <ToastContainer />
       </>
     );
   }
@@ -114,6 +116,7 @@ export default function App() {
         </ErrorBoundary>
       </WizardLayout>
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+      <ToastContainer />
     </>
   );
 }

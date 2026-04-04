@@ -18,8 +18,6 @@ export function ReviewScreen() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  const [videoHover, setVideoHover] = useState(false);
   const [framePaths, setFramePaths] = useState<string[]>([]);
 
   const script = scripts[activeLanguage];
@@ -121,8 +119,6 @@ export function ReviewScreen() {
       {/* VIDEO PLAYER — controls hidden until hover */}
       <div
         style={{ position: "relative", borderRadius: 10, overflow: "hidden", background: "#000", flexShrink: 0, aspectRatio: "16/9", maxHeight: "42vh" }}
-        onMouseEnter={() => setVideoHover(true)}
-        onMouseLeave={() => setVideoHover(false)}
       >
         <video ref={videoRef} playsInline onClick={togglePlay}
           style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
@@ -131,7 +127,7 @@ export function ReviewScreen() {
         {/* Caption overlay */}
         {currentSegment && (
           <div style={{
-            position: "absolute", bottom: videoHover ? 56 : 16, left: "50%", transform: "translateX(-50%)",
+            position: "absolute", bottom: 56, left: "50%", transform: "translateX(-50%)",
             maxWidth: "80%", padding: "10px 20px",
             background: "rgba(0,0,0,0.75)", borderRadius: 8, transition: "bottom 0.2s",
           }}>
@@ -139,12 +135,12 @@ export function ReviewScreen() {
           </div>
         )}
 
-        {/* Custom controls bar — only on hover */}
+        {/* Custom controls bar — always visible */}
         <div style={{
           position: "absolute", bottom: 0, left: 0, right: 0,
           background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
           padding: "20px 16px 10px",
-          opacity: videoHover ? 1 : 0, transition: "opacity 0.2s",
+          opacity: 1,
           display: "flex", alignItems: "center", gap: 12,
         }}>
           <button onClick={togglePlay} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "#fff", display: "flex" }}>
@@ -161,16 +157,7 @@ export function ReviewScreen() {
           </div>
         </div>
 
-        {/* Time badge (always visible) */}
-        <div style={{
-          position: "absolute", top: 10, right: 12,
-          background: "rgba(0,0,0,0.5)", borderRadius: 6, padding: "3px 8px",
-          opacity: videoHover ? 0 : 0.8, transition: "opacity 0.2s",
-        }}>
-          <span style={{ color: "#fff", fontSize: 11, fontFamily: "monospace" }}>
-            {secondsToTimestamp(currentTime)} / {secondsToTimestamp(duration)}
-          </span>
-        </div>
+        {/* Time badge — hidden since controls are always visible */}
       </div>
 
       {/* THUMBNAIL TIMELINE */}
@@ -231,7 +218,6 @@ export function ReviewScreen() {
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             {segments.map((seg, i) => {
               const isCurrent = i === currentSegmentIdx;
-              const isEditing = editingIdx === i;
               return (
                 <div key={i} onClick={() => handleSegmentClick(i)} style={{
                   display: "grid", gridTemplateColumns: "80px 1fr auto", gap: 12, alignItems: "start",
@@ -244,25 +230,18 @@ export function ReviewScreen() {
                     <div style={{ fontSize: 10, opacity: 0.6 }}>{secondsToTimestamp(seg.end_seconds)}</div>
                   </div>
                   <div>
-                    {isEditing ? (
-                      <textarea value={seg.text}
-                        onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
-                        onClick={(e) => e.stopPropagation()} onBlur={() => setEditingIdx(null)}
-                        autoFocus rows={3}
-                        style={{ width: "100%", fontSize: 13, color: C.text, background: "rgba(255,255,255,0.04)", border: `1px solid rgba(99,102,241,0.3)`, borderRadius: 6, padding: "8px 10px", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
-                      />
-                    ) : (
-                      <p onDoubleClick={(e) => { e.stopPropagation(); setEditingIdx(i); }}
-                        style={{ fontSize: 13, color: isCurrent ? C.text : C.dim, lineHeight: 1.5, margin: 0, cursor: "text" }}
-                        title="Double-click to edit">{seg.text}</p>
-                    )}
-                    {seg.visual_description && !isEditing && (
+                    <textarea value={seg.text}
+                      onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      rows={2}
+                      style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : C.dim, background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 6, padding: "8px 10px", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
+                    />
+                    {seg.visual_description && (
                       <p style={{ fontSize: 11, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{seg.visual_description}</p>
                     )}
                   </div>
                   <div style={{ display: "flex", gap: 4, paddingTop: 2 }}>
                     <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
-                    <button onClick={(e) => { e.stopPropagation(); setEditingIdx(i); }} style={{ fontSize: 11, color: C.accent, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Edit</button>
                     <button onClick={(e) => { e.stopPropagation(); deleteSegment(activeLanguage, i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
                   </div>
                 </div>
