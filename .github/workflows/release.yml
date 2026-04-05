@@ -48,12 +48,15 @@ jobs:
           - platform: macos-latest
             rust-target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+            friendly: macOS-Apple-Silicon
           - platform: macos-latest
             rust-target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
+            friendly: macOS-Intel
           - platform: windows-latest
             rust-target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc
+            friendly: Windows-x64
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v6
@@ -81,16 +84,59 @@ jobs:
           cp "$FFMPEG_DIR/ffprobe.exe" src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
 
       - uses: tauri-apps/tauri-action@v0
+        id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Narrator ${{ github.ref_name }}"
           releaseBody: |
-            See the assets below to download and install Narrator.
+            ## Download
+
+            | Platform | Installer |
+            |----------|-----------|
+            | macOS (Apple Silicon) | `Narrator-<version>-macOS-Apple-Silicon.dmg` |
+            | macOS (Intel) | `Narrator-<version>-macOS-Intel.dmg` |
+            | Windows | `Narrator-<version>-Windows-x64-setup.exe` |
+
+            > **macOS note:** The app is not code-signed. After installing, run `sudo xattr -rd com.apple.quarantine /Applications/Narrator.app` in Terminal.
 
             ## What's New
             _Edit this section before publishing._
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Rename artifacts with friendly names
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          FRIENDLY="${{ matrix.friendly }}"
+
+          # Get release ID
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.id')
+
+          # Rename each asset uploaded by this matrix job
+          gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" --paginate --jq '.[].id' | while read ASSET_ID; do
+            CURRENT_NAME=$(gh api "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --jq '.name')
+
+            # Only rename assets from this build (match architecture patterns)
+            NEW_NAME=""
+            case "$CURRENT_NAME" in
+              *aarch64.dmg)        NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon.dmg" ;;
+              *x64.dmg)            NEW_NAME="Narrator-${VERSION}-macOS-Intel.dmg" ;;
+              *x64-setup.exe)      NEW_NAME="Narrator-${VERSION}-Windows-x64-setup.exe" ;;
+              *x64_en-US.msi)      NEW_NAME="Narrator-${VERSION}-Windows-x64.msi" ;;
+              *aarch64.app.tar.gz) NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon-update.tar.gz" ;;
+              *x64.app.tar.gz)     NEW_NAME="Narrator-${VERSION}-macOS-Intel-update.tar.gz" ;;
+            esac
+
+            if [ -n "$NEW_NAME" ] && [ "$CURRENT_NAME" != "$NEW_NAME" ]; then
+              echo "Renaming: $CURRENT_NAME -> $NEW_NAME"
+              gh api --method PATCH "repos/${{ github.repository }}/releases/assets/$ASSET_ID" \
+                -f name="$NEW_NAME" --silent
+            fi
+          done

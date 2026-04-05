@@ -22,7 +22,26 @@ Narrator follows a 6-step wizard workflow:
 - **AI providers:** Claude (Anthropic) and OpenAI
 - **Text-to-speech:** ElevenLabs
 
-## Prerequisites
+## Installation
+
+Download the latest release from [GitHub Releases](https://github.com/roalexandru/VideoNarrator/releases).
+
+### macOS
+
+The app is not code-signed, so macOS will block it by default. After downloading the `.dmg`:
+
+1. Open the `.dmg` and drag **Narrator.app** to `/Applications`
+2. Open Terminal and run:
+   ```bash
+   sudo xattr -rd com.apple.quarantine /Applications/Narrator.app
+   ```
+3. Open Narrator from Applications
+
+### Windows
+
+Windows SmartScreen may show a "Windows protected your PC" warning. Click **More info** → **Run anyway** to proceed.
+
+## Prerequisites (Development)
 
 - [Rust](https://rustup.rs/) (stable toolchain)
 - [Node.js](https://nodejs.org/) (v18+) with pnpm
@@ -44,7 +63,7 @@ pnpm tauri build
 ## Project Structure
 
 ```
-VideoNarator/
+VideoNarrator/
   src/                      # React frontend
     components/             # Reusable UI components
     features/               # Feature screens (wizard steps)
