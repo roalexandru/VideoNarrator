@@ -110,32 +110,67 @@ jobs:
           args: ${{ matrix.args }}
 
       - name: Rename artifacts with friendly names
+        if: matrix.platform != 'windows-latest'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          FRIENDLY="${{ matrix.friendly }}"
 
-          # Get release ID
+          # Map rust target to the asset name pattern Tauri uses
+          case "${{ matrix.rust-target }}" in
+            aarch64-apple-darwin) PATTERN="aarch64.dmg" ; NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon.dmg" ;;
+            x86_64-apple-darwin)  PATTERN="x64.dmg"     ; NEW_NAME="Narrator-${VERSION}-macOS-Intel.dmg" ;;
+            *) echo "No rename needed for ${{ matrix.rust-target }}"; exit 0 ;;
+          esac
+
           RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.id')
 
-          # Rename each asset uploaded by this matrix job
-          gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" --paginate --jq '.[].id' | while read ASSET_ID; do
-            CURRENT_NAME=$(gh api "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --jq '.name')
+          ASSET=$(gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
+            --paginate --jq ".[] | select(.name | endswith(\"$PATTERN\")) | \"\(.id) \(.name)\"")
 
-            # Only rename installers — leave update bundles (.tar.gz, .nsis.zip, .sig)
-            # with their original names so latest.json URLs remain valid
-            NEW_NAME=""
-            case "$CURRENT_NAME" in
-              *aarch64.dmg)   NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon.dmg" ;;
-              *x64.dmg)       NEW_NAME="Narrator-${VERSION}-macOS-Intel.dmg" ;;
-              *x64-setup.exe) NEW_NAME="Narrator-${VERSION}-Windows-x64-setup.exe" ;;
-              *x64_en-US.msi) NEW_NAME="Narrator-${VERSION}-Windows-x64.msi" ;;
-            esac
+          if [ -z "$ASSET" ]; then
+            echo "No asset matching *${PATTERN} found yet — skipping rename"
+            exit 0
+          fi
 
-            if [ -n "$NEW_NAME" ] && [ "$CURRENT_NAME" != "$NEW_NAME" ]; then
+          ASSET_ID=$(echo "$ASSET" | awk '{print $1}')
+          CURRENT_NAME=$(echo "$ASSET" | awk '{print $2}')
+
+          if [ "$CURRENT_NAME" != "$NEW_NAME" ]; then
+            echo "Renaming: $CURRENT_NAME -> $NEW_NAME"
+            gh api --method PATCH "repos/${{ github.repository }}/releases/assets/$ASSET_ID" \
+              -f name="$NEW_NAME" --silent
+          fi
+
+      - name: Rename artifacts with friendly names
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.id')
+
+          for PAIR in "x64-setup.exe:Narrator-${VERSION}-Windows-x64-setup.exe" "x64_en-US.msi:Narrator-${VERSION}-Windows-x64.msi"; do
+            PATTERN="${PAIR%%:*}"
+            NEW_NAME="${PAIR#*:}"
+
+            ASSET=$(gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
+              --paginate --jq ".[] | select(.name | endswith(\"$PATTERN\")) | \"\(.id) \(.name)\"")
+
+            if [ -z "$ASSET" ]; then
+              echo "No asset matching *${PATTERN} — skipping"
+              continue
+            fi
+
+            ASSET_ID=$(echo "$ASSET" | awk '{print $1}')
+            CURRENT_NAME=$(echo "$ASSET" | awk '{print $2}')
+
+            if [ "$CURRENT_NAME" != "$NEW_NAME" ]; then
               echo "Renaming: $CURRENT_NAME -> $NEW_NAME"
               gh api --method PATCH "repos/${{ github.repository }}/releases/assets/$ASSET_ID" \
                 -f name="$NEW_NAME" --silent
