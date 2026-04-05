@@ -2,6 +2,7 @@ import { useState, type CSSProperties } from "react";
 import { useConfigStore } from "../../stores/configStore";
 import { STYLES, LANGUAGES, PROVIDERS } from "../../lib/constants";
 import { Card } from "../../components/ui/Card";
+import { trackEvent } from "../telemetry/analytics";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 const label: CSSProperties = { fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10 };
@@ -22,7 +23,7 @@ export function ConfigurationScreen() {
         <div style={label}>Narration Style</div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {STYLES.map((s) => (
-            <Card key={s.id} selected={config.style === s.id} onClick={() => config.setStyle(s.id)}>
+            <Card key={s.id} selected={config.style === s.id} onClick={() => { config.setStyle(s.id); trackEvent("narration_style_selected", { style: s.id }); }}>
               <div style={{ fontWeight: 600, color: config.style === s.id ? C.accent : C.text, fontSize: 14, marginBottom: 3 }}>{s.label}</div>
               <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.4 }}>{s.description}</div>
             </Card>
@@ -94,7 +95,7 @@ export function ConfigurationScreen() {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           {PROVIDERS.map((p) => (
             <Card key={p.id} selected={config.aiProvider === p.id}
-              onClick={() => { config.setAiProvider(p.id); config.setModel(p.models[0].id); }}>
+              onClick={() => { config.setAiProvider(p.id); config.setModel(p.models[0].id); trackEvent("ai_provider_selected", { provider: p.id }); }}>
               <div style={{ fontWeight: 600, color: config.aiProvider === p.id ? C.accent : C.text, fontSize: 14, marginBottom: 8 }}>{p.label}</div>
               {p.models.map((m) => (
                 <label key={m.id} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: C.dim, cursor: "pointer", marginBottom: 4 }}>

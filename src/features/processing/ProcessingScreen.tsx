@@ -5,6 +5,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { startGeneration, cancelGeneration } from "../../lib/tauri/commands";
+import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { secondsToTimestamp } from "../../lib/formatters";
@@ -49,6 +50,7 @@ export function ProcessingScreen() {
     try {
       const script = await startGeneration(params, ch);
       setScript(config.primaryLanguage, script); proc.setPhase("done");
+      trackEvent("processing_completed", { segments: script.segments.length, provider: config.aiProvider, style: config.style });
     } catch (err: any) {
       proc.setError(typeof err === "string" ? err : err?.message || "Unknown error");
       proc.setPhase("error");

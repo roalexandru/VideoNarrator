@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "../../stores/projectStore";
 import { probeVideo, recordScreenNative } from "../../lib/tauri/commands";
+import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -43,6 +44,7 @@ export function ProjectSetupScreen() {
         await getCurrentWindow().setFocus();
         const m = await probeVideo(outPath);
         setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+        trackEvent("video_imported", { source: "screen_recording" });
       } catch (e: any) {
         try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch {}
         if (!String(e).includes("Cancelled")) console.error("Recording failed:", e);
@@ -81,6 +83,7 @@ export function ProjectSetupScreen() {
     try {
       const m = await probeVideo(file as string);
       setVideoFile({ path: m.path, name: m.path.split("/").pop() || "video", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+      trackEvent("video_imported", { source: "file" });
     } catch (err) { console.error("Probe failed:", err); }
     finally { setProbing(false); }
   }, [setVideoFile]);

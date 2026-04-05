@@ -85,7 +85,7 @@ const sections = [
   },
 ];
 
-export function HelpPanel({ onClose }: { onClose: () => void }) {
+export function HelpPanel({ onClose, onShowPrivacyPolicy, onShowTerms }: { onClose: () => void; onShowPrivacyPolicy?: () => void; onShowTerms?: () => void }) {
   const [expanded, setExpanded] = useState<string | null>(sections[0].items[0].q);
   const [ffmpegStatus, setFfmpegStatus] = useState<string | null>(null);
 
@@ -201,6 +201,27 @@ export function HelpPanel({ onClose }: { onClose: () => void }) {
             </div>
           ))}
         </div>
+
+        {/* Legal */}
+        {(onShowPrivacyPolicy || onShowTerms) && (
+          <div style={{ marginTop: 8, flexShrink: 0 }}>
+            <h3 style={{ ...typography.sectionLabel, color: colors.accent.primary, marginBottom: 10 }}>Legal</h3>
+            <div style={{ display: "flex", gap: 16 }}>
+              {onShowPrivacyPolicy && (
+                <button onClick={onShowPrivacyPolicy} style={{
+                  background: "none", border: "none", color: colors.text.secondary, fontSize: 13,
+                  cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2,
+                }}>Privacy Policy</button>
+              )}
+              {onShowTerms && (
+                <button onClick={onShowTerms} style={{
+                  background: "none", border: "none", color: colors.text.secondary, fontSize: 13,
+                  cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2,
+                }}>Terms of Service</button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Footer */}
         <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
