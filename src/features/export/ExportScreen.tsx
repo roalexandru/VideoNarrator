@@ -211,32 +211,20 @@ export function ExportScreen() {
       setVideoPhase("merge");
       setVideoProgress(65);
 
-      const mergedPath = `${dir}/${base}_merged.mp4`;
-      await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio);
-      setVideoProgress(80);
+      const finalPath = `${dir}/${base}.mp4`;
 
-      // Phase 3: Burn subtitles if enabled
-      let finalPath: string;
       if (exp.burnSubtitles) {
+        // Merge to temp file first, then burn subtitles to final
+        const mergedPath = `${dir}/${base}_merged.mp4`;
+        await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio);
+        setVideoProgress(80);
+
         setVideoPhase("subtitles");
         setVideoProgress(85);
-
         const srtContent = generateSrt(script);
-        finalPath = `${dir}/${base}.mp4`;
         await burnSubtitles(mergedPath, srtContent, finalPath);
-
-        // Clean up intermediate merged file
-        // (leave it — Rust command already wrote the final)
       } else {
-        finalPath = `${dir}/${base}.mp4`;
-        // Rename merged to final (if different)
-        if (mergedPath !== finalPath) {
-          // We can just re-merge directly to the final path, but since it's already done,
-          // re-invoke merge to the final path or just accept merged path
-          // Actually let's just merge directly to final path when no subtitles
-        }
-        finalPath = mergedPath.replace("_merged.mp4", ".mp4");
-        // Re-merge to correct filename
+        // Merge directly to final path
         await mergeAudioVideo(videoPath, audioFile, finalPath, exp.replaceAudio);
       }
 

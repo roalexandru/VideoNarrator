@@ -38,6 +38,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let m = menu::build(app)?;
             app.set_menu(m)?;
@@ -57,6 +59,7 @@ pub fn run() {
                     | menu::SAVE_PROJECT
                     | menu::OPEN_SETTINGS
                     | menu::NARRATOR_HELP
+                    | menu::CHECK_FOR_UPDATES
                     | "toggle_fullscreen" => {
                         let _ = app.emit("menu-event", id);
                     }

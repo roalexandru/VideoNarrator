@@ -30,6 +30,14 @@
       }
     }
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/roalexandru/VideoNarrator/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDkzMzU1QjI0MjkyRkI3NUMKUldSY3R5OHBKRnMxa3lMQjlYbzkvU1ZFOSs3dzEwbUpaOWxpRVJJNk1WbC9jWjNLeVEzWXRVMWsK"
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

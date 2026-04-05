@@ -22,6 +22,7 @@ import { PrivacyPolicy } from "./features/legal/PrivacyPolicy";
 import { TermsOfService } from "./features/legal/TermsOfService";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
+import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
 import { initTelemetry, trackEvent } from "./features/telemetry/analytics";
@@ -289,53 +290,50 @@ export default function App() {
     } catch (err) { console.error("Failed to load project:", err); }
   };
 
-  if (view === "library") {
-    return (
-      <>
-        <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
-        {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
-        {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
-        {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
-        {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
-        {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
-        <ToastContainer />
-      </>
-    );
-  }
-
   return (
     <>
-      <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
-        <ErrorBoundary>
-          {currentStep === 0 && <ProjectSetupScreen />}
-          {currentStep === 1 && <EditVideoScreen />}
-          {currentStep === 2 && <ConfigurationScreen />}
-          {currentStep === 3 && <ProcessingScreen />}
-          {currentStep === 4 && <ReviewScreen />}
-          {currentStep === 5 && <ExportScreen />}
-        </ErrorBoundary>
-      </WizardLayout>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
-      {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
+      {view === "library" ? (
+        <>
+          <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
+          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+          {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
+        </>
+      ) : (
+        <>
+          <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
+            <ErrorBoundary>
+              {currentStep === 0 && <ProjectSetupScreen />}
+              {currentStep === 1 && <EditVideoScreen />}
+              {currentStep === 2 && <ConfigurationScreen />}
+              {currentStep === 3 && <ProcessingScreen />}
+              {currentStep === 4 && <ReviewScreen />}
+              {currentStep === 5 && <ExportScreen />}
+            </ErrorBoundary>
+          </WizardLayout>
+          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+          {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
+          {showNewConfirm && (
+            <NewProjectDialog
+              onSaveAndNew={async () => {
+                setShowNewConfirm(false);
+                await handleSaveProject();
+                if (pendingAction.current === "new") doNewProject();
+                else setView("library");
+              }}
+              onDiscard={() => {
+                setShowNewConfirm(false);
+                if (pendingAction.current === "new") doNewProject();
+                else setView("library");
+              }}
+              onCancel={() => setShowNewConfirm(false)}
+            />
+          )}
+        </>
+      )}
       {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
-      {showNewConfirm && (
-        <NewProjectDialog
-          onSaveAndNew={async () => {
-            setShowNewConfirm(false);
-            await handleSaveProject();
-            if (pendingAction.current === "new") doNewProject();
-            else setView("library");
-          }}
-          onDiscard={() => {
-            setShowNewConfirm(false);
-            if (pendingAction.current === "new") doNewProject();
-            else setView("library");
-          }}
-          onCancel={() => setShowNewConfirm(false)}
-        />
-      )}
+      <UpdateChecker />
       <ToastContainer />
     </>
   );

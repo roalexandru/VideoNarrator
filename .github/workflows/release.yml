@@ -87,6 +87,8 @@ jobs:
         id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Narrator ${{ github.ref_name }}"
@@ -123,15 +125,14 @@ jobs:
           gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" --paginate --jq '.[].id' | while read ASSET_ID; do
             CURRENT_NAME=$(gh api "repos/${{ github.repository }}/releases/assets/$ASSET_ID" --jq '.name')
 
-            # Only rename assets from this build (match architecture patterns)
+            # Only rename installers — leave update bundles (.tar.gz, .nsis.zip, .sig)
+            # with their original names so latest.json URLs remain valid
             NEW_NAME=""
             case "$CURRENT_NAME" in
-              *aarch64.dmg)        NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon.dmg" ;;
-              *x64.dmg)            NEW_NAME="Narrator-${VERSION}-macOS-Intel.dmg" ;;
-              *x64-setup.exe)      NEW_NAME="Narrator-${VERSION}-Windows-x64-setup.exe" ;;
-              *x64_en-US.msi)      NEW_NAME="Narrator-${VERSION}-Windows-x64.msi" ;;
-              *aarch64.app.tar.gz) NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon-update.tar.gz" ;;
-              *x64.app.tar.gz)     NEW_NAME="Narrator-${VERSION}-macOS-Intel-update.tar.gz" ;;
+              *aarch64.dmg)   NEW_NAME="Narrator-${VERSION}-macOS-Apple-Silicon.dmg" ;;
+              *x64.dmg)       NEW_NAME="Narrator-${VERSION}-macOS-Intel.dmg" ;;
+              *x64-setup.exe) NEW_NAME="Narrator-${VERSION}-Windows-x64-setup.exe" ;;
+              *x64_en-US.msi) NEW_NAME="Narrator-${VERSION}-Windows-x64.msi" ;;
             esac
 
             if [ -n "$NEW_NAME" ] && [ "$CURRENT_NAME" != "$NEW_NAME" ]; then

@@ -12,6 +12,7 @@ pub const OPEN_PROJECT: &str = "open_project";
 pub const SAVE_PROJECT: &str = "save_project";
 pub const OPEN_SETTINGS: &str = "open_settings";
 pub const NARRATOR_HELP: &str = "narrator_help";
+pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
 /// Prefix for dynamic "Open Recent" items — full ID is "recent:<project_id>"
 pub const RECENT_PREFIX: &str = "recent:";
 
@@ -107,6 +108,13 @@ fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         app,
         Some("About Narrator"),
         None,
+    )?)?;
+    app_menu.append(&MenuItem::with_id(
+        app,
+        CHECK_FOR_UPDATES,
+        "Check for Updates…",
+        true,
+        None::<&str>,
     )?)?;
     app_menu.append(&PredefinedMenuItem::separator(app)?)?;
     app_menu.append(&MenuItem::with_id(
@@ -275,6 +283,13 @@ fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         app,
         Some("&About Narrator"),
         None,
+    )?)?;
+    help_menu.append(&MenuItem::with_id(
+        app,
+        CHECK_FOR_UPDATES,
+        "Check for &Updates…",
+        true,
+        None::<&str>,
     )?)?;
     help_menu.append(&PredefinedMenuItem::separator(app)?)?;
     help_menu.append(&MenuItem::with_id(
