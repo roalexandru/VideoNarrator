@@ -645,9 +645,7 @@ pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bo
             Ok(resp.status().is_success())
         }
         AiProviderKind::Gemini => {
-            let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models?key={key}"
-            );
+            let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={key}");
             let resp = client.get(&url).send().await?;
 
             let status = resp.status().as_u16();
@@ -664,10 +662,9 @@ pub fn get_available_models(provider: &AiProviderKind) -> Vec<String> {
             "claude-opus-4-20250514".to_string(),
         ],
         AiProviderKind::OpenAi => vec!["gpt-4o".to_string(), "o3".to_string()],
-        AiProviderKind::Gemini => vec![
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.5-pro".to_string(),
-        ],
+        AiProviderKind::Gemini => {
+            vec!["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()]
+        }
     }
 }
 

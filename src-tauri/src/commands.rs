@@ -514,15 +514,13 @@ pub async fn validate_elevenlabs_key(api_key: String) -> Result<bool, NarratorEr
 pub async fn get_azure_tts_config(
 ) -> Result<Option<azure_tts_client::AzureTtsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config
-        .azure_tts
-        .map(|a| azure_tts_client::AzureTtsConfig {
-            api_key: a.api_key,
-            region: a.region,
-            voice_name: a.voice_name,
-            speaking_style: a.speaking_style,
-            speed: a.speed,
-        }))
+    Ok(config.azure_tts.map(|a| azure_tts_client::AzureTtsConfig {
+        api_key: a.api_key,
+        region: a.region,
+        voice_name: a.voice_name,
+        speaking_style: a.speaking_style,
+        speed: a.speed,
+    }))
 }
 
 #[tauri::command]

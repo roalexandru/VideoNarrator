@@ -33,10 +33,7 @@ pub struct AzureTtsVoice {
     pub gender: String,
 }
 
-pub async fn list_voices(
-    api_key: &str,
-    region: &str,
-) -> Result<Vec<AzureTtsVoice>, NarratorError> {
+pub async fn list_voices(api_key: &str, region: &str) -> Result<Vec<AzureTtsVoice>, NarratorError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -188,20 +185,16 @@ pub async fn generate_speech(
     let speed_str = format!("{:.0}%", (config.speed * 100.0) as i32);
 
     // Build inner content: optionally wrap with express-as
-    let inner_content = format!(
-        "<prosody rate='{}'>{}</prosody>",
-        speed_str, escaped_text
-    );
+    let inner_content = format!("<prosody rate='{}'>{}</prosody>", speed_str, escaped_text);
 
-    let voice_content =
-        if config.speaking_style.is_empty() || config.speaking_style == "general" {
-            inner_content
-        } else {
-            format!(
-                "<mstts:express-as style='{}'>{}</mstts:express-as>",
-                escaped_style, inner_content
-            )
-        };
+    let voice_content = if config.speaking_style.is_empty() || config.speaking_style == "general" {
+        inner_content
+    } else {
+        format!(
+            "<mstts:express-as style='{}'>{}</mstts:express-as>",
+            escaped_style, inner_content
+        )
+    };
 
     let ssml = format!(
         "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' \
@@ -216,7 +209,10 @@ pub async fn generate_speech(
             .post(&url)
             .header("Ocp-Apim-Subscription-Key", &config.api_key)
             .header("Content-Type", "application/ssml+xml")
-            .header("X-Microsoft-OutputFormat", "audio-24khz-160kbitrate-mono-mp3")
+            .header(
+                "X-Microsoft-OutputFormat",
+                "audio-24khz-160kbitrate-mono-mp3",
+            )
             .body(ssml.clone())
             .send()
             .await?;
