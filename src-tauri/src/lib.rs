@@ -59,6 +59,7 @@ pub fn run() {
             commands::open_folder,
             commands::list_project_frames,
             commands::export_script,
+            commands::burn_subtitles,
             commands::list_styles,
         ])
         .run(tauri::generate_context!())

@@ -1,30 +1,28 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useExportStore } from "../../stores/exportStore";
+import { useExportStore, slugify } from "../../stores/exportStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useProjectStore } from "../../stores/projectStore";
-import { exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices, generateTts, mergeAudioVideo, openFolder, getHomeDir,
-  type TtsResult, type ElevenLabsConfig, type ElevenLabsVoice } from "../../lib/tauri/commands";
+import {
+  exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
+  generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
+  type ElevenLabsConfig, type ElevenLabsVoice,
+} from "../../lib/tauri/commands";
 import { EXPORT_FORMATS } from "../../lib/constants";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import type { ExportResult } from "../../types/export";
 import type { ProgressEvent } from "../../types/processing";
 
-const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
-const sLabel = { fontSize: 11, fontWeight: 700 as const, color: C.muted, textTransform: "uppercase" as const, letterSpacing: 1.2, marginBottom: 8 };
-const sliderLabel = { display: "block" as const, fontSize: 11, fontWeight: 600 as const, color: C.dim, marginBottom: 4 };
-const selectStyle = { width: "100%", padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "inherit", cursor: "pointer", appearance: "none" as const };
-
-const FORMAT_TOOLTIPS: Record<string, string> = {
-  json: "Structured data",
-  srt: "Subtitle file",
-  vtt: "Web subtitles",
-  txt: "Plain text",
-  md: "Markdown",
-  ssml: "Speech markup for TTS",
+// ── Design tokens ──
+const C = {
+  text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e",
+  border: "rgba(255,255,255,0.07)", borderHover: "rgba(255,255,255,0.12)",
+  accent: "#818cf8", accentDim: "rgba(99,102,241,0.15)",
+  bg: "rgba(255,255,255,0.02)", bgHover: "rgba(255,255,255,0.04)",
+  success: "#4ade80", error: "#f87171",
 };
 
 const ELEVEN_MODELS = [
@@ -34,6 +32,84 @@ const ELEVEN_MODELS = [
   { id: "eleven_v3", label: "v3" },
 ];
 
+// ── Section wrapper ──
+function Section({ title, icon, children, collapsible, defaultOpen = true }: {
+  title: string; icon: React.ReactNode; children: React.ReactNode;
+  collapsible?: boolean; defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ borderRadius: 12, border: `1px solid ${C.border}`, background: C.bg, overflow: "hidden" }}>
+      <div
+        onClick={collapsible ? () => setOpen(!open) : undefined}
+        style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "14px 18px",
+          cursor: collapsible ? "pointer" : "default", userSelect: "none",
+          borderBottom: open ? `1px solid ${C.border}` : "none",
+        }}
+      >
+        {icon}
+        <span style={{ fontSize: 13, fontWeight: 700, color: C.text, flex: 1, letterSpacing: 0.3 }}>{title}</span>
+        {collapsible && (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"
+            style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
+        )}
+      </div>
+      {open && <div style={{ padding: "16px 18px" }}>{children}</div>}
+    </div>
+  );
+}
+
+// ── Toggle switch ──
+function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", fontSize: 13, color: C.dim }}>
+      <div
+        onClick={() => onChange(!checked)}
+        style={{
+          width: 36, height: 20, borderRadius: 10, position: "relative",
+          background: checked ? C.accent : "rgba(255,255,255,0.1)",
+          transition: "background 0.2s", cursor: "pointer",
+        }}
+      >
+        <div style={{
+          position: "absolute", top: 2, left: checked ? 18 : 2,
+          width: 16, height: 16, borderRadius: "50%", background: "#fff",
+          transition: "left 0.2s", boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+        }} />
+      </div>
+      {label}
+    </label>
+  );
+}
+
+// ── Radio option ──
+function Radio({ checked, onClick, label }: { checked: boolean; onClick: () => void; label: string }) {
+  return (
+    <label onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13, color: C.dim }}>
+      <div style={{
+        width: 16, height: 16, borderRadius: "50%",
+        border: `2px solid ${checked ? C.accent : C.muted}`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        {checked && <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.accent }} />}
+      </div>
+      {label}
+    </label>
+  );
+}
+
+// ── Inline file output preview ──
+function FilePreview({ name }: { name: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 6, background: "rgba(255,255,255,0.03)", fontSize: 12, color: C.dim, fontFamily: "monospace" }}>
+      <span style={{ color: C.muted }}>→</span> {name}
+    </div>
+  );
+}
+
 export function ExportScreen() {
   const exp = useExportStore();
   const scripts = useScriptStore((s) => s.scripts);
@@ -41,36 +117,45 @@ export function ExportScreen() {
   const projectTitle = useProjectStore((s) => s.title);
   const videoPath = useProjectStore((s) => s.videoFile?.path);
 
-  const [results, setResults] = useState<ExportResult[]>([]);
-  const [exporting, setExporting] = useState(false);
+  // Script export
+  const [scriptResults, setScriptResults] = useState<ExportResult[]>([]);
+  const [scriptExporting, setScriptExporting] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // TTS
+  // TTS / Voice
   const [elConfig, setElConfig] = useState<ElevenLabsConfig | null>(null);
   const [elVoices, setElVoices] = useState<ElevenLabsVoice[]>([]);
-  const [ttsResults, setTtsResults] = useState<TtsResult[]>([]);
-  const [ttsRunning, setTtsRunning] = useState(false);
-  const [ttsProgress, setTtsProgress] = useState(0);
-  const [ttsCompact, setTtsCompact] = useState(true);
   const [customVoiceId, setCustomVoiceId] = useState("");
+  const [voiceOpen, setVoiceOpen] = useState(false);
 
-  // Video merge
-  const [merging, setMerging] = useState(false);
-  const [mergeResult, setMergeResult] = useState<string | null>(null);
-  const [replaceAudio, setReplaceAudio] = useState(true);
+  // Video export pipeline
+  const [videoPhase, setVideoPhase] = useState<"idle" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
+  const [videoProgress, setVideoProgress] = useState(0);
+  const [videoError, setVideoError] = useState<string | null>(null);
+  const [, setVideoOutputPath] = useState<string | null>(null);
 
-  // Smart default output path
+  // Audio-only export
+  const [audioPhase, setAudioPhase] = useState<"idle" | "generating" | "done" | "error">("idle");
+  const [audioProgress, setAudioProgress] = useState(0);
+  const [, setAudioOutputPath] = useState<string | null>(null);
+  const [audioError, setAudioError] = useState<string | null>(null);
+
+  const hasEL = !!elConfig?.api_key;
+  const primaryScript = Object.values(scripts)[0];
+  const segCount = primaryScript?.segments.length || 0;
+
+  // Init output directory + basename from title
   useEffect(() => {
-    if (!exp.outputDirectory) {
-      const safe = (projectTitle || "Untitled").replace(/[^a-zA-Z0-9_\- ]/g, "").trim() || "Untitled";
+    if (projectTitle) {
       getHomeDir().then((home) => {
-        exp.setOutputDirectory(`${home}/Documents/Narrator/${safe}`);
+        exp.initFromTitle(projectTitle, home);
       }).catch(() => {
-        exp.setOutputDirectory(`/tmp/Narrator_Export/${safe}`);
+        exp.initFromTitle(projectTitle, "/tmp");
       });
     }
   }, [projectTitle]);
 
+  // Load ElevenLabs config
   useEffect(() => {
     getElevenLabsConfig().then((cfg) => {
       if (cfg?.api_key) {
@@ -85,224 +170,489 @@ export function ExportScreen() {
     if (d && typeof d === "string") exp.setOutputDirectory(d);
   };
 
-  const doExport = async () => {
-    if (!exp.outputDirectory || !exp.selectedFormats.length) return;
-    setExporting(true);
+  const getScript = useCallback(() => {
+    const lang = Object.entries(exp.languageToggles).find(([, on]) => on)?.[0];
+    return lang ? scripts[lang] : primaryScript;
+  }, [exp.languageToggles, scripts, primaryScript]);
+
+  // ── Export Video pipeline ──
+  const doExportVideo = async () => {
+    if (!exp.outputDirectory || !elConfig || !videoPath) return;
+    await saveElevenLabsConfig(elConfig);
+
+    const script = getScript();
+    if (!script) return;
+
+    const dir = exp.outputDirectory;
+    const base = exp.basename;
+
+    setVideoPhase("audio");
+    setVideoProgress(0);
+    setVideoError(null);
+    setVideoOutputPath(null);
+
     try {
-      const langs = Object.entries(exp.languageToggles).filter(([, on]) => on).map(([l]) => l);
-      setResults(await exportScript({ formats: exp.selectedFormats, languages: langs, output_directory: exp.outputDirectory, scripts }));
-    } catch (e) { console.error(e); }
-    finally { setExporting(false); }
+      // Ensure directory exists
+      // Phase 1: Generate TTS audio
+      const ch = new Channel<ProgressEvent>();
+      ch.onmessage = (e: ProgressEvent) => {
+        if (e.kind === "progress") setVideoProgress(e.percent * 0.6); // 0-60%
+      };
+
+      const audioDir = `${dir}/audio`;
+      const ttsResults = await generateTts(script.segments, audioDir, true, ch);
+      const ttsOk = ttsResults.filter((r) => r.success);
+      if (ttsOk.length === 0) throw new Error("Audio generation failed");
+
+      const audioFile = ttsOk[0].file_path;
+
+      // Phase 2: Merge audio with video
+      setVideoPhase("merge");
+      setVideoProgress(65);
+
+      const mergedPath = `${dir}/${base}_merged.mp4`;
+      await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio);
+      setVideoProgress(80);
+
+      // Phase 3: Burn subtitles if enabled
+      let finalPath: string;
+      if (exp.burnSubtitles) {
+        setVideoPhase("subtitles");
+        setVideoProgress(85);
+
+        const srtContent = generateSrt(script);
+        finalPath = `${dir}/${base}.mp4`;
+        await burnSubtitles(mergedPath, srtContent, finalPath);
+
+        // Clean up intermediate merged file
+        // (leave it — Rust command already wrote the final)
+      } else {
+        finalPath = `${dir}/${base}.mp4`;
+        // Rename merged to final (if different)
+        if (mergedPath !== finalPath) {
+          // We can just re-merge directly to the final path, but since it's already done,
+          // re-invoke merge to the final path or just accept merged path
+          // Actually let's just merge directly to final path when no subtitles
+        }
+        finalPath = mergedPath.replace("_merged.mp4", ".mp4");
+        // Re-merge to correct filename
+        await mergeAudioVideo(videoPath, audioFile, finalPath, exp.replaceAudio);
+      }
+
+      setVideoProgress(100);
+      setVideoOutputPath(finalPath);
+      setVideoPhase("done");
+    } catch (e: any) {
+      console.error("Export video:", e);
+      setVideoError(typeof e === "string" ? e : e?.message || "Export failed");
+      setVideoPhase("error");
+    }
   };
 
-  const doTts = async () => {
+  // ── Export Audio Only ──
+  const doExportAudio = async () => {
     if (!exp.outputDirectory || !elConfig) return;
     await saveElevenLabsConfig(elConfig);
-    setTtsRunning(true); setTtsProgress(0); setTtsResults([]);
+
+    const script = getScript();
+    if (!script) return;
+
+    setAudioPhase("generating");
+    setAudioProgress(0);
+    setAudioError(null);
+    setAudioOutputPath(null);
+
     try {
-      const lang = Object.entries(exp.languageToggles).find(([, on]) => on)?.[0];
-      const script = lang ? scripts[lang] : Object.values(scripts)[0];
-      if (!script) return;
       const ch = new Channel<ProgressEvent>();
-      ch.onmessage = (e: ProgressEvent) => { if (e.kind === "progress") setTtsProgress(e.percent); };
-      setTtsResults(await generateTts(script.segments, exp.outputDirectory + "/audio", ttsCompact, ch));
-    } catch (e: any) { console.error("TTS:", e); }
-    finally { setTtsRunning(false); }
+      ch.onmessage = (e: ProgressEvent) => {
+        if (e.kind === "progress") setAudioProgress(e.percent);
+      };
+
+      const audioDir = `${exp.outputDirectory}/audio`;
+      const ttsResults = await generateTts(script.segments, audioDir, true, ch);
+      const ttsOk = ttsResults.filter((r) => r.success);
+      if (ttsOk.length === 0) throw new Error("Audio generation failed");
+
+      setAudioOutputPath(ttsOk[0].file_path);
+      setAudioPhase("done");
+    } catch (e: any) {
+      console.error("Export audio:", e);
+      setAudioError(typeof e === "string" ? e : e?.message || "Audio export failed");
+      setAudioPhase("error");
+    }
   };
 
-  const doMerge = async () => {
-    if (!videoPath || !exp.outputDirectory) return;
-    const audioFile = exp.outputDirectory + "/audio/narration_full.mp3";
-    const outFile = exp.outputDirectory + "/final_video.mp4";
-    setMerging(true); setMergeResult(null);
+  // ── Export Scripts ──
+  const doExportScripts = async () => {
+    if (!exp.outputDirectory || !exp.selectedFormats.length) return;
+    setScriptExporting(true);
     try {
-      const result = await mergeAudioVideo(videoPath, audioFile, outFile, replaceAudio);
-      setMergeResult(result);
-    } catch (e: any) { console.error("Merge:", e); setMergeResult("error"); }
-    finally { setMerging(false); }
+      const langs = Object.entries(exp.languageToggles).filter(([, on]) => on).map(([l]) => l);
+      const results = await exportScript({
+        formats: exp.selectedFormats,
+        languages: langs,
+        output_directory: exp.outputDirectory,
+        scripts,
+        basename: exp.basename,
+      });
+      setScriptResults(results);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setScriptExporting(false);
+    }
   };
 
-  const copy = () => {
-    const l = Object.keys(scripts)[0]; const s = scripts[l]; if (!s) return;
-    navigator.clipboard.writeText(s.segments.map((seg) => `[${seg.start_seconds.toFixed(1)}s - ${seg.end_seconds.toFixed(1)}s]\n${seg.text}`).join("\n\n"));
-    setCopied(true); setTimeout(() => setCopied(false), 2000);
+  const copyScript = () => {
+    if (!primaryScript) return;
+    navigator.clipboard.writeText(
+      primaryScript.segments.map((seg) => `[${seg.start_seconds.toFixed(1)}s - ${seg.end_seconds.toFixed(1)}s]\n${seg.text}`).join("\n\n")
+    );
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
-  const successCount = results.filter((r) => r.success).length;
-  const ttsOk = ttsResults.filter((r) => r.success).length;
-  const segCount = Object.values(scripts)[0]?.segments.length || 0;
-  const hasEL = !!elConfig?.api_key;
-  const hasTtsAudio = ttsOk > 0;
+  const scriptSuccessCount = scriptResults.filter((r) => r.success).length;
+  const phaseLabels: Record<string, string> = {
+    audio: "Generating audio...",
+    merge: "Merging audio with video...",
+    subtitles: "Burning subtitles...",
+    done: "Export complete!",
+    error: videoError || "Export failed",
+  };
 
   return (
-    <div style={{ maxWidth: 760, margin: "0 auto" }}>
-      <div style={{ marginBottom: 20 }}>
-        <h2 style={{ fontSize: 22, fontWeight: 700, color: C.text }}>Export</h2>
+    <div style={{ maxWidth: 680, margin: "0 auto", display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* ── Header + Output Folder + Filename ── */}
+      <div>
+        <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, marginBottom: 12 }}>Export</h2>
+
+        {/* Folder row */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "10px 14px",
+          borderRadius: 8, background: C.bg, border: `1px solid ${C.border}`, marginBottom: 8,
+        }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+          </svg>
+          <span style={{ flex: 1, fontSize: 12, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace" }}>
+            {exp.outputDirectory || "..."}
+          </span>
+          <button onClick={changePath} style={{
+            background: "none", border: "none", color: C.accent, fontSize: 12,
+            cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+          }}>Change</button>
+          {(videoPhase === "done" || audioPhase === "done" || scriptResults.length > 0) && (
+            <button onClick={() => openFolder(exp.outputDirectory!)} style={{
+              background: "none", border: "none", color: C.success, fontSize: 12,
+              cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+            }}>Open</button>
+          )}
+        </div>
+
+        {/* Filename row */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "8px 14px",
+          borderRadius: 8, background: C.bg, border: `1px solid ${C.border}`,
+        }}>
+          <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, whiteSpace: "nowrap" }}>Filename</span>
+          <input
+            type="text"
+            value={exp.basename}
+            onChange={(e) => exp.setBasename(slugify(e.target.value) || "untitled")}
+            style={{
+              flex: 1, padding: "4px 8px", border: `1px solid ${C.border}`, borderRadius: 6,
+              fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text,
+              fontFamily: "monospace", outline: "none",
+            }}
+          />
+        </div>
       </div>
 
-      {/* Output path — editable */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20, padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: `1px solid ${C.border}` }}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
-        <span style={{ flex: 1, fontSize: 13, color: C.dim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {exp.outputDirectory}
-        </span>
-        <button onClick={changePath} style={{ background: "none", border: "none", color: C.accent, fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>Change</button>
-        {(results.length > 0 || mergeResult) && (
-          <button onClick={() => openFolder(exp.outputDirectory!)} style={{ background: "none", border: "none", color: "#4ade80", fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
-            Open Folder
-          </button>
-        )}
-      </div>
+      {/* ══════════════════════════════════════════ */}
+      {/* ── 1. FINAL VIDEO (primary) ──           */}
+      {/* ══════════════════════════════════════════ */}
+      <Section
+        title="VIDEO"
+        icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18" /><polygon points="10 8 16 12 10 16 10 8" /></svg>}
+      >
+        {!hasEL ? (
+          <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
+            Add an ElevenLabs API key in Settings to enable video export.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* Audio mode */}
+            <div style={{ display: "flex", gap: 20 }}>
+              <Radio checked={exp.replaceAudio} onClick={() => exp.setReplaceAudio(true)} label="Narration only" />
+              <Radio checked={!exp.replaceAudio} onClick={() => exp.setReplaceAudio(false)} label="Mix with original" />
+            </div>
 
-      {/* Three cards in a row */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
-        {/* 1: FILE EXPORT */}
-        <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
-          <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>
-            1. Scripts
+            {/* Subtitles */}
+            <Toggle checked={exp.burnSubtitles} onChange={exp.setBurnSubtitles} label="Burn subtitles into video" />
+
+            {/* Collapsible voice settings */}
+            <div>
+              <button
+                onClick={() => setVoiceOpen(!voiceOpen)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, background: "none",
+                  border: "none", color: C.dim, fontSize: 12, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit", padding: 0,
+                }}
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                  style={{ transform: voiceOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>
+                  <polyline points="9 6 15 12 9 18" />
+                </svg>
+                Voice settings
+              </button>
+
+              {voiceOpen && (
+                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, padding: "12px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: `1px solid ${C.border}` }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    {/* Voice */}
+                    <div>
+                      <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Voice</label>
+                      <select
+                        value={elConfig.voice_id}
+                        onChange={(e) => setElConfig({ ...elConfig, voice_id: e.target.value })}
+                        style={{
+                          width: "100%", padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 6,
+                          fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text,
+                          fontFamily: "inherit", cursor: "pointer", appearance: "none" as const, outline: "none",
+                        }}
+                      >
+                        {elVoices.map((v) => (
+                          <option key={v.voice_id} value={v.voice_id} style={{ background: "#1a1a24" }}>{v.name}</option>
+                        ))}
+                      </select>
+                      {/* Custom voice ID */}
+                      <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                        <input type="text" value={customVoiceId} onChange={(e) => setCustomVoiceId(e.target.value)}
+                          placeholder="Custom Voice ID"
+                          style={{
+                            flex: 1, padding: "3px 6px", border: `1px solid ${C.border}`, borderRadius: 4,
+                            fontSize: 10, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "monospace", outline: "none",
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            if (customVoiceId.trim()) {
+                              setElConfig({ ...elConfig, voice_id: customVoiceId.trim() });
+                              if (!elVoices.find((v) => v.voice_id === customVoiceId.trim()))
+                                setElVoices([...elVoices, { voice_id: customVoiceId.trim(), name: "Custom", category: "custom" }]);
+                              setCustomVoiceId("");
+                            }
+                          }}
+                          style={{
+                            padding: "3px 8px", borderRadius: 4, border: "none",
+                            background: C.accentDim, color: C.accent, fontSize: 10,
+                            cursor: "pointer", fontFamily: "inherit",
+                          }}
+                        >Use</button>
+                      </div>
+                    </div>
+
+                    {/* Model */}
+                    <div>
+                      <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Model</label>
+                      <select
+                        value={elConfig.model_id}
+                        onChange={(e) => setElConfig({ ...elConfig, model_id: e.target.value })}
+                        style={{
+                          width: "100%", padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 6,
+                          fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text,
+                          fontFamily: "inherit", cursor: "pointer", appearance: "none" as const, outline: "none",
+                        }}
+                      >
+                        {ELEVEN_MODELS.map((m) => (
+                          <option key={m.id} value={m.id} style={{ background: "#1a1a24" }}>{m.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Sliders */}
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {([
+                      ["stability", "Stability", elConfig.stability] as const,
+                      ["similarity_boost", "Clarity", elConfig.similarity_boost] as const,
+                    ]).map(([key, lbl, val]) => (
+                      <div key={key}>
+                        <label style={{ fontSize: 10, fontWeight: 600, color: C.muted }}>{lbl} ({val.toFixed(1)})</label>
+                        <input type="range" min={0} max={1} step={0.05} value={val}
+                          onChange={(e) => setElConfig({ ...elConfig, [key]: parseFloat(e.target.value) })}
+                          style={{ width: "100%", accentColor: "#6366f1", height: 3 }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Output preview */}
+            <FilePreview name={`${exp.basename}.mp4`} />
+
+            {/* Progress */}
+            {videoPhase !== "idle" && videoPhase !== "done" && videoPhase !== "error" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <ProgressBar value={videoProgress} height={4} />
+                <span style={{ fontSize: 11, color: C.dim }}>{phaseLabels[videoPhase]}</span>
+              </div>
+            )}
+
+            {videoPhase === "done" && (
+              <div style={{ fontSize: 12, color: C.success, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                Video exported
+                <button onClick={() => openFolder(exp.outputDirectory!)} style={{ background: "none", border: "none", color: C.success, fontSize: 11, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Open folder</button>
+              </div>
+            )}
+            {videoPhase === "error" && (
+              <div style={{ fontSize: 12, color: C.error, fontWeight: 500 }}>{videoError}</div>
+            )}
+
+            {/* Export button */}
+            <Button
+              onClick={doExportVideo}
+              disabled={videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles" || !videoPath || segCount === 0}
+              style={{ width: "100%", fontSize: 13 }}
+            >
+              {videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles"
+                ? `${Math.round(videoProgress)}% — ${phaseLabels[videoPhase]}`
+                : "Export Video"}
+            </Button>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+        )}
+      </Section>
+
+      {/* ══════════════════════════════════════════ */}
+      {/* ── 2. AUDIO ONLY ──                      */}
+      {/* ══════════════════════════════════════════ */}
+      <Section
+        title="AUDIO ONLY"
+        icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14" /><path d="M15.54 8.46a5 5 0 010 7.07" /></svg>}
+      >
+        {!hasEL ? (
+          <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
+            Add an ElevenLabs API key in Settings to generate audio.
+          </p>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <p style={{ fontSize: 12, color: C.dim, margin: 0, lineHeight: 1.5 }}>
+              Generate narration audio without video. Uses the same voice settings from above.
+            </p>
+
+            <FilePreview name={`${exp.basename}-audio.mp3`} />
+
+            {audioPhase === "generating" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <ProgressBar value={audioProgress} height={4} />
+                <span style={{ fontSize: 11, color: C.dim }}>Generating audio...</span>
+              </div>
+            )}
+            {audioPhase === "done" && (
+              <div style={{ fontSize: 12, color: C.success, fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                Audio exported
+                <button onClick={() => openFolder(exp.outputDirectory!)} style={{ background: "none", border: "none", color: C.success, fontSize: 11, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Open folder</button>
+              </div>
+            )}
+            {audioPhase === "error" && (
+              <div style={{ fontSize: 12, color: C.error, fontWeight: 500 }}>{audioError}</div>
+            )}
+
+            <Button
+              variant="secondary"
+              onClick={doExportAudio}
+              disabled={audioPhase === "generating" || segCount === 0}
+              style={{ width: "100%", fontSize: 13 }}
+            >
+              {audioPhase === "generating" ? `${Math.round(audioProgress)}%...` : "Export Audio"}
+            </Button>
+          </div>
+        )}
+      </Section>
+
+      {/* ══════════════════════════════════════════ */}
+      {/* ── 3. SCRIPTS (collapsible) ──           */}
+      {/* ══════════════════════════════════════════ */}
+      <Section
+        title="SCRIPTS"
+        icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /></svg>}
+        collapsible
+        defaultOpen={false}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {/* Format toggles */}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {EXPORT_FORMATS.map((f) => {
               const sel = exp.selectedFormats.includes(f.id);
               return (
-                <button key={f.id} onClick={() => exp.toggleFormat(f.id)} title={FORMAT_TOOLTIPS[f.id]} style={{
-                  padding: "3px 8px", borderRadius: 5, fontSize: 10, fontFamily: "inherit", fontWeight: sel ? 600 : 400,
+                <button key={f.id} onClick={() => exp.toggleFormat(f.id)} style={{
+                  padding: "4px 10px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: sel ? 600 : 400,
                   border: sel ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
-                  background: sel ? "rgba(99,102,241,0.1)" : "transparent", color: sel ? C.accent : C.muted, cursor: "pointer",
-                }}>{f.label}</button>
+                  background: sel ? C.accentDim : "transparent", color: sel ? C.accent : C.muted, cursor: "pointer",
+                  transition: "all 0.15s",
+                }}>{f.label.split(" ")[0]}</button>
               );
             })}
           </div>
-          <div style={{ display: "flex", gap: 3, marginBottom: 10 }}>
+
+          {/* Language toggles */}
+          <div style={{ display: "flex", gap: 4 }}>
             {languages.map((l) => {
-              const on = exp.languageToggles[l] ?? true; const has = !!scripts[l];
+              const on = exp.languageToggles[l] ?? true;
+              const has = !!scripts[l];
               return (
                 <button key={l} onClick={() => exp.toggleLanguageExport(l)} disabled={!has} style={{
-                  padding: "2px 8px", borderRadius: 5, fontSize: 10, fontFamily: "inherit", fontWeight: 600,
+                  padding: "3px 10px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
                   border: on && has ? "1px solid rgba(99,102,241,0.3)" : `1px solid ${C.border}`,
-                  background: on && has ? "rgba(99,102,241,0.06)" : "transparent", color: has ? (on ? C.accent : C.muted) : "#2a2a3a", cursor: has ? "pointer" : "default",
+                  background: on && has ? "rgba(99,102,241,0.06)" : "transparent",
+                  color: has ? (on ? C.accent : C.muted) : "#2a2a3a",
+                  cursor: has ? "pointer" : "default",
                 }}>{l.toUpperCase()}</button>
               );
             })}
           </div>
-          <div style={{ marginTop: "auto", display: "flex", gap: 6 }}>
-            <Button variant="secondary" size="sm" onClick={copy} style={{ flex: 1, fontSize: 11 }}>{copied ? "Copied!" : "Copy"}</Button>
-            <Button size="sm" onClick={doExport} disabled={!exp.selectedFormats.length || exporting} style={{ flex: 1, fontSize: 11 }}>
-              {exporting ? "..." : "Export"}
-            </Button>
-          </div>
-          {results.length > 0 && (
-            <div style={{ marginTop: 8, fontSize: 11, color: successCount === results.length ? "#4ade80" : "#f87171", fontWeight: 600 }}>
-              {successCount}/{results.length} exported
+
+          {/* Results */}
+          {scriptResults.length > 0 && (
+            <div style={{ fontSize: 12, color: scriptSuccessCount === scriptResults.length ? C.success : C.error, fontWeight: 600 }}>
+              {scriptSuccessCount}/{scriptResults.length} files exported
             </div>
           )}
-        </div>
 
-        {/* 2: AUDIO / TTS */}
-        <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
-          <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>
-            2. Audio
+          {/* Actions */}
+          <div style={{ display: "flex", gap: 8 }}>
+            <Button variant="ghost" size="sm" onClick={copyScript} disabled={!primaryScript} style={{ fontSize: 12 }}>
+              {copied ? "Copied!" : "Copy"}
+            </Button>
+            <Button variant="secondary" size="sm" onClick={doExportScripts}
+              disabled={!exp.selectedFormats.length || scriptExporting || !primaryScript}
+              style={{ flex: 1, fontSize: 12 }}
+            >
+              {scriptExporting ? "Exporting..." : "Export Scripts"}
+            </Button>
           </div>
-          {!hasEL ? (
-            <p style={{ fontSize: 11, color: C.muted, flex: 1 }}>Add ElevenLabs key in Settings.</p>
-          ) : (
-            <>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-                <div>
-                  <label style={sliderLabel}>Voice</label>
-                  <select value={elConfig.voice_id} onChange={(e) => { if (e.target.value !== "__custom__") setElConfig({ ...elConfig, voice_id: e.target.value }); }} style={{ ...selectStyle, fontSize: 11 }}>
-                    {elVoices.map((v) => <option key={v.voice_id} value={v.voice_id} style={{ background: "#1a1a24" }}>{v.name}</option>)}
-                  </select>
-                  <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
-                    <input type="text" value={customVoiceId} onChange={(e) => setCustomVoiceId(e.target.value)} placeholder="Voice ID" style={{ flex: 1, padding: "3px 6px", border: `1px solid ${C.border}`, borderRadius: 4, fontSize: 10, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "monospace", outline: "none" }} />
-                    <button onClick={() => { if (customVoiceId.trim()) { setElConfig({ ...elConfig, voice_id: customVoiceId.trim() }); if (!elVoices.find((v) => v.voice_id === customVoiceId.trim())) setElVoices([...elVoices, { voice_id: customVoiceId.trim(), name: "Custom", category: "custom" }]); setCustomVoiceId(""); } }}
-                      style={{ padding: "3px 6px", borderRadius: 4, border: "none", background: "rgba(99,102,241,0.15)", color: C.accent, fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>Use</button>
-                  </div>
-                </div>
-                <div>
-                  <label style={sliderLabel}>Model</label>
-                  <select value={elConfig.model_id} onChange={(e) => setElConfig({ ...elConfig, model_id: e.target.value })} style={{ ...selectStyle, fontSize: 11 }}>
-                    {ELEVEN_MODELS.map((m) => <option key={m.id} value={m.id} style={{ background: "#1a1a24" }}>{m.label}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, marginBottom: 8 }}>
-                {([["stability", "Stability", elConfig.stability, 0, 1, 0.05] as const, ["similarity_boost", "Clarity", elConfig.similarity_boost, 0, 1, 0.05] as const]).map(([key, lbl, val, min, max, step]) => (
-                  <div key={key}>
-                    <label style={{ ...sliderLabel, fontSize: 10 }}>{lbl} ({val.toFixed(1)})</label>
-                    <input type="range" min={min} max={max} step={step} value={val} onChange={(e) => setElConfig({ ...elConfig, [key]: parseFloat(e.target.value) })} style={{ width: "100%", accentColor: "#6366f1", height: 3 }} />
-                  </div>
-                ))}
-              </div>
-              <div style={{ display: "flex", gap: 4, marginBottom: 8 }}>
-                <button onClick={() => setTtsCompact(true)} style={{ flex: 1, padding: "4px", borderRadius: 5, fontSize: 10, fontFamily: "inherit", fontWeight: 600, border: ttsCompact ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`, background: ttsCompact ? "rgba(99,102,241,0.08)" : "transparent", color: ttsCompact ? C.accent : C.muted, cursor: "pointer" }}>Single file</button>
-                <button onClick={() => setTtsCompact(false)} style={{ flex: 1, padding: "4px", borderRadius: 5, fontSize: 10, fontFamily: "inherit", fontWeight: 600, border: !ttsCompact ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`, background: !ttsCompact ? "rgba(99,102,241,0.08)" : "transparent", color: !ttsCompact ? C.accent : C.muted, cursor: "pointer" }}>{segCount} segs</button>
-              </div>
-              {ttsRunning && <ProgressBar value={ttsProgress} height={3} />}
-              <Button onClick={doTts} disabled={ttsRunning} size="sm" style={{ width: "100%", marginTop: "auto", fontSize: 11 }}>
-                {ttsRunning ? `${Math.round(ttsProgress)}%...` : "Generate Audio"}
-              </Button>
-              {ttsOk > 0 && <div style={{ marginTop: 6, fontSize: 11, color: "#4ade80", fontWeight: 600 }}>{ttsOk}/{ttsResults.length} generated</div>}
-            </>
-          )}
         </div>
-
-        {/* 3: FINAL VIDEO (merge audio+video) */}
-        <div style={{ padding: "16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", display: "flex", flexDirection: "column" }}>
-          <div style={{ ...sLabel, display: "flex", alignItems: "center", gap: 6 }}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/></svg>
-            3. Final Video
-          </div>
-
-          {!hasTtsAudio && !videoPath ? (
-            <p style={{ fontSize: 11, color: C.muted, flex: 1 }}>Generate audio first (step 2), then merge with video.</p>
-          ) : (
-            <>
-              <p style={{ fontSize: 11, color: C.dim, marginBottom: 10, lineHeight: 1.4 }}>
-                Merge narration audio with your video to create a ready-to-share file.
-              </p>
-
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: C.dim }}
-                  onClick={() => setReplaceAudio(true)}>
-                  <div style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${replaceAudio ? C.accent : C.muted}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {replaceAudio && <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.accent }} />}
-                  </div>
-                  Replace audio
-                </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, color: C.dim }}
-                  onClick={() => setReplaceAudio(false)}>
-                  <div style={{ width: 14, height: 14, borderRadius: "50%", border: `2px solid ${!replaceAudio ? C.accent : C.muted}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {!replaceAudio && <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.accent }} />}
-                  </div>
-                  Mix with original
-                </label>
-              </div>
-
-              {!hasTtsAudio && (
-                <p style={{ fontSize: 11, color: C.muted, marginBottom: 6, fontStyle: "italic" }}>Generate audio first (step 2)</p>
-              )}
-              <Button onClick={doMerge} disabled={merging || !hasTtsAudio} size="sm" style={{ width: "100%", marginTop: "auto", fontSize: 11 }}>
-                {merging ? "Merging..." : "Create Final Video"}
-              </Button>
-
-              {mergeResult && mergeResult !== "error" && (
-                <div style={{ marginTop: 6, fontSize: 11, color: "#4ade80", fontWeight: 600 }}>
-                  Video ready!
-                  <button onClick={() => openFolder(exp.outputDirectory!)} style={{ background: "none", border: "none", color: "#4ade80", fontSize: 11, cursor: "pointer", fontFamily: "inherit", marginLeft: 6, textDecoration: "underline" }}>
-                    Open
-                  </button>
-                </div>
-              )}
-              {mergeResult === "error" && (
-                <div style={{ marginTop: 6, fontSize: 11, color: "#f87171" }}>Merge failed. Generate audio first.</div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
+      </Section>
     </div>
   );
+}
+
+// ── Helper: generate SRT content from script (client-side for subtitle burn) ──
+function generateSrt(script: { segments: { index: number; start_seconds: number; end_seconds: number; text: string }[] }): string {
+  return script.segments.map((seg, i) => {
+    const fmtTime = (s: number) => {
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = Math.floor(s % 60);
+      const ms = Math.round((s % 1) * 1000);
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
+    };
+    return `${i + 1}\n${fmtTime(seg.start_seconds)} --> ${fmtTime(seg.end_seconds)}\n${seg.text}\n`;
+  }).join("\n");
 }

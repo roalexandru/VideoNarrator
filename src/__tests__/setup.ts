@@ -205,6 +205,9 @@ export function setupDefaultMocks() {
       case "merge_audio_video":
         return "/tmp/final.mp4";
 
+      case "burn_subtitles":
+        return "/tmp/subtitled.mp4";
+
       case "open_folder":
         return null;
 

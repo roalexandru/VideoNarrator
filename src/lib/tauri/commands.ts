@@ -165,6 +165,9 @@ export const generateTts = (segments: import("../../types/script").Segment[], ou
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });
 
+export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string) =>
+  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath });
+
 // Styles
 export const listStyles = () =>
   invoke<NarrationStyleDef[]>("list_styles");

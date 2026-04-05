@@ -835,7 +835,12 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                     ExportFormat::Markdown => export_engine::export_markdown(script),
                     ExportFormat::Ssml => export_engine::export_ssml(script),
                 };
-                let filename = format!("narration_{language}.{format}");
+                let basename = options.basename.as_deref().unwrap_or("narration");
+                let filename = if options.languages.len() > 1 {
+                    format!("{basename}_{language}.{format}")
+                } else {
+                    format!("{basename}.{format}")
+                };
                 let filepath = output_dir.join(&filename);
                 match std::fs::write(&filepath, &content) {
                     Ok(()) => results.push(ExportResult {
@@ -857,6 +862,32 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
         }
     }
     Ok(results)
+}
+
+// ── Subtitle burn command ──
+
+#[tauri::command]
+pub async fn burn_subtitles(
+    video_path: String,
+    srt_content: String,
+    output_path: String,
+) -> Result<String, NarratorError> {
+    // Write SRT to temp file, then burn
+    let out_dir = std::path::Path::new(&output_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/tmp"));
+    let srt_path = out_dir.join("_temp_subtitles.srt");
+    std::fs::write(&srt_path, &srt_content)?;
+
+    let result = video_edit::burn_subtitles(
+        &video_path,
+        &srt_path.to_string_lossy(),
+        &output_path,
+    )
+    .await;
+
+    let _ = std::fs::remove_file(&srt_path);
+    result
 }
 
 // ── Style commands ──

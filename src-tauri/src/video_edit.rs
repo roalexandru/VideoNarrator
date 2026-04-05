@@ -265,6 +265,57 @@ pub async fn merge_audio_video(
     Ok(output_path.to_string())
 }
 
+pub async fn burn_subtitles(
+    video_path: &str,
+    srt_path: &str,
+    output_path: &str,
+) -> Result<String, NarratorError> {
+    let ffmpeg = video_engine::detect_ffmpeg()?;
+
+    // Escape special characters in the SRT path for ffmpeg subtitles filter
+    // ffmpeg subtitles filter uses : and \ as special chars
+    let escaped_srt = srt_path
+        .replace('\\', "\\\\\\\\")
+        .replace(':', "\\\\:")
+        .replace("'", "\\\\'");
+
+    let subtitle_filter = format!(
+        "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",
+        escaped_srt
+    );
+
+    let output = Command::new(ffmpeg.as_os_str())
+        .args([
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            &subtitle_filter,
+            "-c:a",
+            "copy",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "23",
+            output_path,
+        ])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Subtitle burn failed: {}",
+            &stderr[..stderr.len().min(400)]
+        )));
+    }
+
+    Ok(output_path.to_string())
+}
+
 pub async fn extract_edit_thumbnails(
     video_path: &str,
     output_dir: &str,
