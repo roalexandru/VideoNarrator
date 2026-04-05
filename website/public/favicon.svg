@@ -1,0 +1,16 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#a855f7"/>
+    </linearGradient>
+  </defs>
+  <!-- macOS icon: content fills ~80% with ~10% margin on each side -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <!-- Play triangle - centered and large -->
+  <path d="M390 300 L720 512 L390 724 Z" fill="rgba(255,255,255,0.92)"/>
+  <!-- Sound wave dots bottom right -->
+  <line x1="540" y1="740" x2="540" y2="820" stroke="rgba(255,255,255,0.35)" stroke-width="28" stroke-linecap="round"/>
+  <line x1="600" y1="720" x2="600" y2="820" stroke="rgba(255,255,255,0.25)" stroke-width="28" stroke-linecap="round"/>
+  <line x1="660" y1="740" x2="660" y2="820" stroke="rgba(255,255,255,0.18)" stroke-width="28" stroke-linecap="round"/>
+</svg>

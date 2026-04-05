@@ -76,6 +76,21 @@ importers:
         specifier: ^4.1.2
         version: 4.1.2(jsdom@29.0.1)(vite@7.3.1(jiti@2.6.1)(lightningcss@1.32.0))
 
+  website:
+    devDependencies:
+      '@tailwindcss/vite':
+        specifier: ^4.2.2
+        version: 4.2.2(vite@7.3.1(jiti@2.6.1)(lightningcss@1.32.0))
+      tailwindcss:
+        specifier: ^4.2.2
+        version: 4.2.2
+      typescript:
+        specifier: ~6.0.2
+        version: 6.0.2
+      vite:
+        specifier: ^7.0.4
+        version: 7.3.1(jiti@2.6.1)(lightningcss@1.32.0)
+
 packages:
 
   '@adobe/css-tools@4.4.4':
