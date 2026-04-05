@@ -10,6 +10,7 @@ mod menu;
 mod models;
 mod project_store;
 mod screen_recorder;
+mod telemetry;
 mod video_edit;
 mod video_engine;
 
@@ -67,6 +68,9 @@ pub fn run() {
             }
         })
         .manage(AppState::new())
+        .manage(telemetry::TelemetryClient::new(
+            env!("CARGO_PKG_VERSION").into(),
+        ))
         .invoke_handler(tauri::generate_handler![
             set_menu_context,
             commands::check_ffmpeg,
@@ -100,6 +104,9 @@ pub fn run() {
             commands::export_script,
             commands::burn_subtitles,
             commands::list_styles,
+            commands::get_telemetry_enabled,
+            commands::set_telemetry_enabled,
+            commands::track_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

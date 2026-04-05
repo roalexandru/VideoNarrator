@@ -11,6 +11,7 @@ import {
   type ElevenLabsConfig, type ElevenLabsVoice,
 } from "../../lib/tauri/commands";
 import { EXPORT_FORMATS } from "../../lib/constants";
+import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import type { ExportResult } from "../../types/export";
@@ -230,6 +231,7 @@ export function ExportScreen() {
       setVideoProgress(100);
       setVideoOutputPath(finalPath);
       setVideoPhase("done");
+      trackEvent("export_completed", { type: "video" });
     } catch (e: any) {
       console.error("Export video:", e);
       setVideoError(typeof e === "string" ? e : e?.message || "Export failed");
@@ -263,6 +265,7 @@ export function ExportScreen() {
 
       setAudioOutputPath(ttsOk[0].file_path);
       setAudioPhase("done");
+      trackEvent("export_completed", { type: "audio" });
     } catch (e: any) {
       console.error("Export audio:", e);
       setAudioError(typeof e === "string" ? e : e?.message || "Audio export failed");
@@ -284,6 +287,7 @@ export function ExportScreen() {
         basename: exp.basename,
       });
       setScriptResults(results);
+      trackEvent("export_completed", { type: "script", format_count: results.length });
     } catch (e) {
       console.error(e);
     } finally {

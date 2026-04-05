@@ -20,6 +20,9 @@ struct PersistentConfig {
     api_keys: std::collections::HashMap<String, String>,
     #[serde(default)]
     elevenlabs: Option<ElevenLabsPersisted>,
+    /// Whether anonymous telemetry is enabled. Defaults to true when missing (first launch).
+    #[serde(default)]
+    telemetry_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -102,6 +105,31 @@ impl AppState {
             api_keys: Mutex::new(keys),
         }
     }
+}
+
+// ── Telemetry commands ──
+
+#[tauri::command]
+pub fn get_telemetry_enabled() -> bool {
+    load_config().telemetry_enabled.unwrap_or(true)
+}
+
+#[tauri::command]
+pub fn set_telemetry_enabled(enabled: bool) -> Result<(), NarratorError> {
+    let mut config = load_config();
+    config.telemetry_enabled = Some(enabled);
+    save_config(&config)
+}
+
+#[tauri::command]
+pub fn track_event(
+    name: String,
+    props: Option<serde_json::Value>,
+    state: tauri::State<'_, std::sync::Arc<crate::telemetry::TelemetryClient>>,
+) {
+    // Opt-out is enforced by the frontend (analytics.ts) before calling this command.
+    // No disk read here — the frontend holds the in-memory telemetry flag.
+    state.track(name, props);
 }
 
 // ── System commands ──
