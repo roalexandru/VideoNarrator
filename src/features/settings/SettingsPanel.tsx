@@ -762,7 +762,7 @@ export function SettingsPanel({
             color: C.muted,
           }}
         >
-          Narrator v0.2.0
+          Narrator v0.3.0
         </span>
       </div>
     </div>
