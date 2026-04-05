@@ -69,71 +69,82 @@ describe("ExportScreen", () => {
     clearMocks();
   });
 
-  it("renders export format buttons", () => {
+  it("renders the Export heading", () => {
     render(<ExportScreen />);
+    expect(screen.getByText("Export")).toBeInTheDocument();
+  });
 
-    expect(screen.getByText("JSON (Structured)")).toBeInTheDocument();
-    expect(screen.getByText("SRT (Subtitles)")).toBeInTheDocument();
+  it("renders VIDEO, AUDIO ONLY, and SCRIPTS sections", () => {
+    render(<ExportScreen />);
+    expect(screen.getByText("VIDEO")).toBeInTheDocument();
+    expect(screen.getByText("AUDIO ONLY")).toBeInTheDocument();
+    expect(screen.getByText("SCRIPTS")).toBeInTheDocument();
+  });
+
+  it("shows default output directory after effect runs", async () => {
+    render(<ExportScreen />);
+    await screen.findByText(/Narrator/);
+    expect(useExportStore.getState().outputDirectory).toContain("Narrator");
+  });
+
+  it("shows basename derived from project title", async () => {
+    render(<ExportScreen />);
+    await screen.findByText(/Narrator/);
+    expect(useExportStore.getState().basename).toBe("test-project");
+  });
+
+  it("shows Export Video button when ElevenLabs configured", async () => {
+    render(<ExportScreen />);
+    await screen.findByText("Export Video");
+    expect(screen.getByText("Export Video")).toBeInTheDocument();
+  });
+
+  it("shows Export Audio button", async () => {
+    render(<ExportScreen />);
+    await screen.findByText("Export Audio");
+    expect(screen.getByText("Export Audio")).toBeInTheDocument();
+  });
+
+  it("shows script format buttons when SCRIPTS section is expanded", async () => {
+    render(<ExportScreen />);
+    const user = userEvent.setup();
+
+    // SCRIPTS section is collapsed by default, click to expand
+    await user.click(screen.getByText("SCRIPTS"));
+
+    expect(screen.getByText("JSON")).toBeInTheDocument();
+    expect(screen.getByText("SRT")).toBeInTheDocument();
     expect(screen.getByText("WebVTT")).toBeInTheDocument();
-    expect(screen.getByText("Plain Text")).toBeInTheDocument();
-    expect(screen.getByText("Markdown")).toBeInTheDocument();
-    expect(screen.getByText("SSML (Speech)")).toBeInTheDocument();
   });
 
   it("clicking format button toggles selection in exportStore", async () => {
     render(<ExportScreen />);
     const user = userEvent.setup();
 
-    // Default selected formats: json, srt
+    // Expand SCRIPTS section
+    await user.click(screen.getByText("SCRIPTS"));
+
     expect(useExportStore.getState().selectedFormats).toContain("json");
     expect(useExportStore.getState().selectedFormats).toContain("srt");
 
     // Toggle off json
-    await user.click(screen.getByText("JSON (Structured)"));
+    await user.click(screen.getByText("JSON"));
     expect(useExportStore.getState().selectedFormats).not.toContain("json");
-
-    // Toggle on WebVTT
-    await user.click(screen.getByText("WebVTT"));
-    expect(useExportStore.getState().selectedFormats).toContain("vtt");
   });
 
-  it("shows default output directory after effect runs", async () => {
+  it("shows Copy and Export Scripts buttons in SCRIPTS section", async () => {
     render(<ExportScreen />);
+    const user = userEvent.setup();
 
-    // The component sets a default output directory via useEffect + getHomeDir IPC
-    // After render, the export store should have an output directory set
-    // Wait for the effect to run
-    await screen.findByText(/Narrator/);
-    expect(useExportStore.getState().outputDirectory).toContain("Narrator");
-  });
+    await user.click(screen.getByText("SCRIPTS"));
 
-  it("shows Generate Audio section when ElevenLabs configured", async () => {
-    render(<ExportScreen />);
-
-    // The component loads ElevenLabs config via IPC on mount.
-    // Our mock returns a config with an api_key, so TTS UI should appear.
-    await screen.findByText("Generate Audio");
-    expect(screen.getByText("Generate Audio")).toBeInTheDocument();
-  });
-
-  it("shows Final Video section", () => {
-    render(<ExportScreen />);
-
-    expect(screen.getByText("Final Video")).toBeInTheDocument();
-  });
-
-  it("shows the Scripts section label", () => {
-    render(<ExportScreen />);
-
-    expect(screen.getByText("Scripts")).toBeInTheDocument();
-  });
-
-  it("shows Export and Copy buttons", () => {
-    render(<ExportScreen />);
-
-    // "Export" appears as both heading and button; use getAllByText
-    const exportElements = screen.getAllByText("Export");
-    expect(exportElements.length).toBeGreaterThanOrEqual(2); // heading + button
     expect(screen.getByText("Copy")).toBeInTheDocument();
+    expect(screen.getByText("Export Scripts")).toBeInTheDocument();
+  });
+
+  it("has subtitle toggle in VIDEO section", async () => {
+    render(<ExportScreen />);
+    await screen.findByText("Burn subtitles into video");
+    expect(screen.getByText("Burn subtitles into video")).toBeInTheDocument();
   });
 });

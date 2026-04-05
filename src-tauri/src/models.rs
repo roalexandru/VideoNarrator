@@ -251,6 +251,8 @@ pub struct ExportOptions {
     pub languages: Vec<String>,
     pub output_directory: String,
     pub scripts: std::collections::HashMap<String, NarrationScript>,
+    #[serde(default)]
+    pub basename: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

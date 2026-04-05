@@ -110,8 +110,6 @@ export interface RecordingConfig {
   width: number; height: number; fps: number;
   offset_x: number; offset_y: number; capture_audio: boolean;
 }
-export const openRecorderWindow = () => invoke<void>("open_recorder_window");
-export const closeRecorderWindow = () => invoke<void>("close_recorder_window");
 export const recordScreenNative = (outputPath: string) => invoke<string>("record_screen_native", { outputPath });
 export const listScreens = () => invoke<ScreenDevice[]>("list_screens");
 export const startRecording = (config: RecordingConfig) => invoke<string>("start_recording", { config });
@@ -166,6 +164,9 @@ export const generateTts = (segments: import("../../types/script").Segment[], ou
 // Export
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });
+
+export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string) =>
+  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath });
 
 // Styles
 export const listStyles = () =>

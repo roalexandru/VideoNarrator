@@ -38,22 +38,37 @@ export function ConfigurationScreen() {
             const sel = config.languages.includes(lang.code);
             const prim = config.primaryLanguage === lang.code;
             return (
-              <button key={lang.code}
-                onClick={() => config.toggleLanguage(lang.code)}
-                onDoubleClick={() => config.setPrimaryLanguage(lang.code)}
-                style={{
-                  padding: "7px 14px", borderRadius: 8, fontSize: 13, fontFamily: "inherit",
-                  border: sel ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
-                  background: sel ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.02)",
-                  color: sel ? C.accent : C.dim, fontWeight: sel ? 600 : 400, cursor: "pointer",
-                }}>
-                {lang.flag} {lang.label}
-                {prim && sel && <span style={{ marginLeft: 3, fontSize: 10, opacity: 0.5 }}>(primary)</span>}
-              </button>
+              <div key={lang.code} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                <button
+                  onClick={() => config.toggleLanguage(lang.code)}
+                  style={{
+                    padding: "7px 14px", borderRadius: sel ? "8px 0 0 8px" : 8, fontSize: 13, fontFamily: "inherit",
+                    border: sel ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                    borderRight: sel ? "none" : undefined,
+                    background: sel ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.02)",
+                    color: sel ? C.accent : C.dim, fontWeight: sel ? 600 : 400, cursor: "pointer",
+                  }}>
+                  {lang.flag} {lang.label}
+                </button>
+                {sel && (
+                  <button
+                    onClick={() => config.setPrimaryLanguage(lang.code)}
+                    title={prim ? "Primary language" : "Set as primary"}
+                    style={{
+                      padding: "7px 8px", borderRadius: "0 8px 8px 0", fontSize: 14, fontFamily: "inherit",
+                      border: "1px solid rgba(99,102,241,0.4)", borderLeft: "none",
+                      background: prim ? "rgba(99,102,241,0.2)" : "rgba(99,102,241,0.1)",
+                      color: prim ? "#facc15" : "rgba(255,255,255,0.2)", cursor: "pointer",
+                      lineHeight: 1, display: "flex", alignItems: "center",
+                    }}>
+                    {"\u2605"}
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
-        <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Click to toggle, double-click for primary.</p>
+        <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Click to toggle. Click the star to set a language as primary.</p>
       </section>
 
       {/* Density */}
@@ -70,6 +85,7 @@ export function ConfigurationScreen() {
             }}>{d}</button>
           ))}
         </div>
+        <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Light: fewer frames, faster processing. Heavy: more detail, better narration.</p>
       </section>
 
       {/* AI Provider */}

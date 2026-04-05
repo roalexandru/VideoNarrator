@@ -2,6 +2,15 @@ import { useWizardStore, STEP_LABELS } from "../../hooks/useWizardNavigation";
 import { NarratorLogo } from "../NarratorLogo";
 import type { ReactNode } from "react";
 
+const STEP_DESCRIPTIONS = [
+  "Select your video",
+  "Trim & adjust",
+  "Style & language",
+  "Generate narration",
+  "Refine script",
+  "Save & share",
+];
+
 // ── Step icons (SVG) ──
 const Icons = [
   // 0: Project Setup (upload)
@@ -80,7 +89,14 @@ export function WizardLayout({ children, onOpenSettings, onBackToLibrary }: { ch
                     ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
                     : Icons[i]}
                 </span>
-                {lbl}
+                <div>
+                  {lbl}
+                  {active && (
+                    <div style={{ fontSize: 10, color: "#5a5a6e", fontWeight: 400, marginTop: 1 }}>
+                      {STEP_DESCRIPTIONS[i]}
+                    </div>
+                  )}
+                </div>
               </button>
             );
           })}

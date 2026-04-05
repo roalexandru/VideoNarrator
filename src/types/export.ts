@@ -7,6 +7,7 @@ export interface ExportOptions {
   languages: string[];
   output_directory: string;
   scripts: Record<string, NarrationScript>;
+  basename?: string;
 }
 
 export interface ExportResult {

@@ -708,36 +708,6 @@ pub async fn get_home_dir() -> Result<String, NarratorError> {
     Ok(dir.parent().unwrap_or(&dir).to_string_lossy().to_string())
 }
 
-// ── Recorder window ──
-
-#[tauri::command]
-pub async fn open_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
-    use tauri::{Manager, WebviewUrl};
-    if app.get_webview_window("recorder").is_some() {
-        return Ok(());
-    }
-    tauri::WebviewWindowBuilder::new(&app, "recorder", WebviewUrl::App("recorder.html".into()))
-        .title("")
-        .inner_size(520.0, 58.0)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .position(400.0, 800.0)
-        .build()
-        .map_err(|e| NarratorError::ProjectError(format!("Failed to open recorder: {e}")))?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn close_recorder_window(app: tauri::AppHandle) -> Result<(), NarratorError> {
-    use tauri::Manager;
-    if let Some(win) = app.get_webview_window("recorder") {
-        let _ = win.close();
-    }
-    Ok(())
-}
-
 // ── Screen recording commands ──
 
 /// Native screen recording: opens macOS Cmd+Shift+5 UI, blocks until done
@@ -865,7 +835,12 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                     ExportFormat::Markdown => export_engine::export_markdown(script),
                     ExportFormat::Ssml => export_engine::export_ssml(script),
                 };
-                let filename = format!("narration_{language}.{format}");
+                let basename = options.basename.as_deref().unwrap_or("narration");
+                let filename = if options.languages.len() > 1 {
+                    format!("{basename}_{language}.{format}")
+                } else {
+                    format!("{basename}.{format}")
+                };
                 let filepath = output_dir.join(&filename);
                 match std::fs::write(&filepath, &content) {
                     Ok(()) => results.push(ExportResult {
@@ -887,6 +862,28 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
         }
     }
     Ok(results)
+}
+
+// ── Subtitle burn command ──
+
+#[tauri::command]
+pub async fn burn_subtitles(
+    video_path: String,
+    srt_content: String,
+    output_path: String,
+) -> Result<String, NarratorError> {
+    // Write SRT to temp file, then burn
+    let out_dir = std::path::Path::new(&output_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/tmp"));
+    let srt_path = out_dir.join("_temp_subtitles.srt");
+    std::fs::write(&srt_path, &srt_content)?;
+
+    let result =
+        video_edit::burn_subtitles(&video_path, &srt_path.to_string_lossy(), &output_path).await;
+
+    let _ = std::fs::remove_file(&srt_path);
+    result
 }
 
 // ── Style commands ──

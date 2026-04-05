@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listProjects, deleteProject, type ProjectSummary } from "../../lib/tauri/commands";
 import { Button } from "../../components/ui/Button";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
@@ -33,6 +34,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState<{id:string,title:string}|null>(null);
 
   const refresh = () => {
     setLoading(true);
@@ -40,11 +42,9 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
   };
   useEffect(() => { refresh(); }, []);
 
-  const handleDelete = async (e: React.MouseEvent, id: string, title: string) => {
+  const handleDelete = (e: React.MouseEvent, id: string, title: string) => {
     e.stopPropagation();
-    if (!confirm(`Delete "${title}"?`)) return;
-    await deleteProject(id);
-    refresh();
+    setConfirmDelete({ id, title });
   };
 
   return (
@@ -146,6 +146,21 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
           </div>
         )}
       </div>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete Project"
+          message={`Are you sure you want to delete "${confirmDelete.title}"? This cannot be undone.`}
+          confirmLabel="Delete"
+          danger
+          onConfirm={async () => {
+            await deleteProject(confirmDelete.id);
+            setConfirmDelete(null);
+            refresh();
+          }}
+          onCancel={() => setConfirmDelete(null)}
+        />
+      )}
     </div>
   );
 }

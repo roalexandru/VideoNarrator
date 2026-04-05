@@ -10,12 +10,10 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
 
-  // Multi-page build: main app + recorder window
   build: {
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
-        recorder: resolve(__dirname, "recorder.html"),
       },
     },
   },

@@ -116,11 +116,11 @@ describe("ReviewScreen", () => {
     expect(segments[0].index).toBe(0); // Re-indexed
   });
 
-  it("renders Edit buttons for each segment", () => {
+  it("renders editable textareas for each segment", () => {
     seedStores();
     render(<ReviewScreen />);
 
-    const editButtons = screen.getAllByText("Edit");
+    const editButtons = screen.getAllByRole("textbox");
     expect(editButtons).toHaveLength(2);
   });
 
@@ -233,6 +233,6 @@ describe("ReviewScreen", () => {
     // No script seeded
 
     render(<ReviewScreen />);
-    expect(screen.getByText("No segments.")).toBeInTheDocument();
+    expect(screen.getByText("No narration generated yet")).toBeInTheDocument();
   });
 });
