@@ -1,12 +1,6 @@
 import { initMockApp } from "./mock-app";
 import { initDownloads } from "./download";
 
-// Prevent browser scroll restoration — always start at top
-if ("scrollRestoration" in history) {
-  history.scrollRestoration = "manual";
-}
-window.scrollTo(0, 0);
-
 // Scroll-triggered fade-in animations
 const observer = new IntersectionObserver(
   (entries) => {
