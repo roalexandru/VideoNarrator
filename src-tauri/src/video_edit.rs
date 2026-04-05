@@ -272,12 +272,12 @@ pub async fn burn_subtitles(
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
-    // Escape special characters in the SRT path for ffmpeg subtitles filter
-    // ffmpeg subtitles filter uses : and \ as special chars
+    // Escape special characters for ffmpeg's subtitles filter path syntax.
+    // The filter requires escaping: \ → \\, : → \:, ' → \'
     let escaped_srt = srt_path
-        .replace('\\', "\\\\\\\\")
-        .replace(':', "\\\\:")
-        .replace("'", "\\\\'");
+        .replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace('\'', "\\'");
 
     let subtitle_filter = format!(
         "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",

@@ -37,6 +37,23 @@ vi.mock("@tauri-apps/api/core", async () => {
 // ---- Mock Tauri dialog plugin ----
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
+  message: vi.fn(),
+}));
+
+// ---- Mock Tauri updater plugin ----
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: vi.fn(),
+}));
+
+// ---- Mock Tauri process plugin ----
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: vi.fn(),
+}));
+
+// ---- Mock Tauri event API ----
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+  emit: vi.fn(),
 }));
 
 /**

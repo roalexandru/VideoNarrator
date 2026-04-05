@@ -234,46 +234,45 @@ export default function App() {
     } catch (err) { console.error("Failed to load project:", err); }
   };
 
-  if (view === "library") {
-    return (
-      <>
-        <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
-        {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-        {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
-        <ToastContainer />
-      </>
-    );
-  }
-
   return (
     <>
-      <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
-        <ErrorBoundary>
-          {currentStep === 0 && <ProjectSetupScreen />}
-          {currentStep === 1 && <EditVideoScreen />}
-          {currentStep === 2 && <ConfigurationScreen />}
-          {currentStep === 3 && <ProcessingScreen />}
-          {currentStep === 4 && <ReviewScreen />}
-          {currentStep === 5 && <ExportScreen />}
-        </ErrorBoundary>
-      </WizardLayout>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-      {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
-      {showNewConfirm && (
-        <NewProjectDialog
-          onSaveAndNew={async () => {
-            setShowNewConfirm(false);
-            await handleSaveProject();
-            if (pendingAction.current === "new") doNewProject();
-            else setView("library");
-          }}
-          onDiscard={() => {
-            setShowNewConfirm(false);
-            if (pendingAction.current === "new") doNewProject();
-            else setView("library");
-          }}
-          onCancel={() => setShowNewConfirm(false)}
-        />
+      {view === "library" ? (
+        <>
+          <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
+          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+          {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
+        </>
+      ) : (
+        <>
+          <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
+            <ErrorBoundary>
+              {currentStep === 0 && <ProjectSetupScreen />}
+              {currentStep === 1 && <EditVideoScreen />}
+              {currentStep === 2 && <ConfigurationScreen />}
+              {currentStep === 3 && <ProcessingScreen />}
+              {currentStep === 4 && <ReviewScreen />}
+              {currentStep === 5 && <ExportScreen />}
+            </ErrorBoundary>
+          </WizardLayout>
+          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+          {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
+          {showNewConfirm && (
+            <NewProjectDialog
+              onSaveAndNew={async () => {
+                setShowNewConfirm(false);
+                await handleSaveProject();
+                if (pendingAction.current === "new") doNewProject();
+                else setView("library");
+              }}
+              onDiscard={() => {
+                setShowNewConfirm(false);
+                if (pendingAction.current === "new") doNewProject();
+                else setView("library");
+              }}
+              onCancel={() => setShowNewConfirm(false)}
+            />
+          )}
+        </>
       )}
       <UpdateChecker />
       <ToastContainer />

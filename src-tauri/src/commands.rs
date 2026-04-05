@@ -875,7 +875,8 @@ pub async fn burn_subtitles(
     // Write SRT to temp file, then burn
     let out_dir = std::path::Path::new(&output_path)
         .parent()
-        .unwrap_or(std::path::Path::new("/tmp"));
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
     let srt_path = out_dir.join("_temp_subtitles.srt");
     std::fs::write(&srt_path, &srt_content)?;
 
