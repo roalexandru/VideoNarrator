@@ -18,10 +18,13 @@ import { ReviewScreen } from "./features/review/ReviewScreen";
 import { ExportScreen } from "./features/export/ExportScreen";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { HelpPanel } from "./features/help/HelpPanel";
+import { PrivacyPolicy } from "./features/legal/PrivacyPolicy";
+import { TermsOfService } from "./features/legal/TermsOfService";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
-import { loadProjectFull, probeVideo, saveProject } from "./lib/tauri/commands";
+import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
+import { initTelemetry, trackEvent } from "./features/telemetry/analytics";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 type AppView = "library" | "editor";
@@ -62,12 +65,44 @@ function NewProjectDialog({ onSaveAndNew, onDiscard, onCancel }: {
   );
 }
 
+function TelemetryNotice({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      style={{
+        position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)",
+        zIndex: 9100, maxWidth: 480, padding: "14px 20px",
+        background: "#1e1e28", border: "1px solid rgba(99,102,241,0.25)",
+        borderRadius: 12, boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+        display: "flex", alignItems: "center", gap: 14,
+        animation: "toastIn 0.3s ease-out",
+      }}
+    >
+      <div style={{ flex: 1, fontSize: 13, color: "#8b8ba0", lineHeight: 1.5 }}>
+        <span style={{ color: "#e0e0ea", fontWeight: 600 }}>Anonymous analytics enabled.</span>{" "}
+        Narrator collects anonymous usage data to improve the app. No personal data is collected. You can disable this in Settings.
+      </div>
+      <button
+        onClick={onClose}
+        style={{
+          width: 24, height: 24, borderRadius: 6, border: "none",
+          background: "rgba(255,255,255,0.06)", color: "#5a5a6e",
+          cursor: "pointer", fontSize: 14, flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+      >&times;</button>
+    </div>
+  );
+}
+
 export default function App() {
   const currentStep = useWizardStore((s) => s.currentStep);
   const [view, setView] = useState<AppView>("library");
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
+  const [showTerms, setShowTerms] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
+  const [showTelemetryNotice, setShowTelemetryNotice] = useState(false);
   // Tracks what triggered the save dialog: "new" (⌘N) or "open" (⌘O)
   const pendingAction = useRef<"new" | "open">("new");
 
@@ -75,6 +110,26 @@ export default function App() {
   useEffect(() => {
     invoke("set_menu_context", { hasProject: view === "editor" }).catch(() => {});
   }, [view]);
+
+  // ── Init telemetry on mount ──
+  useEffect(() => {
+    initTelemetry().then(() => {
+      trackEvent("app_launched");
+    });
+    // Show first-launch notice if telemetry_enabled has never been set
+    getTelemetryEnabled()
+      .then(() => {
+        // Check if this might be first launch by seeing if config exists
+        // The backend returns true by default, so we show notice once
+        const noticeKey = "narrator_telemetry_notice_shown";
+        if (!localStorage.getItem(noticeKey)) {
+          setShowTelemetryNotice(true);
+          localStorage.setItem(noticeKey, "1");
+          setTimeout(() => setShowTelemetryNotice(false), 8000);
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const doNewProject = useCallback(() => {
     useProjectStore.getState().reset();
@@ -86,6 +141,7 @@ export default function App() {
     useExportStore.getState().reset();
     useWizardStore.getState().reset();
     setView("editor");
+    trackEvent("project_created");
   }, []);
 
   const handleNewProject = useCallback(() => {
@@ -237,8 +293,11 @@ export default function App() {
     return (
       <>
         <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
-        {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-        {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
+        {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+        {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
+        {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
+        {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
+        {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
         <ToastContainer />
       </>
     );
@@ -256,8 +315,11 @@ export default function App() {
           {currentStep === 5 && <ExportScreen />}
         </ErrorBoundary>
       </WizardLayout>
-      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
-      {showHelp && <HelpPanel onClose={() => setShowHelp(false)} />}
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+      {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
+      {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
+      {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
+      {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
       {showNewConfirm && (
         <NewProjectDialog
           onSaveAndNew={async () => {

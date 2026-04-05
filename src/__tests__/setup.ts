@@ -217,6 +217,15 @@ export function setupDefaultMocks() {
       case "set_menu_context":
         return null;
 
+      case "get_telemetry_enabled":
+        return true;
+
+      case "set_telemetry_enabled":
+        return null;
+
+      case "track_event":
+        return null;
+
       default:
         console.warn(`[mockIPC] Unhandled command: ${cmd}`);
         return null;

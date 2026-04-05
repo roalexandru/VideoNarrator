@@ -171,3 +171,10 @@ export const burnSubtitles = (videoPath: string, srtContent: string, outputPath:
 // Styles
 export const listStyles = () =>
   invoke<NarrationStyleDef[]>("list_styles");
+
+// Telemetry
+export const getTelemetryEnabled = () =>
+  invoke<boolean>("get_telemetry_enabled");
+
+export const setTelemetryEnabled = (enabled: boolean) =>
+  invoke<void>("set_telemetry_enabled", { enabled });

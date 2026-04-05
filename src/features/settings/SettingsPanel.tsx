@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
-import { setApiKey, getProviderStatus, validateApiKey, getElevenLabsConfig, saveElevenLabsConfig } from "../../lib/tauri/commands";
+import { setApiKey, getProviderStatus, validateApiKey, getElevenLabsConfig, saveElevenLabsConfig, getTelemetryEnabled, setTelemetryEnabled as setTelemetrySetting } from "../../lib/tauri/commands";
 import { PROVIDERS } from "../../lib/constants";
 import { Button } from "../../components/ui/Button";
+import { setTelemetryEnabled as setAnalyticsEnabled } from "../telemetry/analytics";
 import type { AiProvider, ProviderKeyStatus } from "../../types/config";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)" };
 const input = { width: "100%", padding: "8px 12px", border: `1px solid rgba(255,255,255,0.07)`, borderRadius: 8, fontSize: 13, background: "rgba(255,255,255,0.04)", color: "#e0e0ea", outline: "none", fontFamily: "inherit" };
 
-export function SettingsPanel({ onClose }: { onClose: () => void }) {
+export function SettingsPanel({ onClose, onShowPrivacyPolicy, onShowTerms }: { onClose: () => void; onShowPrivacyPolicy?: () => void; onShowTerms?: () => void }) {
   const [statuses, setStatuses] = useState<ProviderKeyStatus[]>([]);
   const [keys, setKeys] = useState<Record<string, string>>({ claude: "", openai: "" });
   const [elKeyInput, setElKeyInput] = useState("");
@@ -15,11 +16,20 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [telemetryOn, setTelemetryOn] = useState(true);
 
   useEffect(() => {
     getProviderStatus().then(setStatuses).catch(() => {});
     getElevenLabsConfig().then((cfg) => { if (cfg) setElHasKey(!!cfg.api_key); }).catch(() => {});
+    getTelemetryEnabled().then(setTelemetryOn).catch(() => {});
   }, []);
+
+  const handleTelemetryToggle = async () => {
+    const next = !telemetryOn;
+    setTelemetryOn(next);
+    setAnalyticsEnabled(next);
+    await setTelemetrySetting(next).catch(() => {});
+  };
 
   const handleEscKey = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") onClose();
@@ -102,6 +112,47 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             </div>
             {saved === "elevenlabs" && <p style={{ color: "#4ade80", fontSize: 12, marginTop: 6 }}>Saved!</p>}
           </div>
+        </div>
+
+        {/* Privacy & Analytics */}
+        <div style={{ marginTop: 20, padding: "14px 16px", borderRadius: 10, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <span style={{ fontWeight: 600, color: C.text, fontSize: 14 }}>Anonymous Usage Analytics</span>
+              <p style={{ fontSize: 12, color: C.muted, marginTop: 4, lineHeight: 1.4 }}>
+                Help improve Narrator by sharing anonymous usage data. No personal information is collected.
+              </p>
+            </div>
+            <button
+              onClick={handleTelemetryToggle}
+              style={{
+                width: 44, height: 24, borderRadius: 12, border: "none", cursor: "pointer",
+                background: telemetryOn ? "rgba(99,102,241,0.6)" : "rgba(255,255,255,0.1)",
+                position: "relative", transition: "background 0.2s ease", flexShrink: 0, marginLeft: 16,
+              }}
+            >
+              <span style={{
+                position: "absolute", top: 2, left: telemetryOn ? 22 : 2,
+                width: 20, height: 20, borderRadius: 10,
+                background: telemetryOn ? "#818cf8" : "#5a5a6e",
+                transition: "left 0.2s ease, background 0.2s ease",
+              }} />
+            </button>
+          </div>
+        </div>
+
+        {/* Legal links */}
+        <div style={{ marginTop: 12, display: "flex", gap: 16, justifyContent: "center" }}>
+          {onShowPrivacyPolicy && (
+            <button onClick={() => { onShowPrivacyPolicy(); }} style={{ background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2 }}>
+              Privacy Policy
+            </button>
+          )}
+          {onShowTerms && (
+            <button onClick={() => { onShowTerms(); }} style={{ background: "none", border: "none", color: C.muted, fontSize: 12, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline", textUnderlineOffset: 2 }}>
+              Terms of Service
+            </button>
+          )}
         </div>
 
         {error && <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, fontSize: 13, color: "#f87171" }}>{error}</div>}
