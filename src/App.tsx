@@ -20,6 +20,7 @@ import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { HelpPanel } from "./features/help/HelpPanel";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
+import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo, saveProject } from "./lib/tauri/commands";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
@@ -274,6 +275,7 @@ export default function App() {
           onCancel={() => setShowNewConfirm(false)}
         />
       )}
+      <UpdateChecker />
       <ToastContainer />
     </>
   );
