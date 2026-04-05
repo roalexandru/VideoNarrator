@@ -19,7 +19,7 @@ impl Default for ElevenLabsConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(), // "Adam" default
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(), // "George" default
             model_id: "eleven_multilingual_v2".to_string(),
             stability: 0.5,
             similarity_boost: 0.75,

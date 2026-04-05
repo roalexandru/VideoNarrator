@@ -147,4 +147,15 @@ describe("ExportScreen", () => {
     await screen.findByText("Burn subtitles into video");
     expect(screen.getByText("Burn subtitles into video")).toBeInTheDocument();
   });
+
+  it("shows voice summary card with Change button", async () => {
+    render(<ExportScreen />);
+    await screen.findByText("Export Video");
+
+    // Should show voice summary (ElevenLabs from mock)
+    expect(screen.getByText(/ElevenLabs/)).toBeInTheDocument();
+    // There are two "Change" buttons (folder path + voice), ensure at least 2 exist
+    const changeButtons = screen.getAllByText("Change");
+    expect(changeButtons.length).toBeGreaterThanOrEqual(2);
+  });
 });

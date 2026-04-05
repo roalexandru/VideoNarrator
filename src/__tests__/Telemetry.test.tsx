@@ -21,11 +21,11 @@ describe("Telemetry toggle in Settings", () => {
   });
 
   it("renders the telemetry toggle section", async () => {
-    render(<SettingsPanel onClose={onClose} />);
+    render(<SettingsPanel onClose={onClose} initialTab="providers" />);
 
     expect(screen.getByText("Anonymous Usage Analytics")).toBeInTheDocument();
     expect(
-      screen.getByText(/Help improve Narrator by sharing anonymous usage data/)
+      screen.getByText(/Help improve Narrator/)
     ).toBeInTheDocument();
   });
 
@@ -40,8 +40,11 @@ describe("Telemetry toggle in Settings", () => {
           return [
             { provider: "claude", has_key: true, models: [] },
             { provider: "openai", has_key: false, models: [] },
+            { provider: "gemini", has_key: false, models: [] },
           ];
         case "get_elevenlabs_config":
+          return null;
+        case "get_azure_tts_config":
           return null;
         case "get_telemetry_enabled":
           return true;
@@ -54,21 +57,20 @@ describe("Telemetry toggle in Settings", () => {
     });
 
     const user = userEvent.setup();
-    render(<SettingsPanel onClose={onClose} />);
+    render(<SettingsPanel onClose={onClose} initialTab="providers" />);
 
     // Wait for telemetry state to load
     await waitFor(() => {
       expect(screen.getByText("Anonymous Usage Analytics")).toBeInTheDocument();
     });
 
-    // The toggle button is the one inside the analytics section
-    // It's the only button with a span child (the toggle knob)
+    // The toggle button is inside the analytics row
     const analyticsSection = screen
       .getByText("Anonymous Usage Analytics")
       .closest("div")!
       .parentElement!;
     const toggleButton = analyticsSection.querySelector(
-      'button[style*="border-radius: 12px"]'
+      'button[style*="border-radius"]'
     ) as HTMLElement;
     expect(toggleButton).toBeTruthy();
 
@@ -89,6 +91,7 @@ describe("Telemetry toggle in Settings", () => {
         onClose={onClose}
         onShowPrivacyPolicy={onShowPrivacy}
         onShowTerms={onShowTerms}
+        initialTab="providers"
       />
     );
 
@@ -97,7 +100,7 @@ describe("Telemetry toggle in Settings", () => {
   });
 
   it("does not render legal links when callbacks are omitted", () => {
-    render(<SettingsPanel onClose={onClose} />);
+    render(<SettingsPanel onClose={onClose} initialTab="providers" />);
 
     expect(screen.queryByText("Privacy Policy")).not.toBeInTheDocument();
     expect(screen.queryByText("Terms of Service")).not.toBeInTheDocument();

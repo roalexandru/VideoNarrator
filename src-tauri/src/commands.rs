@@ -3,8 +3,8 @@
 use crate::error::NarratorError;
 use crate::models::*;
 use crate::{
-    ai_client, doc_processor, elevenlabs_client, export_engine, project_store, screen_recorder,
-    video_edit, video_engine,
+    ai_client, azure_tts_client, doc_processor, elevenlabs_client, export_engine, project_store,
+    screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,6 +20,8 @@ struct PersistentConfig {
     api_keys: std::collections::HashMap<String, String>,
     #[serde(default)]
     elevenlabs: Option<ElevenLabsPersisted>,
+    #[serde(default)]
+    azure_tts: Option<AzureTtsPersisted>,
     /// Whether anonymous telemetry is enabled. Defaults to true when missing (first launch).
     #[serde(default)]
     telemetry_enabled: Option<bool>,
@@ -33,6 +35,15 @@ struct ElevenLabsPersisted {
     stability: f32,
     similarity_boost: f32,
     style: f32,
+    speed: f32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AzureTtsPersisted {
+    api_key: String,
+    region: String,
+    voice_name: String,
+    speaking_style: String,
     speed: f32,
 }
 
@@ -95,6 +106,9 @@ impl AppState {
                 "openai" => {
                     keys.insert(AiProviderKind::OpenAi, v.clone());
                 }
+                "gemini" => {
+                    keys.insert(AiProviderKind::Gemini, v.clone());
+                }
                 _ => {}
             }
         }
@@ -155,6 +169,11 @@ pub async fn get_provider_status(
             provider: AiProviderKind::OpenAi,
             has_key: keys.contains_key(&AiProviderKind::OpenAi),
             models: ai_client::get_available_models(&AiProviderKind::OpenAi),
+        },
+        ProviderKeyStatus {
+            provider: AiProviderKind::Gemini,
+            has_key: keys.contains_key(&AiProviderKind::Gemini),
+            models: ai_client::get_available_models(&AiProviderKind::Gemini),
         },
     ])
 }
@@ -489,26 +508,114 @@ pub async fn validate_elevenlabs_key(api_key: String) -> Result<bool, NarratorEr
     elevenlabs_client::validate_key(&api_key).await
 }
 
+// ── Azure TTS commands ──
+
+#[tauri::command]
+pub async fn get_azure_tts_config(
+) -> Result<Option<azure_tts_client::AzureTtsConfig>, NarratorError> {
+    let config = load_config();
+    Ok(config.azure_tts.map(|a| azure_tts_client::AzureTtsConfig {
+        api_key: a.api_key,
+        region: a.region,
+        voice_name: a.voice_name,
+        speaking_style: a.speaking_style,
+        speed: a.speed,
+    }))
+}
+
+#[tauri::command]
+pub async fn save_azure_tts_config(
+    config: azure_tts_client::AzureTtsConfig,
+) -> Result<(), NarratorError> {
+    let mut persistent = load_config();
+    persistent.azure_tts = Some(AzureTtsPersisted {
+        api_key: config.api_key,
+        region: config.region,
+        voice_name: config.voice_name,
+        speaking_style: config.speaking_style,
+        speed: config.speed,
+    });
+    save_config(&persistent)
+}
+
+#[tauri::command]
+pub async fn list_azure_tts_voices(
+    api_key: String,
+    region: String,
+) -> Result<Vec<azure_tts_client::AzureTtsVoice>, NarratorError> {
+    azure_tts_client::list_voices(&api_key, &region).await
+}
+
+#[tauri::command]
+pub async fn validate_azure_tts_key(
+    api_key: String,
+    region: String,
+) -> Result<bool, NarratorError> {
+    azure_tts_client::validate_key(&api_key, &region).await
+}
+
+// ── TTS generation command ──
+
+/// Helper to generate speech for a single segment using the selected TTS provider.
+async fn generate_speech_for_provider(
+    tts: &TtsProvider,
+    text: &str,
+    filepath: &PathBuf,
+) -> Result<(), NarratorError> {
+    match tts {
+        TtsProvider::ElevenLabs(cfg) => {
+            elevenlabs_client::generate_speech(cfg, text, filepath).await
+        }
+        TtsProvider::Azure(cfg) => azure_tts_client::generate_speech(cfg, text, filepath).await,
+    }
+}
+
+enum TtsProvider {
+    ElevenLabs(elevenlabs_client::ElevenLabsConfig),
+    Azure(azure_tts_client::AzureTtsConfig),
+}
+
 #[tauri::command]
 pub async fn generate_tts(
     segments: Vec<Segment>,
     output_dir: String,
     compact: bool,
+    tts_provider: Option<String>,
     channel: Channel<ProgressEvent>,
 ) -> Result<Vec<elevenlabs_client::TtsResult>, NarratorError> {
+    let provider_name = tts_provider.unwrap_or_else(|| "elevenlabs".to_string());
     let config = load_config();
-    let el_config = config
-        .elevenlabs
-        .map(|e| elevenlabs_client::ElevenLabsConfig {
-            api_key: e.api_key,
-            voice_id: e.voice_id,
-            model_id: e.model_id,
-            stability: e.stability,
-            similarity_boost: e.similarity_boost,
-            style: e.style,
-            speed: e.speed,
-        })
-        .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
+
+    let tts = match provider_name.as_str() {
+        "azure" => {
+            let az_config = config
+                .azure_tts
+                .map(|a| azure_tts_client::AzureTtsConfig {
+                    api_key: a.api_key,
+                    region: a.region,
+                    voice_name: a.voice_name,
+                    speaking_style: a.speaking_style,
+                    speed: a.speed,
+                })
+                .ok_or_else(|| NarratorError::NoApiKey("azure_tts".to_string()))?;
+            TtsProvider::Azure(az_config)
+        }
+        _ => {
+            let el_config = config
+                .elevenlabs
+                .map(|e| elevenlabs_client::ElevenLabsConfig {
+                    api_key: e.api_key,
+                    voice_id: e.voice_id,
+                    model_id: e.model_id,
+                    stability: e.stability,
+                    similarity_boost: e.similarity_boost,
+                    style: e.style,
+                    speed: e.speed,
+                })
+                .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
+            TtsProvider::ElevenLabs(el_config)
+        }
+    };
 
     let out = PathBuf::from(&output_dir);
     std::fs::create_dir_all(&out)?;
@@ -532,7 +639,7 @@ pub async fn generate_tts(
             let filename = format!("_tmp_seg_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match elevenlabs_client::generate_speech(&el_config, &seg.text, &filepath).await {
+            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     segment_files.push((seg.index, filepath, seg.start_seconds, seg.end_seconds));
                 }
@@ -702,7 +809,7 @@ pub async fn generate_tts(
             let filename = format!("segment_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match elevenlabs_client::generate_speech(&el_config, &seg.text, &filepath).await {
+            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: seg.index,

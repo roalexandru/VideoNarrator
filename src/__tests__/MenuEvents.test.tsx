@@ -228,7 +228,7 @@ describe("Menu events", () => {
   it("open_settings opens the settings panel", async () => {
     render(<App />);
     await emitMenuEvent("open_settings");
-    await waitFor(() => { expect(document.body.textContent).toContain("API Keys"); });
+    await waitFor(() => { expect(document.body.textContent).toContain("Settings"); });
   });
 
   it("narrator_help opens help panel with tips and troubleshooting", async () => {

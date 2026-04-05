@@ -18,46 +18,74 @@ describe("SettingsPanel", () => {
     clearMocks();
   });
 
-  it("renders provider sections (Claude, OpenAI, ElevenLabs)", async () => {
+  it("renders the Settings heading", () => {
+    render(<SettingsPanel onClose={onClose} />);
+    expect(screen.getByText("Settings")).toBeInTheDocument();
+  });
+
+  it("renders tab navigation with Providers, AI, Voice", () => {
+    render(<SettingsPanel onClose={onClose} />);
+    expect(screen.getByText("Providers")).toBeInTheDocument();
+    expect(screen.getByText("AI")).toBeInTheDocument();
+    expect(screen.getByText("Voice")).toBeInTheDocument();
+  });
+
+  it("renders all AI provider names on Providers tab", async () => {
     render(<SettingsPanel onClose={onClose} />);
 
     expect(screen.getByText("Anthropic (Claude)")).toBeInTheDocument();
     expect(screen.getByText("OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("ElevenLabs TTS")).toBeInTheDocument();
+    expect(screen.getByText("Google (Gemini)")).toBeInTheDocument();
   });
 
-  it("shows Configured/Not set badges based on mocked status", async () => {
+  it("renders TTS provider names on Providers tab", async () => {
     render(<SettingsPanel onClose={onClose} />);
 
-    // Wait for the async getProviderStatus to resolve
-    // Claude has_key: true -> "Configured", OpenAI has_key: false -> "Not set"
-    await waitFor(() => {
-      const badges = screen.getAllByText("Configured");
-      expect(badges.length).toBeGreaterThanOrEqual(1);
-    });
+    expect(screen.getByText("ElevenLabs")).toBeInTheDocument();
+    expect(screen.getByText("Azure TTS")).toBeInTheDocument();
+  });
+
+  it("renders preferences section with telemetry on Providers tab", async () => {
+    render(<SettingsPanel onClose={onClose} />);
 
     await waitFor(() => {
-      const notSetBadges = screen.getAllByText("Not set");
-      // OpenAI + possibly ElevenLabs (depends on mock) have "Not set"
-      expect(notSetBadges.length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText("Anonymous Usage Analytics")).toBeInTheDocument();
     });
   });
 
-  it("shows Configured badge for ElevenLabs when key exists", async () => {
+  it("renders Done button that calls onClose", async () => {
+    const user = userEvent.setup();
     render(<SettingsPanel onClose={onClose} />);
 
-    // Our mock for get_elevenlabs_config returns a config with api_key
+    const doneButton = screen.getByText("Done");
+    expect(doneButton).toBeInTheDocument();
+
+    await user.click(doneButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches to AI tab when clicked", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel onClose={onClose} />);
+
+    await user.click(screen.getByText("AI"));
+
     await waitFor(() => {
-      const badges = screen.getAllByText("Configured");
-      // Claude + ElevenLabs should both show "Configured"
-      expect(badges.length).toBe(2);
+      expect(screen.getByText(/AI Provider/i)).toBeInTheDocument();
+    });
+  });
+
+  it("opens to initialTab when provided", async () => {
+    render(<SettingsPanel onClose={onClose} initialTab="voice" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/TTS Provider/i)).toBeInTheDocument();
     });
   });
 
   it("typing in API key input and clicking Save calls set_api_key", async () => {
     const setApiKeyCalls: Array<{ provider: string; key: string }> = [];
 
-    // Override mock to track set_api_key calls
     clearMocks();
     mockIPC((cmd, payload) => {
       const p = payload as Record<string, unknown> | undefined;
@@ -66,9 +94,14 @@ describe("SettingsPanel", () => {
           return [
             { provider: "claude", has_key: false, models: ["claude-sonnet-4-20250514"] },
             { provider: "openai", has_key: false, models: ["gpt-4o"] },
+            { provider: "gemini", has_key: false, models: ["gemini-2.5-flash"] },
           ];
         case "get_elevenlabs_config":
           return null;
+        case "get_azure_tts_config":
+          return null;
+        case "get_telemetry_enabled":
+          return true;
         case "validate_api_key_cmd":
           return true;
         case "set_api_key":
@@ -85,42 +118,23 @@ describe("SettingsPanel", () => {
     const user = userEvent.setup();
     render(<SettingsPanel onClose={onClose} />);
 
-    // Wait for statuses to load
+    // Wait for provider rows to render
     await waitFor(() => {
-      expect(screen.getAllByText("Not set").length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText("Anthropic (Claude)")).toBeInTheDocument();
     });
 
-    // Find the first password input (Claude section) and type a key
     const inputs = screen.getAllByPlaceholderText("Enter API key...");
     expect(inputs.length).toBeGreaterThanOrEqual(1);
 
     await user.type(inputs[0], "sk-test-key-12345");
 
-    // Find and click the first Save button
     const saveButtons = screen.getAllByText("Save");
     await user.click(saveButtons[0]);
 
-    // Wait for the validation + save flow
     await waitFor(() => {
       expect(setApiKeyCalls.length).toBe(1);
       expect(setApiKeyCalls[0].provider).toBe("claude");
       expect(setApiKeyCalls[0].key).toBe("sk-test-key-12345");
     });
-  });
-
-  it("renders Done button that calls onClose", async () => {
-    const user = userEvent.setup();
-    render(<SettingsPanel onClose={onClose} />);
-
-    const doneButton = screen.getByText("Done");
-    expect(doneButton).toBeInTheDocument();
-
-    await user.click(doneButton);
-    expect(onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it("renders the API Keys heading", () => {
-    render(<SettingsPanel onClose={onClose} />);
-    expect(screen.getByText("API Keys")).toBeInTheDocument();
   });
 });
