@@ -26,6 +26,7 @@ interface EditStore {
   // Undo/Redo
   undoStack: ClipSnapshot[];
   redoStack: ClipSnapshot[];
+  _preSpeedSnapshot: ClipSnapshot | null; // captured before slider drag starts
   canUndo: () => boolean;
   canRedo: () => boolean;
   undo: () => void;
@@ -35,6 +36,8 @@ interface EditStore {
   splitAt: (outputTime: number) => void;
   deleteClip: (index: number) => void;
   setClipSpeed: (index: number, speed: number) => void;
+  setClipSpeedLive: (index: number, speed: number) => void; // No undo push — for slider dragging
+  commitSpeedChange: () => void; // Push undo snapshot after slider release
   setClipSkipFrames: (index: number, skip: boolean) => void;
   setClipFps: (index: number, fps: number | null) => void;
   moveClip: (fromIndex: number, toIndex: number) => void;
@@ -65,6 +68,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
   sourceDuration: 0,
   undoStack: [],
   redoStack: [],
+  _preSpeedSnapshot: null,
 
   canUndo: () => get().undoStack.length > 0,
   canRedo: () => get().redoStack.length > 0,
@@ -136,6 +140,28 @@ export const useEditStore = create<EditStore>((set, get) => ({
       return { ...undo, clips };
     }),
 
+  // Live speed update during slider drag — no undo push per tick
+  setClipSpeedLive: (index, speed) =>
+    set((state) => {
+      // Capture snapshot before first drag tick
+      const snapshot = state._preSpeedSnapshot || {
+        clips: state.clips.map((c) => ({ ...c })),
+        selectedClipIndex: state.selectedClipIndex,
+      };
+      const clips = [...state.clips];
+      clips[index] = { ...clips[index], speed };
+      return { clips, _preSpeedSnapshot: snapshot };
+    }),
+
+  // Called on slider mouseUp — pushes the pre-drag snapshot to undo stack
+  commitSpeedChange: () =>
+    set((state) => {
+      if (!state._preSpeedSnapshot) return state;
+      const stack = [...state.undoStack, state._preSpeedSnapshot];
+      if (stack.length > MAX_UNDO) stack.shift();
+      return { undoStack: stack, redoStack: [], _preSpeedSnapshot: null };
+    }),
+
   setClipSkipFrames: (index, skip) =>
     set((state) => {
       const undo = pushUndo(state);
@@ -199,5 +225,5 @@ export const useEditStore = create<EditStore>((set, get) => ({
     return clips.length > 0 ? clips[clips.length - 1].sourceEnd : 0;
   },
 
-  reset: () => set({ clips: [], selectedClipIndex: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [] }),
+  reset: () => set({ clips: [], selectedClipIndex: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null }),
 }));

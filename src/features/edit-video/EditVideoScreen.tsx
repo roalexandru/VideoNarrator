@@ -1,13 +1,10 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Channel } from "@tauri-apps/api/core";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore } from "../../stores/editStore";
-import { applyVideoEdits, extractEditThumbnails } from "../../lib/tauri/commands";
+import { extractEditThumbnails } from "../../lib/tauri/commands";
 import { Button } from "../../components/ui/Button";
-import { ProgressBar } from "../../components/ui/ProgressBar";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { ProgressEvent } from "../../types/processing";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -15,7 +12,7 @@ export function EditVideoScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
   const store = useEditStore();
-  const { clips, selectedClipIndex, editedVideoPath, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSkipFrames, moveClip, selectClip, setEditedVideoPath, undo, redo, canUndo, canRedo } = store;
+  const { clips, selectedClipIndex, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSpeedLive, commitSpeedChange, setClipSkipFrames, moveClip, selectClip, undo, redo, canUndo, canRedo } = store;
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
@@ -24,8 +21,6 @@ export function EditVideoScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
   const [thumbs, setThumbs] = useState<string[]>([]);
-  const [applying, setApplying] = useState(false);
-  const [applyPct, setApplyPct] = useState(0);
   const [zoom, setZoom] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(() => {
@@ -46,14 +41,10 @@ export function EditVideoScreen() {
   const selClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
   const outputDuration = store.getOutputDuration();
 
-  // Init clips when video loads
+  // Init clips only when no edits exist — preserves edits on navigation
   useEffect(() => {
-    if (videoDuration > 0) {
-      const clipsEnd = clips.length > 0 ? clips.reduce((s, c) => s + (c.sourceEnd - c.sourceStart), 0) : 0;
-      if (clips.length === 0 || Math.abs(clipsEnd - videoDuration) > 2) {
-        useEditStore.getState().reset();
-        initFromVideo(videoDuration);
-      }
+    if (videoDuration > 0 && clips.length === 0) {
+      initFromVideo(videoDuration);
     }
   }, [videoDuration]);
 
@@ -176,20 +167,6 @@ export function EditVideoScreen() {
 
   const togglePlay = () => { const v = videoRef.current; if (!v) return; isPlaying ? v.pause() : v.play(); };
 
-  const handleApply = async () => {
-    if (!videoFile?.path || clips.length === 0) return;
-    setApplying(true); setApplyPct(0);
-    try {
-      const ch = new Channel<ProgressEvent>();
-      ch.onmessage = (e: ProgressEvent) => { if (e.kind === "progress") setApplyPct(e.percent); };
-      const result = await applyVideoEdits(videoFile.path, `/tmp/narrator_edited_${projectId}.mp4`, {
-        clips: clips.map((c) => ({ start_seconds: c.sourceStart, end_seconds: c.sourceEnd, speed: c.speed, skip_frames: c.skipFrames, fps_override: c.fpsOverride })),
-      }, ch);
-      setEditedVideoPath(result);
-    } catch (err) { console.error("Apply failed:", err); }
-    finally { setApplying(false); }
-  };
-
   // Timeline layout: clips are contiguous, no gaps
   const timelineWidth = timelineRef.current?.clientWidth || 800;
   const pxPerSec = zoom > 0 ? zoom : (outputDuration > 0 ? timelineWidth / outputDuration : 1);
@@ -288,7 +265,6 @@ export function EditVideoScreen() {
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: C.muted }}>
           {clips.length} clip{clips.length !== 1 ? "s" : ""}
-          {editedVideoPath && <span style={{ color: "#4ade80", marginLeft: 6 }}>Applied</span>}
         </span>
         {/* Undo/Redo */}
         <button onClick={undo} disabled={!canUndo()} title="Undo (Cmd+Z)" aria-label="Undo" style={{
@@ -303,11 +279,8 @@ export function EditVideoScreen() {
         }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.13-9.36L23 10"/></svg>
         </button>
-        <Button variant="secondary" size="sm" onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Reset</Button>
-        <Button size="sm" onClick={handleApply} disabled={applying || clips.length === 0}>{applying ? `${Math.round(applyPct)}%` : "Apply Edits"}</Button>
+        <Button variant="secondary" size="sm" onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Revert to Original</Button>
       </div>
-
-      {applying && <ProgressBar value={applyPct} height={2} />}
 
       {/* RESIZE HANDLE */}
       <div
@@ -458,8 +431,15 @@ export function EditVideoScreen() {
               <Button variant="danger" size="sm" onClick={() => { if (selectedClipIndex !== null && clips.length > 1) deleteClip(selectedClipIndex); }} disabled={clips.length <= 1}>Delete</Button>
               <div style={{ width: 1, height: 20, background: C.border }} />
               <span style={{ fontSize: 11, color: C.muted }}>Speed</span>
-              <input type="range" min="0.25" max="10" step="0.25" value={selClip.speed} onChange={(e) => setClipSpeed(selectedClipIndex!, parseFloat(e.target.value))} style={{ width: 80, accentColor: "#6366f1" }} />
-              <span style={{ fontSize: 11, color: selClip.speed !== 1 ? "#a855f7" : C.muted, fontWeight: 600, minWidth: 28 }}>{selClip.speed}x</span>
+              <input type="range" min="0.25" max="10" step="0.25" value={selClip.speed}
+                onChange={(e) => setClipSpeedLive(selectedClipIndex!, parseFloat(e.target.value))}
+                onMouseUp={() => commitSpeedChange()}
+                onTouchEnd={() => commitSpeedChange()}
+                style={{ width: 80, accentColor: "#6366f1" }} />
+              <input type="number" min="0.25" max="10" step="0.25" value={selClip.speed}
+                onChange={(e) => { const v = parseFloat(e.target.value); if (v >= 0.25 && v <= 10) setClipSpeed(selectedClipIndex!, v); }}
+                style={{ width: 38, padding: "2px 4px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: selClip.speed !== 1 ? "#a855f7" : C.dim, fontSize: 11, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+              <span style={{ fontSize: 11, color: C.muted }}>x</span>
               {selClip.speed > 1 && (
                 <>
                   <span style={{ fontSize: 10, color: C.muted, marginLeft: 2 }}>
