@@ -879,12 +879,8 @@ pub async fn burn_subtitles(
     let srt_path = out_dir.join("_temp_subtitles.srt");
     std::fs::write(&srt_path, &srt_content)?;
 
-    let result = video_edit::burn_subtitles(
-        &video_path,
-        &srt_path.to_string_lossy(),
-        &output_path,
-    )
-    .await;
+    let result =
+        video_edit::burn_subtitles(&video_path, &srt_path.to_string_lossy(), &output_path).await;
 
     let _ = std::fs::remove_file(&srt_path);
     result
