@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { clearMocks } from "@tauri-apps/api/mocks";
 import { setupDefaultMocks, resetAllStores } from "./setup";
 import { ConfigurationScreen } from "../features/configuration/ConfigurationScreen";
@@ -28,7 +28,6 @@ describe("ConfigurationScreen", () => {
   it("clicking a style card updates the config store", () => {
     render(<ConfigurationScreen />);
 
-    // Default style is product_demo
     expect(useConfigStore.getState().style).toBe("product_demo");
 
     fireEvent.click(screen.getByText("Technical Deep-Dive"));
@@ -41,58 +40,56 @@ describe("ConfigurationScreen", () => {
   it("language buttons render and clicking toggles language", () => {
     render(<ConfigurationScreen />);
 
-    // English should be present
     expect(screen.getByText(/English/)).toBeInTheDocument();
     expect(screen.getByText(/Japanese/)).toBeInTheDocument();
     expect(screen.getByText(/German/)).toBeInTheDocument();
     expect(screen.getByText(/French/)).toBeInTheDocument();
 
-    // Initially only "en" is in languages
     expect(useConfigStore.getState().languages).toEqual(["en"]);
 
-    // Toggle Japanese on
     fireEvent.click(screen.getByText(/Japanese/));
     expect(useConfigStore.getState().languages).toContain("ja");
 
-    // Toggle Japanese off
     fireEvent.click(screen.getByText(/Japanese/));
     expect(useConfigStore.getState().languages).not.toContain("ja");
   });
 
-  it("AI provider cards render", () => {
+  it("renders AI summary card with current provider", async () => {
     render(<ConfigurationScreen />);
 
-    expect(screen.getByText("Anthropic (Claude)")).toBeInTheDocument();
-    expect(screen.getByText("OpenAI")).toBeInTheDocument();
-    expect(screen.getByText("Claude Sonnet 4")).toBeInTheDocument();
-    expect(screen.getByText("GPT-4o")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/Anthropic \(Claude\)/)).toBeInTheDocument();
+    });
   });
 
-  it("clicking an AI provider card updates the config store", () => {
+  it("renders Voice summary card", async () => {
     render(<ConfigurationScreen />);
 
-    expect(useConfigStore.getState().aiProvider).toBe("claude");
-
-    fireEvent.click(screen.getByText("OpenAI"));
-    expect(useConfigStore.getState().aiProvider).toBe("openai");
-    expect(useConfigStore.getState().model).toBe("gpt-4o");
+    await waitFor(() => {
+      expect(screen.getByText(/ElevenLabs/)).toBeInTheDocument();
+    });
   });
 
-  it("advanced settings toggle shows and hides the panel", () => {
+  it("renders Configure buttons for AI and Voice", async () => {
     render(<ConfigurationScreen />);
 
-    // Advanced panel should be hidden by default
+    await waitFor(() => {
+      const configureButtons = screen.getAllByText("Configure");
+      expect(configureButtons.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("project overrides toggle shows temperature and custom prompt", () => {
+    render(<ConfigurationScreen />);
+
+    // Overrides section should be hidden by default
     expect(screen.queryByText(/Temperature/)).not.toBeInTheDocument();
 
     // Click to show
-    fireEvent.click(screen.getByText("+ Show Advanced"));
+    fireEvent.click(screen.getByText(/Project Overrides/));
     expect(screen.getByText(/Temperature/)).toBeInTheDocument();
     expect(screen.getByText(/Max Frames/)).toBeInTheDocument();
     expect(screen.getByText(/Custom Prompt/)).toBeInTheDocument();
-
-    // Click to hide
-    fireEvent.click(screen.getByText("- Hide Advanced"));
-    expect(screen.queryByText(/Max Frames/)).not.toBeInTheDocument();
   });
 
   it("frame density buttons render and update store", () => {

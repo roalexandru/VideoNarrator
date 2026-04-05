@@ -5,6 +5,7 @@ import type {
   FrameDensity,
   AiProvider,
   ModelId,
+  TtsProvider,
 } from "../types/config";
 
 interface ConfigStore {
@@ -19,6 +20,7 @@ interface ConfigStore {
   aiProvider: AiProvider;
   model: ModelId;
   temperature: number;
+  ttsProvider: TtsProvider;
 
   setStyle: (style: NarrationStyleId) => void;
   toggleLanguage: (lang: LanguageCode) => void;
@@ -31,6 +33,7 @@ interface ConfigStore {
   setAiProvider: (provider: AiProvider) => void;
   setModel: (model: ModelId) => void;
   setTemperature: (temp: number) => void;
+  setTtsProvider: (provider: TtsProvider) => void;
   reset: () => void;
 }
 
@@ -45,6 +48,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   aiProvider: "claude",
   model: "claude-sonnet-4-20250514",
   temperature: 0.7,
+  ttsProvider: "elevenlabs",
 
   setStyle: (style) => set({ style }),
 
@@ -69,6 +73,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   setAiProvider: (provider) => set({ aiProvider: provider }),
   setModel: (model) => set({ model }),
   setTemperature: (temp) => set({ temperature: temp }),
+  setTtsProvider: (provider) => set({ ttsProvider: provider }),
   reset: () =>
     set({
       style: "product_demo",
@@ -81,5 +86,6 @@ export const useConfigStore = create<ConfigStore>((set) => ({
       aiProvider: "claude",
       model: "claude-sonnet-4-20250514",
       temperature: 0.7,
+      ttsProvider: "elevenlabs",
     }),
 }));

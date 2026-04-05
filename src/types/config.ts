@@ -24,12 +24,21 @@ export interface Language {
 }
 
 export type FrameDensity = "light" | "medium" | "heavy";
-export type AiProvider = "claude" | "openai";
+export type AiProvider = "claude" | "openai" | "gemini";
 export type ModelId =
   | "claude-sonnet-4-20250514"
   | "claude-opus-4-20250514"
   | "gpt-4o"
-  | "o3";
+  | "o3"
+  | "gemini-2.5-flash"
+  | "gemini-2.5-pro";
+
+export type TtsProvider = "elevenlabs" | "azure";
+
+export interface TtsProviderKeyStatus {
+  provider: TtsProvider;
+  has_key: boolean;
+}
 
 export interface AiConfig {
   provider: AiProvider;

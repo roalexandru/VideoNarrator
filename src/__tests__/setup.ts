@@ -70,6 +70,7 @@ export function setupDefaultMocks() {
         return [
           { provider: "claude", has_key: true, models: ["claude-sonnet-4-20250514"] },
           { provider: "openai", has_key: false, models: ["gpt-4o"] },
+          { provider: "gemini", has_key: false, models: ["gemini-2.5-flash"] },
         ];
 
       case "probe_video":
@@ -172,6 +173,24 @@ export function setupDefaultMocks() {
           { voice_id: "JBFqnCBsd6RMkjVDRZzb", name: "George", category: "premade" },
           { voice_id: "voice-2", name: "Rachel", category: "premade" },
         ];
+
+      case "get_azure_tts_config":
+        return null;
+
+      case "save_azure_tts_config":
+        return null;
+
+      case "list_azure_tts_voices":
+        return [
+          { short_name: "en-US-JennyNeural", display_name: "Jenny", locale: "en-US", gender: "Female" },
+          { short_name: "en-US-GuyNeural", display_name: "Guy", locale: "en-US", gender: "Male" },
+        ];
+
+      case "validate_azure_tts_key":
+        return true;
+
+      case "validate_elevenlabs_key":
+        return true;
 
       case "set_api_key":
         return null;

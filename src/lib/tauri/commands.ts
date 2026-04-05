@@ -158,8 +158,29 @@ export const getElevenLabsConfig = () => invoke<ElevenLabsConfig | null>("get_el
 export const saveElevenLabsConfig = (config: ElevenLabsConfig) => invoke<void>("save_elevenlabs_config", { config });
 export const listElevenLabsVoices = (apiKey: string) => invoke<ElevenLabsVoice[]>("list_elevenlabs_voices", { apiKey });
 export const validateElevenLabsKey = (apiKey: string) => invoke<boolean>("validate_elevenlabs_key", { apiKey });
-export const generateTts = (segments: import("../../types/script").Segment[], outputDir: string, compact: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
-  invoke<TtsResult[]>("generate_tts", { segments, outputDir, compact, channel });
+export const generateTts = (segments: import("../../types/script").Segment[], outputDir: string, compact: boolean, channel: Channel<import("../../types/processing").ProgressEvent>, ttsProvider?: string) =>
+  invoke<TtsResult[]>("generate_tts", { segments, outputDir, compact, channel, ttsProvider: ttsProvider || "elevenlabs" });
+
+// Azure TTS
+export interface AzureTtsConfig {
+  api_key: string;
+  region: string;
+  voice_name: string;
+  speaking_style: string;
+  speed: number;
+}
+
+export interface AzureTtsVoice {
+  short_name: string;
+  display_name: string;
+  locale: string;
+  gender: string;
+}
+
+export const getAzureTtsConfig = () => invoke<AzureTtsConfig | null>("get_azure_tts_config");
+export const saveAzureTtsConfig = (config: AzureTtsConfig) => invoke<void>("save_azure_tts_config", { config });
+export const listAzureTtsVoices = (apiKey: string, region: string) => invoke<AzureTtsVoice[]>("list_azure_tts_voices", { apiKey, region });
+export const validateAzureTtsKey = (apiKey: string, region: string) => invoke<boolean>("validate_azure_tts_key", { apiKey, region });
 
 // Export
 export const exportScript = (options: ExportOptions) =>

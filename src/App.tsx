@@ -26,6 +26,7 @@ import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
 import { initTelemetry, trackEvent } from "./features/telemetry/analytics";
+import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 type AppView = "library" | "editor";
@@ -98,7 +99,13 @@ function TelemetryNotice({ onClose }: { onClose: () => void }) {
 export default function App() {
   const currentStep = useWizardStore((s) => s.currentStep);
   const [view, setView] = useState<AppView>("library");
-  const [showSettings, setShowSettings] = useState(false);
+  const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab }>({ open: false });
+  const openSettings = useCallback((tab?: SettingsTab) => {
+    setSettingsState({ open: true, tab });
+  }, []);
+  const closeSettings = useCallback(() => {
+    setSettingsState({ open: false });
+  }, []);
   const [showHelp, setShowHelp] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
@@ -211,7 +218,7 @@ export default function App() {
           await handleSaveProject();
           break;
         case "open_settings":
-          setShowSettings(true);
+          openSettings();
           break;
         case "narrator_help":
           setShowHelp(true);
@@ -290,17 +297,26 @@ export default function App() {
     } catch (err) { console.error("Failed to load project:", err); }
   };
 
+  const settingsEl = settingsState.open && (
+    <SettingsPanel
+      onClose={closeSettings}
+      initialTab={settingsState.tab}
+      onShowPrivacyPolicy={() => { closeSettings(); setShowPrivacyPolicy(true); }}
+      onShowTerms={() => { closeSettings(); setShowTerms(true); }}
+    />
+  );
+
   return (
-    <>
+    <SettingsProvider value={openSettings}>
       {view === "library" ? (
         <>
-          <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => setShowSettings(true)} />
-          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+          <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => openSettings()} />
+          {settingsEl}
           {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
         </>
       ) : (
         <>
-          <WizardLayout onOpenSettings={() => setShowSettings(true)} onBackToLibrary={() => setView("library")}>
+          <WizardLayout onOpenSettings={() => openSettings()} onBackToLibrary={() => setView("library")}>
             <ErrorBoundary>
               {currentStep === 0 && <ProjectSetupScreen />}
               {currentStep === 1 && <EditVideoScreen />}
@@ -310,7 +326,7 @@ export default function App() {
               {currentStep === 5 && <ExportScreen />}
             </ErrorBoundary>
           </WizardLayout>
-          {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} onShowPrivacyPolicy={() => { setShowSettings(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowSettings(false); setShowTerms(true); }} />}
+          {settingsEl}
           {showHelp && <HelpPanel onClose={() => setShowHelp(false)} onShowPrivacyPolicy={() => { setShowHelp(false); setShowPrivacyPolicy(true); }} onShowTerms={() => { setShowHelp(false); setShowTerms(true); }} />}
           {showNewConfirm && (
             <NewProjectDialog
@@ -335,6 +351,6 @@ export default function App() {
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
       <UpdateChecker />
       <ToastContainer />
-    </>
+    </SettingsProvider>
   );
 }

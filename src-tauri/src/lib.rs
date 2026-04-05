@@ -1,6 +1,7 @@
 //! Narrator - AI-powered video narration generator. Tauri application entry point.
 
 mod ai_client;
+mod azure_tts_client;
 mod commands;
 mod doc_processor;
 mod elevenlabs_client;
@@ -91,6 +92,10 @@ pub fn run() {
             commands::save_elevenlabs_config,
             commands::list_elevenlabs_voices,
             commands::validate_elevenlabs_key,
+            commands::get_azure_tts_config,
+            commands::save_azure_tts_config,
+            commands::list_azure_tts_voices,
+            commands::validate_azure_tts_key,
             commands::generate_tts,
             commands::get_home_dir,
             commands::record_screen_native,

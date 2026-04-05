@@ -226,6 +226,122 @@ impl AiProvider for OpenAiProvider {
     }
 }
 
+// ── Gemini Provider ──
+
+pub struct GeminiProvider {
+    pub api_key: String,
+    pub model: String,
+    pub temperature: f32,
+}
+
+#[async_trait]
+impl AiProvider for GeminiProvider {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+    ) -> Result<String, NarratorError> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+
+        // Convert user_message (Claude format) to Gemini parts
+        let parts: Vec<serde_json::Value> = if user_message.is_array() {
+            user_message
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .map(|part| {
+                    if part["type"] == "image" {
+                        let media_type = part["source"]["media_type"]
+                            .as_str()
+                            .unwrap_or("image/jpeg");
+                        let data = part["source"]["data"].as_str().unwrap_or("");
+                        json!({
+                            "inlineData": {
+                                "data": data,
+                                "mimeType": media_type
+                            }
+                        })
+                    } else {
+                        // Text part
+                        json!({
+                            "text": part["text"].as_str().unwrap_or("")
+                        })
+                    }
+                })
+                .collect()
+        } else if user_message.is_string() {
+            vec![json!({ "text": user_message.as_str().unwrap_or("") })]
+        } else {
+            vec![json!({ "text": user_message.to_string() })]
+        };
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.model, self.api_key
+        );
+
+        let body = json!({
+            "contents": [{ "parts": parts }],
+            "systemInstruction": { "parts": [{ "text": system_prompt }] },
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": 8192
+            }
+        });
+
+        let mut retries = 0;
+        let max_retries = 3;
+
+        loop {
+            let resp = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await?;
+
+            let status = resp.status();
+
+            if status.is_success() {
+                let response_json: serde_json::Value = resp.json().await?;
+                let text = response_json["candidates"][0]["content"]["parts"][0]["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(text);
+            } else if status.as_u16() == 429 {
+                retries += 1;
+                if retries >= max_retries {
+                    return Err(NarratorError::RateLimited);
+                }
+                let delay = std::time::Duration::from_secs(2u64.pow(retries));
+                tokio::time::sleep(delay).await;
+            } else {
+                let error_text = resp.text().await.unwrap_or_default();
+                let truncated = if error_text.len() > 200 {
+                    &error_text[..200]
+                } else {
+                    &error_text
+                };
+                return Err(NarratorError::ApiError(format!(
+                    "Gemini API error ({status}): {truncated}"
+                )));
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "gemini"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 // ── Provider factory ──
 
 pub fn create_provider(config: &AiConfig, api_key: String) -> Box<dyn AiProvider> {
@@ -236,6 +352,11 @@ pub fn create_provider(config: &AiConfig, api_key: String) -> Box<dyn AiProvider
             temperature: config.temperature,
         }),
         AiProviderKind::OpenAi => Box::new(OpenAiProvider {
+            api_key,
+            model: config.model.clone(),
+            temperature: config.temperature,
+        }),
+        AiProviderKind::Gemini => Box::new(GeminiProvider {
             api_key,
             model: config.model.clone(),
             temperature: config.temperature,
@@ -493,7 +614,7 @@ pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bo
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
 
     match provider {
         AiProviderKind::Claude => {
@@ -523,6 +644,16 @@ pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bo
 
             Ok(resp.status().is_success())
         }
+        AiProviderKind::Gemini => {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+            );
+            let resp = client.get(&url).send().await?;
+
+            let status = resp.status().as_u16();
+            // 200 = valid key, 400/403 = invalid key
+            Ok(status == 200)
+        }
     }
 }
 
@@ -533,6 +664,10 @@ pub fn get_available_models(provider: &AiProviderKind) -> Vec<String> {
             "claude-opus-4-20250514".to_string(),
         ],
         AiProviderKind::OpenAi => vec!["gpt-4o".to_string(), "o3".to_string()],
+        AiProviderKind::Gemini => vec![
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-pro".to_string(),
+        ],
     }
 }
 
@@ -574,6 +709,10 @@ mod tests {
         let openai_models = get_available_models(&AiProviderKind::OpenAi);
         assert_eq!(openai_models.len(), 2);
         assert!(openai_models[0].contains("gpt"));
+
+        let gemini_models = get_available_models(&AiProviderKind::Gemini);
+        assert_eq!(gemini_models.len(), 2);
+        assert!(gemini_models[0].contains("gemini"));
     }
 
     #[test]
@@ -586,5 +725,17 @@ mod tests {
         let provider = create_provider(&config, "test-key".to_string());
         assert_eq!(provider.name(), "claude");
         assert_eq!(provider.model(), "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_create_gemini_provider() {
+        let config = AiConfig {
+            provider: AiProviderKind::Gemini,
+            model: "gemini-2.5-flash".to_string(),
+            temperature: 0.7,
+        };
+        let provider = create_provider(&config, "test-key".to_string());
+        assert_eq!(provider.name(), "gemini");
+        assert_eq!(provider.model(), "gemini-2.5-flash");
     }
 }

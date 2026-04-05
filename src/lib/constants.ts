@@ -1,4 +1,4 @@
-import type { NarrationStyleId, Language, AiProvider, ModelId } from "../types/config";
+import type { NarrationStyleId, Language, AiProvider, ModelId, TtsProvider } from "../types/config";
 import type { ExportFormat } from "../types/export";
 
 export const STYLES: {
@@ -78,6 +78,38 @@ export const PROVIDERS: {
       { id: "gpt-4o", label: "GPT-4o" },
       { id: "o3", label: "o3" },
     ],
+  },
+  {
+    id: "gemini",
+    label: "Google (Gemini)",
+    models: [
+      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    ],
+  },
+];
+
+export const ELEVEN_MODELS: { id: string; label: string }[] = [
+  { id: "eleven_multilingual_v2", label: "Multilingual v2" },
+  { id: "eleven_flash_v2_5", label: "Flash v2.5" },
+  { id: "eleven_turbo_v2_5", label: "Turbo v2.5" },
+  { id: "eleven_v3", label: "v3" },
+];
+
+export const TTS_PROVIDERS: {
+  id: TtsProvider;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    description: "Premium voice synthesis with cloning",
+  },
+  {
+    id: "azure",
+    label: "Azure TTS",
+    description: "Microsoft neural voices with narration styles",
   },
 ];
 

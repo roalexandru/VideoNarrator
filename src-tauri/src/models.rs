@@ -78,6 +78,8 @@ pub enum AiProviderKind {
     Claude,
     #[serde(rename = "openai")]
     OpenAi,
+    #[serde(rename = "gemini")]
+    Gemini,
 }
 
 impl std::fmt::Display for AiProviderKind {
@@ -85,6 +87,7 @@ impl std::fmt::Display for AiProviderKind {
         match self {
             AiProviderKind::Claude => write!(f, "claude"),
             AiProviderKind::OpenAi => write!(f, "openai"),
+            AiProviderKind::Gemini => write!(f, "gemini"),
         }
     }
 }

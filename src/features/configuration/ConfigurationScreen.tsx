@@ -1,15 +1,89 @@
-import { useState, type CSSProperties } from "react";
+import { useState, useEffect, type CSSProperties } from "react";
 import { useConfigStore } from "../../stores/configStore";
-import { STYLES, LANGUAGES, PROVIDERS } from "../../lib/constants";
+import { STYLES, LANGUAGES, PROVIDERS, TTS_PROVIDERS } from "../../lib/constants";
 import { Card } from "../../components/ui/Card";
+import { getProviderStatus, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { trackEvent } from "../telemetry/analytics";
+import { useOpenSettings } from "../../contexts/SettingsContext";
+import type { ProviderKeyStatus } from "../../types/config";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 const label: CSSProperties = { fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10 };
 
+const summaryCard: CSSProperties = {
+  padding: "12px 16px",
+  borderRadius: 10,
+  border: `1px solid ${C.border}`,
+  background: "rgba(255,255,255,0.02)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+};
+
+const configureBtn: CSSProperties = {
+  background: "none",
+  border: "none",
+  color: C.accent,
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  fontFamily: "inherit",
+  padding: 0,
+};
+
 export function ConfigurationScreen() {
   const config = useConfigStore();
-  const [showAdv, setShowAdv] = useState(false);
+  const openSettings = useOpenSettings();
+  const [showOverrides, setShowOverrides] = useState(false);
+
+  // Provider status (which AI providers have keys configured)
+  const [providerStatuses, setProviderStatuses] = useState<ProviderKeyStatus[]>([]);
+  // Voice info
+  const [voiceName, setVoiceName] = useState<string | null>(null);
+  const [voiceHasKey, setVoiceHasKey] = useState(false);
+
+  useEffect(() => {
+    getProviderStatus()
+      .then(setProviderStatuses)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (config.ttsProvider === "elevenlabs") {
+      getElevenLabsConfig()
+        .then((cfg) => {
+          if (cfg) {
+            setVoiceHasKey(!!cfg.api_key);
+            setVoiceName(cfg.voice_id ? cfg.voice_id : null);
+          } else {
+            setVoiceHasKey(false);
+            setVoiceName(null);
+          }
+        })
+        .catch(() => {});
+    } else if (config.ttsProvider === "azure") {
+      getAzureTtsConfig()
+        .then((cfg) => {
+          if (cfg) {
+            setVoiceHasKey(!!cfg.api_key);
+            setVoiceName(cfg.voice_name || null);
+          } else {
+            setVoiceHasKey(false);
+            setVoiceName(null);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [config.ttsProvider]);
+
+  // Derived: current AI provider info
+  const currentProvider = PROVIDERS.find((p) => p.id === config.aiProvider);
+  const currentModel = currentProvider?.models.find((m) => m.id === config.model);
+  const currentProviderStatus = providerStatuses.find((s) => s.provider === config.aiProvider);
+  const aiHasKey = currentProviderStatus?.has_key ?? false;
+
+  // Derived: current TTS provider info
+  const currentTts = TTS_PROVIDERS.find((t) => t.id === config.ttsProvider);
 
   return (
     <div style={{ maxWidth: 680, margin: "0 auto" }}>
@@ -89,34 +163,59 @@ export function ConfigurationScreen() {
         <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Light: fewer frames, faster processing. Heavy: more detail, better narration.</p>
       </section>
 
-      {/* AI Provider */}
+      {/* AI Summary Card */}
       <section style={{ marginBottom: 28 }}>
-        <div style={label}>AI Provider & Model</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          {PROVIDERS.map((p) => (
-            <Card key={p.id} selected={config.aiProvider === p.id}
-              onClick={() => { config.setAiProvider(p.id); config.setModel(p.models[0].id); trackEvent("ai_provider_selected", { provider: p.id }); }}>
-              <div style={{ fontWeight: 600, color: config.aiProvider === p.id ? C.accent : C.text, fontSize: 14, marginBottom: 8 }}>{p.label}</div>
-              {p.models.map((m) => (
-                <label key={m.id} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: C.dim, cursor: "pointer", marginBottom: 4 }}>
-                  <input type="radio" name="model" checked={config.aiProvider === p.id && config.model === m.id}
-                    onChange={() => { config.setAiProvider(p.id); config.setModel(m.id); }}
-                    style={{ accentColor: "#6366f1" }} />
-                  {m.label}
-                </label>
-              ))}
-            </Card>
-          ))}
+        <div style={label}>AI</div>
+        <div style={summaryCard}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+              background: aiHasKey ? "#4ade80" : "#fb923c",
+            }} />
+            <span style={{ fontSize: 14, color: C.text }}>
+              {currentProvider?.label ?? config.aiProvider}
+              {currentModel ? ` \u00B7 ${currentModel.label}` : ""}
+            </span>
+          </div>
+          <button style={configureBtn} onClick={() => openSettings("ai")}>Configure</button>
         </div>
+        {!aiHasKey && (
+          <p style={{ fontSize: 11, color: "#fb923c", marginTop: 6 }}>
+            No API key configured for {currentProvider?.label ?? config.aiProvider}. Open Settings to add one.
+          </p>
+        )}
       </section>
 
-      {/* Advanced */}
+      {/* Voice Summary Card */}
       <section style={{ marginBottom: 28 }}>
-        <button onClick={() => setShowAdv(!showAdv)} style={{
+        <div style={label}>Voice</div>
+        <div style={summaryCard}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{
+              width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+              background: voiceHasKey ? "#4ade80" : "#fb923c",
+            }} />
+            <span style={{ fontSize: 14, color: C.text }}>
+              {currentTts?.label ?? config.ttsProvider}
+              {voiceName ? ` \u00B7 ${voiceName}` : ""}
+            </span>
+          </div>
+          <button style={configureBtn} onClick={() => openSettings("voice")}>Configure</button>
+        </div>
+        {!voiceHasKey && (
+          <p style={{ fontSize: 11, color: "#fb923c", marginTop: 6 }}>
+            No TTS key configured. Open Settings to set up {currentTts?.label ?? "voice synthesis"}.
+          </p>
+        )}
+      </section>
+
+      {/* Project Overrides */}
+      <section style={{ marginBottom: 28 }}>
+        <button onClick={() => setShowOverrides(!showOverrides)} style={{
           background: "none", border: "none", color: C.accent, fontSize: 13, fontWeight: 500,
           cursor: "pointer", padding: 0, fontFamily: "inherit",
-        }}>{showAdv ? "- Hide" : "+ Show"} Advanced</button>
-        {showAdv && (
+        }}>{showOverrides ? "- Hide" : "+ Show"} Project Overrides</button>
+        {showOverrides && (
           <div style={{
             marginTop: 14, padding: "18px 20px", background: "rgba(255,255,255,0.02)",
             borderRadius: 10, border: `1px solid ${C.border}`,

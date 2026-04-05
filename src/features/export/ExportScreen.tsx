@@ -8,9 +8,11 @@ import { useProjectStore } from "../../stores/projectStore";
 import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
-  type ElevenLabsConfig, type ElevenLabsVoice,
+  getAzureTtsConfig, saveAzureTtsConfig,
+  type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
 import { EXPORT_FORMATS } from "../../lib/constants";
+import { useOpenSettings } from "../../contexts/SettingsContext";
 import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
@@ -25,13 +27,6 @@ const C = {
   bg: "rgba(255,255,255,0.02)", bgHover: "rgba(255,255,255,0.04)",
   success: "#4ade80", error: "#f87171",
 };
-
-const ELEVEN_MODELS = [
-  { id: "eleven_multilingual_v2", label: "Multilingual v2" },
-  { id: "eleven_flash_v2_5", label: "Flash v2.5" },
-  { id: "eleven_turbo_v2_5", label: "Turbo v2.5" },
-  { id: "eleven_v3", label: "v3" },
-];
 
 // ── Section wrapper ──
 function Section({ title, icon, children, collapsible, defaultOpen = true }: {
@@ -126,8 +121,9 @@ export function ExportScreen() {
   // TTS / Voice
   const [elConfig, setElConfig] = useState<ElevenLabsConfig | null>(null);
   const [elVoices, setElVoices] = useState<ElevenLabsVoice[]>([]);
-  const [customVoiceId, setCustomVoiceId] = useState("");
-  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [azureConfig, setAzureConfig] = useState<AzureTtsConfig | null>(null);
+  const ttsProvider = useConfigStore((s) => s.ttsProvider);
+  const openSettings = useOpenSettings();
 
   // Video export pipeline
   const [videoPhase, setVideoPhase] = useState<"idle" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
@@ -141,7 +137,7 @@ export function ExportScreen() {
   const [, setAudioOutputPath] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
 
-  const hasEL = !!elConfig?.api_key;
+  const hasTtsKey = ttsProvider === "elevenlabs" ? !!elConfig?.api_key : !!azureConfig?.api_key;
   const primaryScript = Object.values(scripts)[0];
   const segCount = primaryScript?.segments.length || 0;
 
@@ -156,7 +152,7 @@ export function ExportScreen() {
     }
   }, [projectTitle]);
 
-  // Load ElevenLabs config
+  // Load TTS config
   useEffect(() => {
     getElevenLabsConfig().then((cfg) => {
       if (cfg?.api_key) {
@@ -164,6 +160,7 @@ export function ExportScreen() {
         listElevenLabsVoices(cfg.api_key).then(setElVoices).catch(() => {});
       }
     }).catch(() => {});
+    getAzureTtsConfig().then(setAzureConfig).catch(() => {});
   }, []);
 
   const changePath = async () => {
@@ -178,8 +175,12 @@ export function ExportScreen() {
 
   // ── Export Video pipeline ──
   const doExportVideo = async () => {
-    if (!exp.outputDirectory || !elConfig || !videoPath) return;
-    await saveElevenLabsConfig(elConfig);
+    if (!exp.outputDirectory || !videoPath) return;
+    if (ttsProvider === "elevenlabs" && !elConfig) return;
+    if (ttsProvider === "azure" && !azureConfig) return;
+
+    if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
+    if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
 
     const script = getScript();
     if (!script) return;
@@ -201,7 +202,7 @@ export function ExportScreen() {
       };
 
       const audioDir = `${dir}/audio`;
-      const ttsResults = await generateTts(script.segments, audioDir, true, ch);
+      const ttsResults = await generateTts(script.segments, audioDir, true, ch, ttsProvider);
       const ttsOk = ttsResults.filter((r) => r.success);
       if (ttsOk.length === 0) throw new Error("Audio generation failed");
 
@@ -241,8 +242,12 @@ export function ExportScreen() {
 
   // ── Export Audio Only ──
   const doExportAudio = async () => {
-    if (!exp.outputDirectory || !elConfig) return;
-    await saveElevenLabsConfig(elConfig);
+    if (!exp.outputDirectory) return;
+    if (ttsProvider === "elevenlabs" && !elConfig) return;
+    if (ttsProvider === "azure" && !azureConfig) return;
+
+    if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
+    if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
 
     const script = getScript();
     if (!script) return;
@@ -259,7 +264,7 @@ export function ExportScreen() {
       };
 
       const audioDir = `${exp.outputDirectory}/audio`;
-      const ttsResults = await generateTts(script.segments, audioDir, true, ch);
+      const ttsResults = await generateTts(script.segments, audioDir, true, ch, ttsProvider);
       const ttsOk = ttsResults.filter((r) => r.success);
       if (ttsOk.length === 0) throw new Error("Audio generation failed");
 
@@ -368,9 +373,9 @@ export function ExportScreen() {
         title="VIDEO"
         icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18" /><polygon points="10 8 16 12 10 16 10 8" /></svg>}
       >
-        {!hasEL ? (
+        {!hasTtsKey ? (
           <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
-            Add an ElevenLabs API key in Settings to enable video export.
+            Add a TTS API key in Settings to enable video export.
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -383,105 +388,27 @@ export function ExportScreen() {
             {/* Subtitles */}
             <Toggle checked={exp.burnSubtitles} onChange={exp.setBurnSubtitles} label="Burn subtitles into video" />
 
-            {/* Collapsible voice settings */}
-            <div>
-              <button
-                onClick={() => setVoiceOpen(!voiceOpen)}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6, background: "none",
-                  border: "none", color: C.dim, fontSize: 12, fontWeight: 600,
-                  cursor: "pointer", fontFamily: "inherit", padding: 0,
-                }}
-              >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
-                  style={{ transform: voiceOpen ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}>
-                  <polyline points="9 6 15 12 9 18" />
-                </svg>
-                Voice settings
-              </button>
-
-              {voiceOpen && (
-                <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 10, padding: "12px", borderRadius: 8, background: "rgba(255,255,255,0.02)", border: `1px solid ${C.border}` }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    {/* Voice */}
-                    <div>
-                      <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Voice</label>
-                      <select
-                        value={elConfig.voice_id}
-                        onChange={(e) => setElConfig({ ...elConfig, voice_id: e.target.value })}
-                        style={{
-                          width: "100%", padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 6,
-                          fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text,
-                          fontFamily: "inherit", cursor: "pointer", appearance: "none" as const, outline: "none",
-                        }}
-                      >
-                        {elVoices.map((v) => (
-                          <option key={v.voice_id} value={v.voice_id} style={{ background: "#1a1a24" }}>{v.name}</option>
-                        ))}
-                      </select>
-                      {/* Custom voice ID */}
-                      <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
-                        <input type="text" value={customVoiceId} onChange={(e) => setCustomVoiceId(e.target.value)}
-                          placeholder="Custom Voice ID"
-                          style={{
-                            flex: 1, padding: "3px 6px", border: `1px solid ${C.border}`, borderRadius: 4,
-                            fontSize: 10, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "monospace", outline: "none",
-                          }}
-                        />
-                        <button
-                          onClick={() => {
-                            if (customVoiceId.trim()) {
-                              setElConfig({ ...elConfig, voice_id: customVoiceId.trim() });
-                              if (!elVoices.find((v) => v.voice_id === customVoiceId.trim()))
-                                setElVoices([...elVoices, { voice_id: customVoiceId.trim(), name: "Custom", category: "custom" }]);
-                              setCustomVoiceId("");
-                            }
-                          }}
-                          style={{
-                            padding: "3px 8px", borderRadius: 4, border: "none",
-                            background: C.accentDim, color: C.accent, fontSize: 10,
-                            cursor: "pointer", fontFamily: "inherit",
-                          }}
-                        >Use</button>
-                      </div>
-                    </div>
-
-                    {/* Model */}
-                    <div>
-                      <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 4 }}>Model</label>
-                      <select
-                        value={elConfig.model_id}
-                        onChange={(e) => setElConfig({ ...elConfig, model_id: e.target.value })}
-                        style={{
-                          width: "100%", padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 6,
-                          fontSize: 12, background: "rgba(255,255,255,0.04)", color: C.text,
-                          fontFamily: "inherit", cursor: "pointer", appearance: "none" as const, outline: "none",
-                        }}
-                      >
-                        {ELEVEN_MODELS.map((m) => (
-                          <option key={m.id} value={m.id} style={{ background: "#1a1a24" }}>{m.label}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Sliders */}
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    {([
-                      ["stability", "Stability", elConfig.stability] as const,
-                      ["similarity_boost", "Clarity", elConfig.similarity_boost] as const,
-                    ]).map(([key, lbl, val]) => (
-                      <div key={key}>
-                        <label style={{ fontSize: 10, fontWeight: 600, color: C.muted }}>{lbl} ({val.toFixed(1)})</label>
-                        <input type="range" min={0} max={1} step={0.05} value={val}
-                          onChange={(e) => setElConfig({ ...elConfig, [key]: parseFloat(e.target.value) })}
-                          style={{ width: "100%", accentColor: "#6366f1", height: 3 }}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+            {/* Voice summary */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
+              borderRadius: 8, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`,
+            }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.dim} strokeWidth="2" strokeLinecap="round">
+                <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+                <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                <line x1="12" y1="19" x2="12" y2="23"/>
+                <line x1="8" y1="23" x2="16" y2="23"/>
+              </svg>
+              <span style={{ flex: 1, fontSize: 13, color: C.dim }}>
+                {ttsProvider === "elevenlabs"
+                  ? `ElevenLabs${elVoices.find(v => v.voice_id === elConfig?.voice_id)?.name ? ` · ${elVoices.find(v => v.voice_id === elConfig?.voice_id)?.name}` : ""}${elConfig?.model_id ? ` · ${elConfig.model_id.replace("eleven_", "").replace(/_/g, " ")}` : ""}`
+                  : `Azure TTS${azureConfig?.voice_name ? ` · ${azureConfig.voice_name}` : ""}`
+                }
+              </span>
+              <button onClick={() => openSettings("voice")} style={{
+                background: "none", border: "none", color: C.accent, fontSize: 12,
+                cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+              }}>Change</button>
             </div>
 
             {/* Output preview */}
@@ -527,14 +454,14 @@ export function ExportScreen() {
         title="AUDIO ONLY"
         icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14" /><path d="M15.54 8.46a5 5 0 010 7.07" /></svg>}
       >
-        {!hasEL ? (
+        {!hasTtsKey ? (
           <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
-            Add an ElevenLabs API key in Settings to generate audio.
+            Add a TTS API key in Settings to generate audio.
           </p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <p style={{ fontSize: 12, color: C.dim, margin: 0, lineHeight: 1.5 }}>
-              Generate narration audio without video. Uses the same voice settings from above.
+              Generate narration audio without video. Uses voice settings from Settings.
             </p>
 
             <FilePreview name={`${exp.basename}-audio.mp3`} />
