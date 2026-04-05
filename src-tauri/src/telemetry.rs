@@ -28,7 +28,7 @@ impl TelemetryClient {
 
     pub fn track(&self, name: String, props: Option<Value>) {
         let session_id = self.session_id.lock().unwrap().clone();
-        let body = serde_json::json!({
+        let event = serde_json::json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "sessionId": session_id,
             "eventName": name,
@@ -42,6 +42,8 @@ impl TelemetryClient {
             },
             "props": props,
         });
+        // Aptabase API expects an array of events
+        let body = serde_json::json!([event]);
 
         let client = self.http.clone();
         tauri::async_runtime::spawn(async move {
