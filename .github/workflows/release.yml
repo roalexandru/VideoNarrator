@@ -125,7 +125,7 @@ jobs:
             *) echo "No rename needed for ${{ matrix.rust-target }}"; exit 0 ;;
           esac
 
-          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.id')
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
 
           ASSET=$(gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" \
             --paginate --jq ".[] | select(.name | endswith(\"$PATTERN\")) | \"\(.id) \(.name)\"")
@@ -153,7 +153,7 @@ jobs:
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
 
-          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases/tags/$TAG --jq '.id')
+          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
 
           for PAIR in "x64-setup.exe:Narrator-${VERSION}-Windows-x64-setup.exe" "x64_en-US.msi:Narrator-${VERSION}-Windows-x64.msi"; do
             PATTERN="${PAIR%%:*}"
