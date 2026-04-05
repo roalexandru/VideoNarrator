@@ -7,8 +7,10 @@ interface ProjectStore {
   contextDocuments: ContextDocument[];
   title: string;
   description: string;
+  createdAt: string | null;
   setProjectId: (id: string) => void;
   setVideoFile: (file: VideoFile | null) => void;
+  setCreatedAt: (ts: string) => void;
   addDocuments: (docs: ContextDocument[]) => void;
   removeDocument: (id: string) => void;
   reorderDocuments: (fromIndex: number, toIndex: number) => void;
@@ -23,8 +25,10 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   contextDocuments: [],
   title: "",
   description: "",
+  createdAt: null,
 
   setProjectId: (projectId) => set({ projectId }),
+  setCreatedAt: (ts) => set({ createdAt: ts }),
   setVideoFile: (file) => set({ videoFile: file }),
 
   addDocuments: (docs) =>
@@ -55,5 +59,6 @@ export const useProjectStore = create<ProjectStore>((set) => ({
       contextDocuments: [],
       title: "",
       description: "",
+      createdAt: null,
     }),
 }));

@@ -6,6 +6,7 @@ mod doc_processor;
 mod elevenlabs_client;
 mod error;
 mod export_engine;
+mod menu;
 mod models;
 mod project_store;
 mod screen_recorder;
@@ -13,6 +14,14 @@ mod video_edit;
 mod video_engine;
 
 use commands::AppState;
+use tauri::Emitter;
+
+/// Called from the frontend whenever the view changes so we can
+/// enable/disable project-dependent menu items.
+#[tauri::command]
+fn set_menu_context(app: tauri::AppHandle, has_project: bool) {
+    menu::set_project_context(&app, has_project);
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,8 +37,35 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            let m = menu::build(app)?;
+            app.set_menu(m)?;
+            #[cfg(target_os = "macos")]
+            menu::set_native_help_menu();
+            Ok(())
+        })
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if id.starts_with(menu::RECENT_PREFIX) {
+                // "recent:<project_id>" → emit with the full id so frontend can extract it
+                let _ = app.emit("menu-event", id);
+            } else {
+                match id {
+                    menu::NEW_PROJECT
+                    | menu::OPEN_PROJECT
+                    | menu::SAVE_PROJECT
+                    | menu::OPEN_SETTINGS
+                    | menu::NARRATOR_HELP
+                    | "toggle_fullscreen" => {
+                        let _ = app.emit("menu-event", id);
+                    }
+                    _ => {}
+                }
+            }
+        })
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
+            set_menu_context,
             commands::check_ffmpeg,
             commands::get_provider_status,
             commands::set_api_key,

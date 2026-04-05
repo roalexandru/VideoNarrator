@@ -214,6 +214,9 @@ export function setupDefaultMocks() {
       case "record_screen_native":
         return "/tmp/recording.mp4";
 
+      case "set_menu_context":
+        return null;
+
       default:
         console.warn(`[mockIPC] Unhandled command: ${cmd}`);
         return null;
