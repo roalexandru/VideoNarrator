@@ -104,16 +104,12 @@ export const listProjectFrames = (projectId: string) =>
 export const getHomeDir = () => invoke<string>("get_home_dir");
 
 // Screen recording
-export interface ScreenDevice { index: number; name: string; is_screen: boolean; }
-export interface RecordingConfig {
-  output_path: string; screen_index: number;
-  width: number; height: number; fps: number;
-  offset_x: number; offset_y: number; capture_audio: boolean;
-}
-export const recordScreenNative = (outputPath: string) => invoke<string>("record_screen_native", { outputPath });
-export const listScreens = () => invoke<ScreenDevice[]>("list_screens");
-export const startRecording = (config: RecordingConfig) => invoke<string>("start_recording", { config });
-export const stopRecording = () => invoke<void>("stop_recording");
+export const recordScreenNative = (projectId: string) => invoke<string>("record_screen_native", { projectId });
+export const startScreenRecording = (projectId: string) => invoke<void>("start_screen_recording", { projectId });
+export const pauseRecording = () => invoke<void>("pause_recording");
+export const resumeRecording = () => invoke<void>("resume_recording");
+export const stopScreenRecording = () => invoke<string>("stop_screen_recording");
+export const getRecordingsDirectory = () => invoke<string>("get_recordings_directory");
 
 // Video editing
 export interface VideoEditPlan {

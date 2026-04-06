@@ -248,7 +248,7 @@ export function setupDefaultMocks() {
         return null;
 
       case "record_screen_native":
-        return "/tmp/recording.mp4";
+        return "/Users/test/Documents/Narrator/Recordings/test-id.mov";
 
       case "set_menu_context":
         return null;
@@ -291,14 +291,20 @@ export function setupDefaultMocks() {
       case "cancel_generation":
         return null;
 
-      case "list_screens":
-        return [{ index: 0, name: "Main Display", is_screen: true }];
-
-      case "start_recording":
-        return "/tmp/recording.mp4";
-
-      case "stop_recording":
+      case "start_screen_recording":
         return null;
+
+      case "pause_recording":
+        return null;
+
+      case "resume_recording":
+        return null;
+
+      case "stop_screen_recording":
+        return "/Users/test/Documents/Narrator/Recordings/test-id.mp4";
+
+      case "get_recordings_directory":
+        return "/Users/test/Documents/Narrator/Recordings";
 
       default:
         console.warn(`[mockIPC] Unhandled command: ${cmd}`);
