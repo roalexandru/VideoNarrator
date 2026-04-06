@@ -228,6 +228,7 @@ pub async fn concatenate_segments(
 /// Available on Windows 10 version 2004+.
 #[cfg(target_os = "windows")]
 pub fn set_window_display_affinity(hwnd: isize) {
+    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::SetWindowDisplayAffinity;
 
     // WDA_EXCLUDEFROMCAPTURE = 0x00000011 (Windows 10 2004+)
@@ -235,6 +236,7 @@ pub fn set_window_display_affinity(hwnd: isize) {
     const WDA_EXCLUDEFROMCAPTURE: u32 = 0x00000011;
     const WDA_MONITOR: u32 = 0x00000001;
 
+    let hwnd = hwnd as HWND;
     let result = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) };
     if result == 0 {
         tracing::warn!("WDA_EXCLUDEFROMCAPTURE not supported, falling back to WDA_MONITOR");
