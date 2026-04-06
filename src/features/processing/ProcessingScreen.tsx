@@ -1,10 +1,11 @@
-import { useEffect, useCallback } from "react";
+import { useCallback } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { useProcessingStore } from "../../stores/processingStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
-import { startGeneration, cancelGeneration } from "../../lib/tauri/commands";
+import { useEditStore } from "../../stores/editStore";
+import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir } from "../../lib/tauri/commands";
 import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
@@ -36,9 +37,45 @@ export function ProcessingScreen() {
       else if (e.kind === "segment_streamed") proc.appendSegment(e.segment);
       else if (e.kind === "error") proc.setError(e.message);
     };
+
+    // Check if video edits need to be applied first
+    let videoPath = project.videoFile!.path;
+    const editState = useEditStore.getState();
+    const hasEdits = editState.clips.length > 1
+      || editState.clips.some((c) => c.speed !== 1.0)
+      || (editState.clips.length === 1 && editState.sourceDuration > 0
+          && (editState.clips[0].sourceStart > 0.5 || Math.abs(editState.clips[0].sourceEnd - editState.sourceDuration) > 0.5));
+
+    if (hasEdits && editState.clips.length > 0) {
+      try {
+        proc.setPhase("extracting_frames"); // reuse phase for "applying edits" visual
+        const homeDir = await getHomeDir();
+        const ext = videoPath.split(".").pop() || "mp4";
+        const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
+        const editPlan = {
+          clips: editState.clips.map((c) => ({
+            start_seconds: c.sourceStart,
+            end_seconds: c.sourceEnd,
+            speed: c.speed,
+            fps_override: c.fpsOverride,
+          })),
+        };
+        const editCh = new Channel<ProgressEvent>();
+        editCh.onmessage = (e: ProgressEvent) => {
+          if (e.kind === "progress") proc.setProgress(e.percent * 0.3); // 0-30% for edits
+        };
+        videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
+        editState.setEditedVideoPath(videoPath);
+      } catch (err: unknown) {
+        proc.setError(`Failed to apply video edits: ${typeof err === "string" ? err : (err as Error)?.message || "Unknown error"}`);
+        proc.setPhase("error");
+        return;
+      }
+    }
+
     const params: GenerationParams = {
       project_id: project.projectId,
-      video_path: project.videoFile!.path,
+      video_path: videoPath,
       document_paths: project.contextDocuments.map((d) => d.path),
       title: project.title, description: project.description,
       style: config.style, primary_language: config.primaryLanguage,
@@ -51,20 +88,18 @@ export function ProcessingScreen() {
       const script = await startGeneration(params, ch);
       setScript(config.primaryLanguage, script); proc.setPhase("done");
       trackEvent("processing_completed", { segments: script.segments.length, provider: config.aiProvider, style: config.style });
-    } catch (err: any) {
-      proc.setError(typeof err === "string" ? err : err?.message || "Unknown error");
+    } catch (err: unknown) {
+      proc.setError(typeof err === "string" ? err : (err as Error)?.message || "Unknown error");
       proc.setPhase("error");
     }
   }, [project, config, proc, setScript]);
 
-  // Only auto-run if idle AND no script exists yet (don't re-run on revisit)
   const hasScript = Object.keys(useScriptStore.getState().scripts).length > 0;
-  useEffect(() => {
-    if (proc.phase === "idle" && !hasScript) run();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // If we already have a script and phase is idle (navigated back), show completed
   const showCompleted = hasScript && (proc.phase === "idle" || proc.phase === "done");
+  // Show start button when idle with no script (first time on this step)
+  const showStart = !hasScript && proc.phase === "idle";
 
   const phases = ["extracting_frames", "processing_docs", "generating_narration"] as const;
   const pi = phases.indexOf(proc.phase as any);
@@ -72,6 +107,25 @@ export function ProcessingScreen() {
   const elapsed = proc.frames.length > 0 ? `${proc.frames.length} frames extracted` : "";
   const segCount = proc.streamingSegments.length;
   const scriptSegCount = Object.values(useScriptStore.getState().scripts)[0]?.segments.length || 0;
+
+  if (showStart) {
+    return (
+      <div style={{ maxWidth: 640, margin: "0 auto" }}>
+        <div style={{ marginBottom: 32 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 700, color: C.text }}>Processing</h2>
+          <p style={{ color: C.dim, marginTop: 4, fontSize: 14 }}>Ready to generate narration for your video.</p>
+        </div>
+        <div style={{ padding: "32px 24px", borderRadius: 12, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)", textAlign: "center" }}>
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="1.5" strokeLinecap="round" style={{ margin: "0 auto 12px", display: "block" }}>
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          <p style={{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 6 }}>Generate Narration</p>
+          <p style={{ fontSize: 13, color: C.dim, marginBottom: 20 }}>This will extract frames, analyze the video, and generate a narration script using AI.</p>
+          <Button onClick={run}>Start Generation</Button>
+        </div>
+      </div>
+    );
+  }
 
   if (showCompleted) {
     return (
