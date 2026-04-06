@@ -225,7 +225,8 @@ pub async fn merge_audio_video(
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
     let output = if replace_audio {
-        // Replace original audio entirely with narration
+        // Replace original audio entirely with narration.
+        // Keep full video duration — if narration is shorter, the rest is silence.
         Command::new(ffmpeg.as_os_str())
             .args([
                 "-y",
@@ -241,7 +242,6 @@ pub async fn merge_audio_video(
                 "0:v:0",
                 "-map",
                 "1:a:0",
-                "-shortest",
                 output_path,
             ])
             .output()

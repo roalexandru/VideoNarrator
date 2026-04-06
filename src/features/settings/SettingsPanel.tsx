@@ -996,6 +996,12 @@ export function SettingsPanel({
       if (id === "azure" && azVoices.length === 0 && azHasKey) loadAzVoices();
     };
 
+    // Auto-load voices when tab opens with an API key configured
+    if (ttsProvider === "elevenlabs" && elVoices.length === 0 && !elVoicesLoading && elHasKey)
+      loadElVoices();
+    if (ttsProvider === "azure" && azVoices.length === 0 && !azVoicesLoading && azHasKey)
+      loadAzVoices();
+
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={sectionLabel}>TTS Provider</div>
