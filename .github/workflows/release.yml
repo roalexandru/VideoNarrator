@@ -111,29 +111,30 @@ jobs:
 
       # tauri-action has a bug with --target: it generates .sig files but can't
       # find them for latest.json. Upload .sig files manually as a workaround.
-      - name: Upload signature files
+      - name: Upload signature and update bundle files
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -x
           TAG="${{ github.ref_name }}"
           TARGET="${{ matrix.rust-target }}"
           BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
 
-          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
+          echo "Looking for .sig files in $BUNDLE_DIR"
+          ls -laR "$BUNDLE_DIR" | grep -E '\.(sig|nsis\.zip|msi\.zip)$' || echo "No matching files found"
 
-          # Find and upload all .sig files
-          find "$BUNDLE_DIR" -name "*.sig" -type f 2>/dev/null | while read -r SIG_FILE; do
-            FILENAME=$(basename "$SIG_FILE")
-            echo "Uploading signature: $FILENAME"
-            gh release upload "$TAG" "$SIG_FILE" --clobber || echo "Warning: failed to upload $FILENAME"
-          done
+          # Collect all files to upload (sig, nsis.zip, msi.zip)
+          FILES=$(find "$BUNDLE_DIR" -type f \( -name "*.sig" -o -name "*.nsis.zip" -o -name "*.msi.zip" \) 2>/dev/null)
 
-          # Also upload .nsis.zip and .msi.zip update bundles if present (Windows)
-          find "$BUNDLE_DIR" -name "*.nsis.zip" -o -name "*.msi.zip" 2>/dev/null | while read -r BUNDLE_FILE; do
-            FILENAME=$(basename "$BUNDLE_FILE")
-            echo "Uploading update bundle: $FILENAME"
-            gh release upload "$TAG" "$BUNDLE_FILE" --clobber || echo "Warning: failed to upload $FILENAME"
+          if [ -z "$FILES" ]; then
+            echo "No signature or update bundle files found — skipping"
+            exit 0
+          fi
+
+          echo "$FILES" | while IFS= read -r FILE; do
+            echo "Uploading: $(basename "$FILE")"
+            gh release upload "$TAG" "$FILE" --clobber
           done
 
   # Generate latest.json after all platform builds complete
