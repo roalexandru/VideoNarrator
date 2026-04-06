@@ -83,7 +83,7 @@ jobs:
           cp "$FFMPEG_DIR/ffmpeg.exe" src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
           cp "$FFMPEG_DIR/ffprobe.exe" src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v0.5.25
         id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,119 +109,4 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-      # tauri-action has a bug with --target: it generates .sig files but can't
-      # find them for latest.json. Upload .sig files manually as a workaround.
-      - name: Upload signature and update bundle files
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -x
-          TAG="${{ github.ref_name }}"
-          TARGET="${{ matrix.rust-target }}"
-          BUNDLE_DIR="src-tauri/target/${TARGET}/release/bundle"
-
-          echo "Looking for .sig files in $BUNDLE_DIR"
-          ls -laR "$BUNDLE_DIR" | grep -E '\.(sig|nsis\.zip|msi\.zip)$' || echo "No matching files found"
-
-          # Collect all files to upload (sig, nsis.zip, msi.zip)
-          FILES=$(find "$BUNDLE_DIR" -type f \( -name "*.sig" -o -name "*.nsis.zip" -o -name "*.msi.zip" \) 2>/dev/null)
-
-          if [ -z "$FILES" ]; then
-            echo "No signature or update bundle files found — skipping"
-            exit 0
-          fi
-
-          echo "$FILES" | while IFS= read -r FILE; do
-            echo "Uploading: $(basename "$FILE")"
-            gh release upload "$TAG" "$FILE" --clobber
-          done
-
-  # Generate latest.json after all platform builds complete
-  publish-updater:
-    needs: build-and-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Generate and upload latest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-
-          RELEASE_ID=$(gh api repos/${{ github.repository }}/releases --jq ".[] | select(.tag_name==\"$TAG\") | .id" | head -1)
-          ASSETS=$(gh api "repos/${{ github.repository }}/releases/$RELEASE_ID/assets" --paginate)
-          NOTES=$(gh api "repos/${{ github.repository }}/releases/$RELEASE_ID" --jq '.body // ""')
-          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-          # Helper: get download URL for an asset by name suffix
-          get_url() { echo "$ASSETS" | jq -r ".[] | select(.name | endswith(\"$1\")) | .browser_download_url" | head -1; }
-          # Helper: get signature content from a .sig asset
-          get_sig() {
-            local SIG_URL=$(get_url "$1")
-            if [ -n "$SIG_URL" ] && [ "$SIG_URL" != "null" ]; then
-              curl -sL "$SIG_URL"
-            else
-              echo ""
-            fi
-          }
-
-          # Get signatures
-          MAC_AARCH64_SIG=$(get_sig ".app.tar.gz.sig" | head -1)
-          # If there's only one .app.tar.gz.sig, both arches might share it
-          # Try to find arch-specific ones first
-          MAC_AARCH64_URL=$(get_url "_aarch64.app.tar.gz")
-          MAC_X64_URL=$(get_url "_x64.app.tar.gz")
-
-          # For macOS, sig files match the tar.gz names
-          MAC_AARCH64_SIG_URL=$(get_url "aarch64.app.tar.gz.sig")
-          MAC_X64_SIG_URL=$(get_url "x64.app.tar.gz.sig")
-
-          MAC_AARCH64_SIG=""
-          if [ -n "$MAC_AARCH64_SIG_URL" ] && [ "$MAC_AARCH64_SIG_URL" != "null" ]; then
-            MAC_AARCH64_SIG=$(curl -sL "$MAC_AARCH64_SIG_URL")
-          fi
-          MAC_X64_SIG=""
-          if [ -n "$MAC_X64_SIG_URL" ] && [ "$MAC_X64_SIG_URL" != "null" ]; then
-            MAC_X64_SIG=$(curl -sL "$MAC_X64_SIG_URL")
-          fi
-
-          # Windows NSIS
-          WIN_NSIS_URL=$(get_url ".nsis.zip")
-          WIN_NSIS_SIG_URL=$(get_url ".nsis.zip.sig")
-          WIN_NSIS_SIG=""
-          if [ -n "$WIN_NSIS_SIG_URL" ] && [ "$WIN_NSIS_SIG_URL" != "null" ]; then
-            WIN_NSIS_SIG=$(curl -sL "$WIN_NSIS_SIG_URL")
-          fi
-
-          cat > /tmp/latest.json << EJSON
-          {
-            "version": "$VERSION",
-            "notes": "",
-            "pub_date": "$PUB_DATE",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "$MAC_AARCH64_SIG",
-                "url": "$MAC_AARCH64_URL"
-              },
-              "darwin-x86_64": {
-                "signature": "$MAC_X64_SIG",
-                "url": "$MAC_X64_URL"
-              },
-              "windows-x86_64": {
-                "signature": "$WIN_NSIS_SIG",
-                "url": "$WIN_NSIS_URL"
-              }
-            }
-          }
-          EJSON
-
-          echo "Generated latest.json:"
-          cat /tmp/latest.json
-
-          gh release upload "$TAG" /tmp/latest.json --clobber
 
