@@ -937,6 +937,7 @@ pub async fn start_screen_recording(
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(true)
+        .theme(Some(tauri::Theme::Dark))
         .build()
         .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to create overlay: {e}")))?;
 
