@@ -151,6 +151,36 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
     })
 }
 
+/// Probe the duration of any media file (audio or video).
+pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
+    let ffprobe = detect_ffprobe()?;
+
+    let output = Command::new(ffprobe.as_os_str())
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+        ])
+        .arg(path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
+
+    if !output.status.success() {
+        return Err(NarratorError::VideoProbeError("ffprobe failed".into()));
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
+
+    json["format"]["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .ok_or_else(|| NarratorError::VideoProbeError("No duration found".into()))
+}
+
 fn parse_frame_rate(rate: &str) -> f64 {
     let parts: Vec<&str> = rate.split('/').collect();
     if parts.len() == 2 {

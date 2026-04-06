@@ -750,17 +750,18 @@ pub async fn generate_tts(
                 video_dur
             );
 
-            // Build ordered list of files: silence gaps interleaved with segments
+            // Build ordered list of files: silence gaps interleaved with segments.
+            // Track the running audio position to compute gaps accurately,
+            // since TTS audio duration often differs from the segment time window.
             let mut concat_parts: Vec<PathBuf> = Vec::new();
             let mut silence_idx = 0;
+            let mut audio_pos: f64 = 0.0; // current position in the output audio
 
-            for (i, (_seg_idx, seg_path, start, _end)) in segment_files.iter().enumerate() {
-                // Gap before this segment
-                let prev_end = if i == 0 { 0.0 } else { segment_files[i - 1].3 };
-                let gap = start - prev_end;
+            for (_seg_idx, seg_path, start, _end) in segment_files.iter() {
+                // Gap = desired start position minus where we currently are
+                let gap = start - audio_pos;
 
                 if gap > 0.05 {
-                    // Create a silence file for this gap
                     let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
                     let _ = tokio::process::Command::new(ffmpeg.as_os_str())
                         .args([
@@ -780,11 +781,17 @@ pub async fn generate_tts(
                         .output()
                         .await;
                     concat_parts.push(sil_path);
+                    audio_pos += gap;
                     silence_idx += 1;
                 }
 
-                // The segment audio itself
+                // Probe actual TTS audio duration
+                let seg_dur = video_engine::probe_duration(seg_path.as_path())
+                    .await
+                    .unwrap_or(3.0); // fallback estimate
+
                 concat_parts.push(seg_path.clone());
+                audio_pos += seg_dur;
             }
 
             // Trailing silence to reach full video duration
