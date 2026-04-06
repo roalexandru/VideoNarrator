@@ -198,6 +198,60 @@ export default function App() {
     }
   }, []);
 
+  // ── Auto-save project when state changes (debounced) ──
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const projectId = useProjectStore((s) => s.projectId);
+  const videoFile = useProjectStore((s) => s.videoFile);
+  const title = useProjectStore((s) => s.title);
+  const description = useProjectStore((s) => s.description);
+  const contextDocuments = useProjectStore((s) => s.contextDocuments);
+  const configStyle = useConfigStore((s) => s.style);
+  const configLanguages = useConfigStore((s) => s.languages);
+  const configProvider = useConfigStore((s) => s.aiProvider);
+  const configModel = useConfigStore((s) => s.model);
+
+  useEffect(() => {
+    // Only auto-save when in editor view with a video file (same guard as manual save)
+    if (view !== "editor" || !projectId || !videoFile) return;
+
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(async () => {
+      const ps = useProjectStore.getState();
+      const cs = useConfigStore.getState();
+      const now = new Date().toISOString();
+      try {
+        await saveProject({
+          id: ps.projectId,
+          title: ps.title || "Untitled Project",
+          description: ps.description || "",
+          video_path: ps.videoFile!.path,
+          style: cs.style,
+          languages: cs.languages,
+          primary_language: cs.primaryLanguage,
+          frame_config: {
+            density: cs.frameDensity,
+            scene_threshold: cs.sceneThreshold,
+            max_frames: cs.maxFrames,
+          },
+          ai_config: {
+            provider: cs.aiProvider,
+            model: cs.model,
+            temperature: cs.temperature,
+          },
+          custom_prompt: cs.customPrompt,
+          created_at: ps.createdAt || now,
+          updated_at: now,
+        });
+      } catch {
+        // Silent — auto-save shouldn't spam the user with errors
+      }
+    }, 2000);
+
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+  }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel]);
+
   // ── Listen for native menu events from the Rust backend ──
   useEffect(() => {
     const unlisten = listen<string>("menu-event", async (event) => {
