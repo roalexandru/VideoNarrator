@@ -431,6 +431,7 @@ pub async fn generate_narration(
         custom_prompt: params.custom_prompt.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
+        edit_clips: None,
     };
     let _ = project_store::create_project(&project_config);
     let _ = project_store::save_script(&project_id, &params.primary_language, &script);

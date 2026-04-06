@@ -161,42 +161,56 @@ export default function App() {
     }
   }, [view, doNewProject]);
 
+  const buildSavePayload = useCallback(() => {
+    const ps = useProjectStore.getState();
+    const cs = useConfigStore.getState();
+    const es = useEditStore.getState();
+    const now = new Date().toISOString();
+    const editClips = es.clips.length > 0 ? es.clips.map((c) => ({
+      source_start: c.sourceStart,
+      source_end: c.sourceEnd,
+      speed: c.speed,
+      skip_frames: c.skipFrames,
+      fps_override: c.fpsOverride,
+    })) : null;
+    return {
+      id: ps.projectId || crypto.randomUUID(),
+      title: ps.title || "Untitled Project",
+      description: ps.description || "",
+      video_path: ps.videoFile!.path,
+      style: cs.style,
+      languages: cs.languages,
+      primary_language: cs.primaryLanguage,
+      frame_config: {
+        density: cs.frameDensity,
+        scene_threshold: cs.sceneThreshold,
+        max_frames: cs.maxFrames,
+      },
+      ai_config: {
+        provider: cs.aiProvider,
+        model: cs.model,
+        temperature: cs.temperature,
+      },
+      custom_prompt: cs.customPrompt,
+      created_at: ps.createdAt || now,
+      updated_at: now,
+      edit_clips: editClips,
+    };
+  }, []);
+
   const handleSaveProject = useCallback(async () => {
     const ps = useProjectStore.getState();
     if (!ps.videoFile) {
       showToast("Add a video before saving", "error");
       return;
     }
-    const cs = useConfigStore.getState();
-    const now = new Date().toISOString();
     try {
-      await saveProject({
-        id: ps.projectId || crypto.randomUUID(),
-        title: ps.title || "Untitled Project",
-        description: ps.description || "",
-        video_path: ps.videoFile.path,
-        style: cs.style,
-        languages: cs.languages,
-        primary_language: cs.primaryLanguage,
-        frame_config: {
-          density: cs.frameDensity,
-          scene_threshold: cs.sceneThreshold,
-          max_frames: cs.maxFrames,
-        },
-        ai_config: {
-          provider: cs.aiProvider,
-          model: cs.model,
-          temperature: cs.temperature,
-        },
-        custom_prompt: cs.customPrompt,
-        created_at: ps.createdAt || now,
-        updated_at: now,
-      });
+      await saveProject(buildSavePayload());
       showToast("Project saved", "success");
     } catch {
       showToast("Failed to save project", "error");
     }
-  }, []);
+  }, [buildSavePayload]);
 
   // ── Auto-save project when state changes (debounced) ──
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -209,6 +223,7 @@ export default function App() {
   const configLanguages = useConfigStore((s) => s.languages);
   const configProvider = useConfigStore((s) => s.aiProvider);
   const configModel = useConfigStore((s) => s.model);
+  const editClips = useEditStore((s) => s.clips);
 
   useEffect(() => {
     // Only auto-save when in editor view with a video file (same guard as manual save)
@@ -216,32 +231,8 @@ export default function App() {
 
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current = setTimeout(async () => {
-      const ps = useProjectStore.getState();
-      const cs = useConfigStore.getState();
-      const now = new Date().toISOString();
       try {
-        await saveProject({
-          id: ps.projectId,
-          title: ps.title || "Untitled Project",
-          description: ps.description || "",
-          video_path: ps.videoFile!.path,
-          style: cs.style,
-          languages: cs.languages,
-          primary_language: cs.primaryLanguage,
-          frame_config: {
-            density: cs.frameDensity,
-            scene_threshold: cs.sceneThreshold,
-            max_frames: cs.maxFrames,
-          },
-          ai_config: {
-            provider: cs.aiProvider,
-            model: cs.model,
-            temperature: cs.temperature,
-          },
-          custom_prompt: cs.customPrompt,
-          created_at: ps.createdAt || now,
-          updated_at: now,
-        });
+        await saveProject(buildSavePayload());
       } catch {
         // Silent — auto-save shouldn't spam the user with errors
       }
@@ -250,7 +241,7 @@ export default function App() {
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
-  }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel]);
+  }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel, editClips, buildSavePayload]);
 
   // ── Listen for native menu events from the Rust backend ──
   useEffect(() => {
@@ -333,6 +324,25 @@ export default function App() {
       cs.setModel(cfg.ai_config.model as ModelId);
       cs.setTemperature(cfg.ai_config.temperature);
       cs.setCustomPrompt(cfg.custom_prompt);
+
+      // Restore video edit clips if saved
+      const es = useEditStore.getState();
+      es.reset();
+      if (cfg.edit_clips && cfg.edit_clips.length > 0) {
+        const duration = useProjectStore.getState().videoFile?.duration || 0;
+        es.initFromVideo(duration);
+        // Replace the default single clip with saved clips
+        const restored = cfg.edit_clips.map((c: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null }) => ({
+          id: crypto.randomUUID(),
+          sourceStart: c.source_start,
+          sourceEnd: c.source_end,
+          speed: c.speed,
+          skipFrames: c.skip_frames,
+          fpsOverride: c.fps_override,
+        }));
+        // Directly set clips via store — initFromVideo already set sourceDuration
+        useEditStore.setState({ clips: restored, selectedClipIndex: 0 });
+      }
 
       const ss = useScriptStore.getState();
       ss.reset();

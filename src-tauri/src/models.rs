@@ -194,6 +194,15 @@ pub struct NarrationStyle {
 // ── Project ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditClip {
+    pub source_start: f64,
+    pub source_end: f64,
+    pub speed: f64,
+    pub skip_frames: bool,
+    pub fps_override: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub id: String,
     pub title: String,
@@ -207,6 +216,8 @@ pub struct ProjectConfig {
     pub custom_prompt: String,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub edit_clips: Option<Vec<EditClip>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

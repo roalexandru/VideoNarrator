@@ -90,6 +90,7 @@ export interface LoadedProject {
     custom_prompt: string;
     created_at: string;
     updated_at: string;
+    edit_clips?: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null }[];
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
 }

@@ -401,6 +401,7 @@ mod tests {
             custom_prompt: String::new(),
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
+            edit_clips: None,
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
