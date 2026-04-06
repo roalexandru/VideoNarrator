@@ -517,8 +517,8 @@ pub async fn generate_narration(
 
     // Post-process: ensure segments cover the full video duration
     // If AI stopped early, stretch the timeline proportionally
-    if !script.segments.is_empty() {
-        let last_end = script.segments.last().unwrap().end_seconds;
+    if let Some(last_seg) = script.segments.last() {
+        let last_end = last_seg.end_seconds;
         let target = script.total_duration_seconds;
 
         if target > 0.0 && last_end > 0.0 && last_end < target * 0.9 {

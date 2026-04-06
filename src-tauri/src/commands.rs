@@ -452,6 +452,7 @@ pub async fn list_projects() -> Result<Vec<ProjectSummary>, NarratorError> {
 
 #[tauri::command]
 pub async fn delete_project(id: String) -> Result<(), NarratorError> {
+    project_store::validate_project_id(&id)?;
     let dir = project_store::get_narrator_dir().join("projects").join(&id);
     if dir.exists() {
         std::fs::remove_dir_all(&dir)

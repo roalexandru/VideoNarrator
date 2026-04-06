@@ -27,7 +27,11 @@ impl TelemetryClient {
     }
 
     pub fn track(&self, name: String, props: Option<Value>) {
-        let session_id = self.session_id.lock().unwrap().clone();
+        let session_id = self
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let event = serde_json::json!({
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "sessionId": session_id,
@@ -60,11 +64,12 @@ impl TelemetryClient {
 fn new_session_id() -> String {
     let epoch_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     // Use blake3 hash of timestamp + thread ID as pseudo-random component
     let seed = format!("{}{:?}", epoch_secs, std::thread::current().id());
     let hash = blake3::hash(seed.as_bytes());
-    let random = u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap()) % 100_000_000;
+    let random =
+        u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap_or([0u8; 8])) % 100_000_000;
     (epoch_secs * 100_000_000 + random).to_string()
 }

@@ -262,6 +262,44 @@ export function setupDefaultMocks() {
       case "track_event":
         return null;
 
+      case "process_documents":
+        return [{ name: "doc.pdf", content: "Sample document text", token_estimate: 150 }];
+
+      case "translate_script":
+        return {
+          title: "Test Narration",
+          total_duration_seconds: 30,
+          segments: [
+            {
+              index: 0, start_seconds: 0, end_seconds: 15,
+              text: "Translated segment one.", visual_description: "Title screen",
+              emphasis: [], pace: "medium", pause_after_ms: 500, frame_refs: [0, 1],
+            },
+            {
+              index: 1, start_seconds: 15, end_seconds: 30,
+              text: "Translated segment two.", visual_description: "Feature overview",
+              emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [2, 3],
+            },
+          ],
+          metadata: {
+            style: "product_demo", language: "ja",
+            provider: "claude", model: "claude-sonnet-4-20250514",
+            generated_at: "2026-04-03T14:00:00Z",
+          },
+        };
+
+      case "cancel_generation":
+        return null;
+
+      case "list_screens":
+        return [{ index: 0, name: "Main Display", is_screen: true }];
+
+      case "start_recording":
+        return "/tmp/recording.mp4";
+
+      case "stop_recording":
+        return null;
+
       default:
         console.warn(`[mockIPC] Unhandled command: ${cmd}`);
         return null;
