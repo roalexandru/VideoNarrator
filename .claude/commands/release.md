@@ -24,15 +24,13 @@ Publish a draft release for the Narrator app. The argument should be a tag name 
   - `latest.json` (required for auto-update)
 - Report any missing assets as warnings
 
-### 4. Rename installer artifacts
-Rename only the user-facing installers to friendly names. Do NOT rename `.tar.gz`, `.sig`, `.nsis.zip`, `.msi.zip`, or `latest.json` files — those are used by the auto-updater.
+### 4. Rename macOS installer artifacts
+Rename ONLY the macOS DMG installers to friendly names. Do NOT rename any Windows assets (`.exe`, `.msi`) — `latest.json` references them by their original names and renaming breaks the Tauri auto-updater.
 
 Use the GitHub API to rename:
 ```
 Narrator_<version>_aarch64.dmg  →  Narrator-<version>-macOS-Apple-Silicon.dmg
 Narrator_<version>_x64.dmg     →  Narrator-<version>-macOS-Intel.dmg
-Narrator_<version>_x64-setup.exe  →  Narrator-<version>-Windows-x64-setup.exe
-Narrator_<version>_x64_en-US.msi  →  Narrator-<version>-Windows-x64.msi
 ```
 
 Get the release ID and assets:
@@ -57,7 +55,7 @@ gh api --method PATCH repos/roalexandru/VideoNarrator/releases/assets/<asset_id>
 |----------|-----------|
 | macOS (Apple Silicon) | `Narrator-<version>-macOS-Apple-Silicon.dmg` |
 | macOS (Intel) | `Narrator-<version>-macOS-Intel.dmg` |
-| Windows | `Narrator-<version>-Windows-x64-setup.exe` |
+| Windows | `Narrator_<version>_x64-setup.exe` |
 
 > **macOS note:** The app is not code-signed. After installing, run `sudo xattr -rd com.apple.quarantine /Applications/Narrator.app` in Terminal.
 
