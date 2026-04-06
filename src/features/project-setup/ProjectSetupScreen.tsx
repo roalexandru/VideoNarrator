@@ -1,5 +1,5 @@
 import { useCallback, useState, useEffect, type CSSProperties } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, message } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../../stores/projectStore";
 import { probeVideo, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
 import { trackEvent } from "../telemetry/analytics";
@@ -66,7 +66,8 @@ export function ProjectSetupScreen() {
       } catch (e) {
         console.error("Failed to start recording:", e);
         setIsRecording(false);
-        try { await getCurrentWindow().unminimize(); } catch { /* ignore */ }
+        try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch { /* ignore */ }
+        await message(`Recording failed: ${String(e)}`, { title: "Narrator", kind: "error" });
       }
     }
   }, [projectId, setVideoFile]);

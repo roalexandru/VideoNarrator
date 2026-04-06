@@ -6,44 +6,86 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 pub fn detect_ffmpeg() -> Result<PathBuf, NarratorError> {
-    // Check common sidecar locations first
-    let sidecar_paths = [
-        PathBuf::from("./binaries/ffmpeg"),
-        PathBuf::from("../binaries/ffmpeg"),
-    ];
-    for p in &sidecar_paths {
-        if p.exists() {
-            return Ok(p.clone());
-        }
-    }
-    // Fall back to system PATH
-    if let Ok(output) = std::process::Command::new("which").arg("ffmpeg").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok(PathBuf::from(path));
-        }
-    }
-    // Also try direct path on macOS
-    for p in ["/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"] {
-        if Path::new(p).exists() {
-            return Ok(PathBuf::from(p));
-        }
-    }
-    Err(NarratorError::FfmpegNotFound)
+    detect_binary("ffmpeg")
 }
 
 pub fn detect_ffprobe() -> Result<PathBuf, NarratorError> {
-    if let Ok(output) = std::process::Command::new("which").arg("ffprobe").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Ok(PathBuf::from(path));
+    detect_binary("ffprobe")
+}
+
+/// Detect a bundled sidecar binary (ffmpeg or ffprobe).
+/// Checks: next to the app executable (Tauri sidecar), relative paths, then system PATH.
+fn detect_binary(name: &str) -> Result<PathBuf, NarratorError> {
+    let exe_name = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+
+    // 1. Next to the current executable (Tauri bundles sidecars here)
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join(&exe_name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
     }
-    for p in ["/usr/local/bin/ffprobe", "/opt/homebrew/bin/ffprobe"] {
-        if Path::new(p).exists() {
-            return Ok(PathBuf::from(p));
+
+    // 2. Common relative sidecar paths (dev mode)
+    for dir in ["./binaries", "../binaries"] {
+        let candidate = PathBuf::from(dir).join(&exe_name);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        // Also try without .exe for dev mode on macOS/Linux
+        if cfg!(windows) {
+            let candidate = PathBuf::from(dir).join(name);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
     }
+
+    // 3. System PATH lookup
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = std::process::Command::new("which").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+        // macOS common paths
+        for p in [
+            format!("/usr/local/bin/{name}"),
+            format!("/opt/homebrew/bin/{name}"),
+        ] {
+            if Path::new(&p).exists() {
+                return Ok(PathBuf::from(p));
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("where").arg(name).output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+    }
+
     Err(NarratorError::FfmpegNotFound)
 }
 
