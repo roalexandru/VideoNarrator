@@ -31,9 +31,35 @@ fn default_recordings_dir() -> PathBuf {
 
 // ── macOS: native screencapture ──
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+/// Check (and request if needed) screen recording permission on macOS.
+/// Returns true if permission is granted.
+#[cfg(target_os = "macos")]
+pub fn ensure_screen_recording_permission() -> bool {
+    unsafe {
+        if CGPreflightScreenCaptureAccess() {
+            return true;
+        }
+        // Prompt the user — this shows the system dialog once
+        CGRequestScreenCaptureAccess()
+    }
+}
+
 /// Opens the macOS Cmd+Shift+5 screen recording UI. Blocks until the user stops recording.
 #[cfg(target_os = "macos")]
 pub async fn record_native(output_path: &str) -> Result<String, NarratorError> {
+    // Pre-flight permission check to avoid screencapture triggering its own prompt
+    if !ensure_screen_recording_permission() {
+        return Err(NarratorError::FfmpegFailed(
+            "Screen recording permission required. Please grant access in System Settings → Privacy & Security → Screen Recording for Narrator, then try again.".into(),
+        ));
+    }
+
     if let Some(parent) = PathBuf::from(output_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
