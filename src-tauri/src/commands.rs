@@ -591,23 +591,69 @@ pub async fn validate_azure_tts_key(
 
 // ── TTS generation command ──
 
-/// Helper to generate speech for a single segment using the selected TTS provider.
+enum TtsProvider {
+    ElevenLabs(elevenlabs_client::ElevenLabsConfig),
+    Azure(azure_tts_client::AzureTtsConfig),
+}
+
+/// Build a cache key from text + provider settings.
+fn tts_cache_key(tts: &TtsProvider, text: &str) -> String {
+    let settings = match tts {
+        TtsProvider::ElevenLabs(c) => format!(
+            "el|{}|{}|{:.2}|{:.2}|{:.2}|{:.2}",
+            c.voice_id, c.model_id, c.stability, c.similarity_boost, c.style, c.speed
+        ),
+        TtsProvider::Azure(c) => format!(
+            "az|{}|{}|{:.2}",
+            c.voice_name, c.speaking_style, c.speed
+        ),
+    };
+    let input = format!("{settings}|{text}");
+    let hash = blake3::hash(input.as_bytes());
+    hash.to_hex().to_string()
+}
+
+/// Get the TTS cache directory, creating it if needed.
+fn tts_cache_dir() -> Result<PathBuf, NarratorError> {
+    let dir = project_store::get_narrator_dir().join("cache").join("tts");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Generate speech for a single segment, using cache if available.
 async fn generate_speech_for_provider(
     tts: &TtsProvider,
     text: &str,
     filepath: &PathBuf,
 ) -> Result<(), NarratorError> {
+    // Check cache first
+    let cache_key = tts_cache_key(tts, text);
+    if let Ok(cache_dir) = tts_cache_dir() {
+        let cached = cache_dir.join(format!("{cache_key}.mp3"));
+        if cached.exists() {
+            tracing::info!("TTS cache hit: {cache_key}");
+            std::fs::copy(&cached, filepath)?;
+            return Ok(());
+        }
+    }
+
+    // Generate via API
     match tts {
         TtsProvider::ElevenLabs(cfg) => {
-            elevenlabs_client::generate_speech(cfg, text, filepath).await
+            elevenlabs_client::generate_speech(cfg, text, filepath).await?;
         }
-        TtsProvider::Azure(cfg) => azure_tts_client::generate_speech(cfg, text, filepath).await,
+        TtsProvider::Azure(cfg) => {
+            azure_tts_client::generate_speech(cfg, text, filepath).await?;
+        }
     }
-}
 
-enum TtsProvider {
-    ElevenLabs(elevenlabs_client::ElevenLabsConfig),
-    Azure(azure_tts_client::AzureTtsConfig),
+    // Store in cache
+    if let Ok(cache_dir) = tts_cache_dir() {
+        let cached = cache_dir.join(format!("{cache_key}.mp3"));
+        let _ = std::fs::copy(filepath, &cached);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
