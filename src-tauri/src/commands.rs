@@ -935,7 +935,6 @@ pub async fn start_screen_recording(
         .resizable(false)
         .decorations(false)
         .always_on_top(true)
-        .transparent(true)
         .skip_taskbar(true)
         .focused(true)
         .build()
@@ -950,11 +949,11 @@ pub async fn start_screen_recording(
             )));
         }
 
-        // Exclude overlay from screen capture
-        let hwnd = overlay
-            .hwnd()
-            .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to get overlay HWND: {e}")))?;
-        screen_recorder::set_window_display_affinity(hwnd.0 as isize);
+        // Try to exclude overlay from screen capture (non-fatal if HWND not ready yet)
+        match overlay.hwnd() {
+            Ok(hwnd) => screen_recorder::set_window_display_affinity(hwnd.0 as isize),
+            Err(e) => tracing::warn!("Could not set display affinity (HWND not ready): {e}"),
+        }
     }
 
     // On non-Windows, just log (shouldn't reach here normally)

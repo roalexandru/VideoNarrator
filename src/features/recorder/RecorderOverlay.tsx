@@ -101,30 +101,25 @@ export function RecorderOverlay() {
 // ── Styles ──
 
 const container: CSSProperties = {
-  width: 260,
-  height: 72,
-  background: "rgba(15, 15, 20, 0.92)",
-  borderRadius: 16,
-  border: "1px solid rgba(255,255,255,0.08)",
-  backdropFilter: "blur(20px)",
+  width: "100%",
+  height: "100%",
+  background: "#0f0f14",
   overflow: "hidden",
   fontFamily:
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
 };
 
 const dragBar: CSSProperties = {
-  height: 18,
+  height: 14,
   cursor: "move",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
 };
 
 const content: CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "space-between",
-  padding: "0 16px 12px",
+  padding: "0 16px 0",
+  height: "calc(100% - 14px)",
 };
 
 const timerSection: CSSProperties = {

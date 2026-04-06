@@ -87,26 +87,36 @@ pub async fn start_segment(
 
     tracing::info!("Starting recording segment {segment_index} → {segment_path}");
 
-    let child = tokio::process::Command::new(ffmpeg.as_os_str())
-        .args([
-            "-y",
-            "-f",
-            "gdigrab",
-            "-framerate",
-            "30",
-            "-i",
-            "desktop",
-            "-vcodec",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-pix_fmt",
-            "yuv420p",
-            &segment_path,
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+    let mut cmd = tokio::process::Command::new(ffmpeg.as_os_str());
+    cmd.args([
+        "-y",
+        "-f",
+        "gdigrab",
+        "-framerate",
+        "30",
+        "-i",
+        "desktop",
+        "-vcodec",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        &segment_path,
+    ])
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
+
+    // Hide the console window on Windows
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = cmd
         .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to start recording: {e}")))?;
 
