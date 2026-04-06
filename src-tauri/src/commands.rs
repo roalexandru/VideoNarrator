@@ -596,6 +596,19 @@ enum TtsProvider {
     Azure(azure_tts_client::AzureTtsConfig),
 }
 
+/// Clean text before sending to TTS: remove [pause], [break], (pause), etc.
+fn sanitize_tts_text(text: &str) -> String {
+    let cleaned = text
+        .replace("[pause]", " ")
+        .replace("[break]", " ")
+        .replace("(pause)", " ")
+        .replace("(break)", " ")
+        .replace("[silence]", " ")
+        .replace("[Pause]", " ")
+        .replace("[PAUSE]", " ");
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Build a cache key from text + provider settings.
 fn tts_cache_key(tts: &TtsProvider, text: &str) -> String {
     let settings = match tts {
@@ -626,6 +639,9 @@ async fn generate_speech_for_provider(
     text: &str,
     filepath: &PathBuf,
 ) -> Result<(), NarratorError> {
+    let text = sanitize_tts_text(text);
+    let text = text.as_str();
+
     // Check cache first
     let cache_key = tts_cache_key(tts, text);
     if let Ok(cache_dir) = tts_cache_dir() {

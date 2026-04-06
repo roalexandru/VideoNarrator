@@ -336,9 +336,9 @@ pub fn default_styles() -> Vec<NarrationStyle> {
             label: "Teaser / Trailer".to_string(),
             description: "High-energy, short punchy sentences. Focus on wow moments.".to_string(),
             system_prompt: "You are narrating a teaser or trailer video. Use high-energy, short, \
-                punchy sentences. Focus on the \"wow\" moments. Create anticipation. Use dramatic \
-                pauses (noted as [pause] markers in transcript for TTS). Keep it exciting and \
-                forward-looking.".to_string(),
+                punchy sentences. Focus on the \"wow\" moments. Create anticipation and excitement. \
+                Keep it forward-looking. Use sentence breaks for dramatic effect — the pauses between \
+                segments handle the timing naturally.".to_string(),
             pacing: "fast".to_string(),
             pause_markers: true,
         },

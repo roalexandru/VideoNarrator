@@ -165,9 +165,18 @@ impl AiProvider for OpenAiProvider {
             json!([{"type": "text", "text": user_message.to_string()}])
         };
 
+        // o3/o4 models require max_completion_tokens; older models use max_tokens
+        let is_reasoning_model = self.model.starts_with("o3")
+            || self.model.starts_with("o4")
+            || self.model.starts_with("o1");
+        let token_key = if is_reasoning_model {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
         let body = json!({
             "model": self.model,
-            "max_tokens": 8192,
+            token_key: 8192,
             "temperature": self.temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -390,11 +399,15 @@ pub fn build_system_prompt(
         1. Return ONLY the JSON, no markdown code fences, no explanation.\n\
         2. You MUST generate segments covering the ENTIRE video from start to end.\n\
         3. The last segment's end_seconds MUST equal total_duration_seconds.\n\
-        4. Segments should NOT be back-to-back. Leave natural gaps (2-5 seconds) between \
-           segments where the speaker pauses. Not every second needs narration.\n\
-        5. A typical narration covers about 60-70% of the video duration with speech, \
-           and 30-40% with silence/pauses between segments.\n\
-        6. Distribute segments evenly across the full video timeline.\n\n",
+        4. Leave natural gaps (1-3 seconds) between segments for breathing room.\n\
+        5. A typical narration covers about 75-85% of the video duration with speech. \
+           Aim for MORE narration rather than less — long silent gaps feel empty.\n\
+        6. Distribute segments evenly across the full video timeline.\n\
+        7. Each segment's text MUST be plain speakable text only. NEVER include \
+           markup, tags, or directives like [pause], [break], (pause), etc. \
+           The text will be sent directly to a text-to-speech engine.\n\
+        8. Write substantive narration for each segment — describe what's happening, \
+           explain context, guide the viewer. Avoid very short throwaway phrases.\n\n",
     );
 
     // Style block

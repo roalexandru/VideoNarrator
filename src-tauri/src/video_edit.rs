@@ -291,27 +291,14 @@ pub async fn burn_subtitles(
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
-    // Copy SRT to a temp file in the same directory as output to avoid path escaping
-    // issues with ffmpeg's subtitles filter (which chokes on colons, spaces, etc.)
-    let out_dir = Path::new(output_path)
-        .parent()
-        .unwrap_or(Path::new("/tmp"));
-    let temp_srt = out_dir.join("_burn_subs.srt");
+    // Copy SRT to /tmp with a simple name to avoid path escaping issues
+    // with ffmpeg's subtitles filter (chokes on colons, spaces, special chars)
+    let temp_srt = PathBuf::from("/tmp/_narrator_burn_subs.srt");
     std::fs::copy(srt_path, &temp_srt)?;
 
-    // Use the simple temp filename — no special chars to escape
-    let srt_filename = temp_srt.to_string_lossy();
-
-    // Escape for ffmpeg subtitles filter: \ → \\, : → \:, ' → \'
-    let escaped = srt_filename
-        .replace('\\', "\\\\")
-        .replace(':', "\\:")
-        .replace('\'', "\\'");
-
-    let subtitle_filter = format!(
-        "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",
-        escaped
-    );
+    // Try subtitles filter first (requires libass), fall back to SRT input method
+    let subtitle_filter =
+        "subtitles='/tmp/_narrator_burn_subs.srt':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'";
 
     let output = Command::new(ffmpeg.as_os_str())
         .args([
@@ -319,7 +306,7 @@ pub async fn burn_subtitles(
             "-i",
             video_path,
             "-vf",
-            &subtitle_filter,
+            subtitle_filter,
             "-c:a",
             "copy",
             "-c:v",
@@ -334,15 +321,45 @@ pub async fn burn_subtitles(
         .await
         .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
-    let _ = std::fs::remove_file(&temp_srt);
-
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::FfmpegFailed(format!(
-            "Subtitle burn failed: {}",
-            &stderr[..stderr.len().min(400)]
-        )));
+        // Fallback: use SRT as an input stream and overlay with mov_text → drawtext
+        tracing::warn!("subtitles filter failed, trying SRT input overlay fallback");
+        let fallback = Command::new(ffmpeg.as_os_str())
+            .args([
+                "-y",
+                "-i",
+                video_path,
+                "-i",
+                &temp_srt.to_string_lossy(),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "23",
+                "-c:a",
+                "copy",
+                "-c:s",
+                "mov_text",
+                "-metadata:s:s:0",
+                "language=eng",
+                output_path,
+            ])
+            .output()
+            .await
+            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+        if !fallback.status.success() {
+            let stderr = String::from_utf8_lossy(&fallback.stderr);
+            let _ = std::fs::remove_file(&temp_srt);
+            return Err(NarratorError::FfmpegFailed(format!(
+                "Subtitle burn failed: {}",
+                &stderr[..stderr.len().min(400)]
+            )));
+        }
     }
+
+    let _ = std::fs::remove_file(&temp_srt);
 
     Ok(output_path.to_string())
 }
