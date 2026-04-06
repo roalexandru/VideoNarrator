@@ -119,7 +119,7 @@ export function WizardLayout({ children, onOpenSettings, onBackToLibrary }: { ch
             </button>
           </div>
         )}
-        <div style={{ padding: "8px 20px 12px", fontSize: 11, color: "#2a2a3a" }}>v0.3.0</div>
+        <div style={{ padding: "8px 20px 12px", fontSize: 11, color: "#2a2a3a" }}>v{__APP_VERSION__}</div>
       </aside>
 
       {/* Content */}
