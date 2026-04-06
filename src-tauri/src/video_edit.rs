@@ -35,20 +35,39 @@ pub async fn apply_edits(
         return Err(NarratorError::ExportError("No clips to process".into()));
     }
 
-    // If single clip with no modifications, just copy
+    // If single clip with no modifications, check if it covers the full source
     if total == 1 && plan.clips[0].speed == 1.0 && plan.clips[0].fps_override.is_none() {
         let clip = &plan.clips[0];
+
+        // Probe original duration to check if the clip covers the full video
+        let probe = video_engine::probe_video(std::path::Path::new(input_path)).await?;
+        let covers_full = clip.start_seconds < 0.5
+            && (clip.end_seconds - probe.duration_seconds).abs() < 0.5;
+
+        if covers_full {
+            // No edits — just use the original file directly (symlink or copy)
+            if input_path != output_path {
+                std::fs::copy(input_path, output_path)?;
+            }
+            on_progress(100.0);
+            return Ok(output_path.to_string());
+        }
+
+        // Trimmed single clip — use accurate seek (input seeking + output duration)
+        let duration = clip.end_seconds - clip.start_seconds;
         let output = Command::new(ffmpeg.as_os_str())
             .args([
                 "-y",
-                "-i",
-                input_path,
                 "-ss",
                 &format!("{:.3}", clip.start_seconds),
-                "-to",
-                &format!("{:.3}", clip.end_seconds),
+                "-i",
+                input_path,
+                "-t",
+                &format!("{:.3}", duration),
                 "-c",
                 "copy",
+                "-avoid_negative_ts",
+                "make_zero",
                 output_path,
             ])
             .output()
@@ -272,16 +291,26 @@ pub async fn burn_subtitles(
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
-    // Escape special characters for ffmpeg's subtitles filter path syntax.
-    // The filter requires escaping: \ → \\, : → \:, ' → \'
-    let escaped_srt = srt_path
+    // Copy SRT to a temp file in the same directory as output to avoid path escaping
+    // issues with ffmpeg's subtitles filter (which chokes on colons, spaces, etc.)
+    let out_dir = Path::new(output_path)
+        .parent()
+        .unwrap_or(Path::new("/tmp"));
+    let temp_srt = out_dir.join("_burn_subs.srt");
+    std::fs::copy(srt_path, &temp_srt)?;
+
+    // Use the simple temp filename — no special chars to escape
+    let srt_filename = temp_srt.to_string_lossy();
+
+    // Escape for ffmpeg subtitles filter: \ → \\, : → \:, ' → \'
+    let escaped = srt_filename
         .replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace('\'', "\\'");
 
     let subtitle_filter = format!(
         "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",
-        escaped_srt
+        escaped
     );
 
     let output = Command::new(ffmpeg.as_os_str())
@@ -304,6 +333,8 @@ pub async fn burn_subtitles(
         .output()
         .await
         .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    let _ = std::fs::remove_file(&temp_srt);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
