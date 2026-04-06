@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::ipc::Channel;
+use tauri::Manager;
 use tokio::sync::Mutex;
 
 // ── Persistent config file for API keys ──
@@ -91,6 +92,38 @@ fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
 pub struct AppState {
     pub cancel_flag: Arc<AtomicBool>,
     pub api_keys: Mutex<std::collections::HashMap<AiProviderKind, String>>,
+}
+
+pub struct RecorderState {
+    pub ffmpeg_child: Arc<Mutex<Option<tokio::process::Child>>>,
+    pub segments: Arc<Mutex<Vec<String>>>,
+    pub is_paused: Arc<AtomicBool>,
+    pub output_dir: Arc<Mutex<Option<String>>>,
+    pub output_path: Arc<Mutex<Option<String>>>,
+    pub segment_counter: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl RecorderState {
+    pub fn new() -> Self {
+        Self {
+            ffmpeg_child: Arc::new(Mutex::new(None)),
+            segments: Arc::new(Mutex::new(Vec::new())),
+            is_paused: Arc::new(AtomicBool::new(false)),
+            output_dir: Arc::new(Mutex::new(None)),
+            output_path: Arc::new(Mutex::new(None)),
+            segment_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    async fn reset(&self) {
+        *self.ffmpeg_child.lock().await = None;
+        self.segments.lock().await.clear();
+        self.is_paused.store(false, Ordering::SeqCst);
+        *self.output_dir.lock().await = None;
+        *self.output_path.lock().await = None;
+        self.segment_counter
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl AppState {
@@ -846,28 +879,186 @@ pub async fn get_home_dir() -> Result<String, NarratorError> {
 
 // ── Screen recording commands ──
 
-/// Native screen recording: opens macOS Cmd+Shift+5 UI, blocks until done
+/// macOS: native Cmd+Shift+5 screen recording. Blocks until the user stops recording.
 #[tauri::command]
-pub async fn record_screen_native(output_path: String) -> Result<String, NarratorError> {
-    screen_recorder::record_native(&output_path).await
+pub async fn record_screen_native(project_id: String) -> Result<String, NarratorError> {
+    project_store::validate_project_id(&project_id)?;
+    let dir = screen_recorder::get_recordings_dir()?;
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let output_path = dir.join(format!("{project_id}_{timestamp}.mov"));
+    screen_recorder::record_native(&output_path.to_string_lossy()).await
 }
 
-/// Legacy ffmpeg recording (Windows fallback)
+/// Windows: start a screen recording session with an overlay control window.
 #[tauri::command]
-pub async fn start_recording(
-    state: tauri::State<'_, AppState>,
-    config: screen_recorder::RecordingConfig,
-) -> Result<String, NarratorError> {
-    state.cancel_flag.store(false, Ordering::SeqCst);
-    let flag = state.cancel_flag.clone();
-    screen_recorder::start_recording(&config, flag).await
-}
+pub async fn start_screen_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RecorderState>,
+    project_id: String,
+) -> Result<(), NarratorError> {
+    project_store::validate_project_id(&project_id)?;
 
-#[tauri::command]
-pub async fn stop_recording(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
-    state.cancel_flag.store(true, Ordering::SeqCst);
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Reset any previous state
+    state.reset().await;
+
+    let dir = screen_recorder::get_recordings_dir()?;
+    let out_dir = dir.to_string_lossy().to_string();
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let final_path = dir
+        .join(format!("{project_id}_{timestamp}.mp4"))
+        .to_string_lossy()
+        .to_string();
+
+    *state.output_dir.lock().await = Some(out_dir.clone());
+    *state.output_path.lock().await = Some(final_path);
+
+    // Start the first recording segment
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0).await?;
+    *state.ffmpeg_child.lock().await = Some(child);
+    state.segments.lock().await.push(segment_path);
+    state
+        .segment_counter
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    // Create the overlay window
+    #[cfg(target_os = "windows")]
+    {
+        use tauri::WebviewWindowBuilder;
+
+        let overlay = WebviewWindowBuilder::new(
+            &app,
+            "recorder",
+            tauri::WebviewUrl::App("/recorder-overlay.html".into()),
+        )
+        .title("Narrator Recording")
+        .inner_size(260.0, 72.0)
+        .resizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .transparent(true)
+        .skip_taskbar(true)
+        .focused(true)
+        .build()
+        .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to create overlay: {e}")))?;
+
+        // Position at top-center of screen
+        if let Ok(Some(monitor)) = overlay.current_monitor() {
+            let screen_width = monitor.size().width as f64 / monitor.scale_factor();
+            let x = (screen_width - 260.0) / 2.0;
+            let _ = overlay.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+                x, 20.0,
+            )));
+        }
+
+        // Exclude overlay from screen capture
+        let hwnd = overlay
+            .hwnd()
+            .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to get overlay HWND: {e}")))?;
+        screen_recorder::set_window_display_affinity(hwnd.0 as isize);
+    }
+
+    // On non-Windows, just log (shouldn't reach here normally)
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = &app;
+        tracing::warn!("start_screen_recording called on non-Windows platform");
+    }
+
     Ok(())
+}
+
+/// Pause the current recording (stops current segment, new one starts on resume).
+#[tauri::command]
+pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
+    if state.is_paused.load(Ordering::SeqCst) {
+        return Ok(()); // Already paused
+    }
+
+    // Stop the current segment
+    let mut child_guard = state.ffmpeg_child.lock().await;
+    if let Some(child) = child_guard.as_mut() {
+        screen_recorder::stop_segment(child).await?;
+    }
+    *child_guard = None;
+    state.is_paused.store(true, Ordering::SeqCst);
+
+    tracing::info!("Recording paused");
+    Ok(())
+}
+
+/// Resume a paused recording (starts a new segment).
+#[tauri::command]
+pub async fn resume_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
+    if !state.is_paused.load(Ordering::SeqCst) {
+        return Ok(()); // Not paused
+    }
+
+    let out_dir = state.output_dir.lock().await;
+    let out_dir = out_dir
+        .as_ref()
+        .ok_or_else(|| NarratorError::FfmpegFailed("No output directory set".into()))?
+        .clone();
+
+    let seg_idx = state
+        .segment_counter
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, seg_idx).await?;
+    *state.ffmpeg_child.lock().await = Some(child);
+    state.segments.lock().await.push(segment_path);
+    state.is_paused.store(false, Ordering::SeqCst);
+
+    tracing::info!("Recording resumed (segment {seg_idx})");
+    Ok(())
+}
+
+/// Stop recording, concatenate segments, close overlay, emit result.
+#[tauri::command]
+pub async fn stop_screen_recording(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RecorderState>,
+) -> Result<String, NarratorError> {
+    // Stop current segment if not paused
+    if !state.is_paused.load(Ordering::SeqCst) {
+        let mut child_guard = state.ffmpeg_child.lock().await;
+        if let Some(child) = child_guard.as_mut() {
+            screen_recorder::stop_segment(child).await?;
+        }
+        *child_guard = None;
+    }
+
+    let segments = state.segments.lock().await.clone();
+    let final_path = state
+        .output_path
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| NarratorError::FfmpegFailed("No output path set".into()))?;
+
+    // Concatenate all segments
+    let result_path = screen_recorder::concatenate_segments(&segments, &final_path).await?;
+
+    // Close the overlay window
+    if let Some(overlay) = app.get_webview_window("recorder") {
+        let _ = overlay.close();
+    }
+
+    // Emit event for the main window
+    use tauri::Emitter;
+    let _ = app.emit("recording-stopped", &result_path);
+
+    // Reset state
+    state.reset().await;
+
+    tracing::info!("Recording stopped → {result_path}");
+    Ok(result_path)
+}
+
+/// Get the directory where recordings are saved.
+#[tauri::command]
+pub fn get_recordings_directory() -> Result<String, NarratorError> {
+    let dir = screen_recorder::get_recordings_dir()?;
+    Ok(dir.to_string_lossy().to_string())
 }
 
 // ── Video edit commands ──

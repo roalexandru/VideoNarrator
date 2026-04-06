@@ -14,6 +14,7 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
+        "recorder-overlay": resolve(__dirname, "recorder-overlay.html"),
       },
     },
   },

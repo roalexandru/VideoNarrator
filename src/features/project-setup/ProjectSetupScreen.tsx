@@ -1,12 +1,12 @@
 import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
 import { useProjectStore } from "../../stores/projectStore";
-import { probeVideo, recordScreenNative } from "../../lib/tauri/commands";
+import { probeVideo, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
 import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 
 const C = { text: "#e0e0ea", textDim: "#8b8ba0", textMuted: "#5a5a6e", bg: "rgba(255,255,255,0.03)", border: "rgba(255,255,255,0.07)", accent: "#818cf8", inputBg: "rgba(255,255,255,0.04)" };
 const sectionLabel: CSSProperties = { fontSize: 11, fontWeight: 700, color: C.textMuted, textTransform: "uppercase", letterSpacing: 1.2, marginBottom: 10 };
@@ -20,60 +20,55 @@ export function ProjectSetupScreen() {
   const [probing, setProbing] = useState(false);
   const [titleTouched, setTitleTouched] = useState(false);
 
-  const [recSeconds, setRecSeconds] = useState(0);
-
-  // Timer during recording
+  // Listen for recording-stopped event (Windows: overlay sends stop, backend emits this)
   useEffect(() => {
-    if (!isRecording) return;
-    const t = setInterval(() => setRecSeconds((s) => s + 1), 1000);
-    return () => clearInterval(t);
-  }, [isRecording]);
+    const unlistenPromise = listen<string>("recording-stopped", async (event) => {
+      setIsRecording(false);
+      await getCurrentWindow().unminimize();
+      await getCurrentWindow().setFocus();
+      try {
+        const m = await probeVideo(event.payload);
+        setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+        trackEvent("video_imported", { source: "screen_recording" });
+      } catch (e) {
+        console.error("Failed to probe recorded video:", e);
+      }
+    });
+    return () => { unlistenPromise.then((fn) => fn()); };
+  }, [setVideoFile]);
 
   const handleRecordScreen = useCallback(async () => {
     const isMac = navigator.userAgent.includes("Mac");
-    const outPath = `/tmp/narrator_recording_${projectId}.${isMac ? "mov" : "mp4"}`;
     setIsRecording(true);
-    setRecSeconds(0);
 
     if (isMac) {
       // macOS: use native screencapture (Cmd+Shift+5 experience)
       try {
         await getCurrentWindow().minimize();
-        await recordScreenNative(outPath);
+        const outputPath = await recordScreenNative(projectId);
         await getCurrentWindow().unminimize();
         await getCurrentWindow().setFocus();
-        const m = await probeVideo(outPath);
+        const m = await probeVideo(outputPath);
         setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
         trackEvent("video_imported", { source: "screen_recording" });
-      } catch (e: any) {
-        try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch {}
+      } catch (e: unknown) {
+        try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch { /* ignore */ }
         if (!String(e).includes("Cancelled")) console.error("Recording failed:", e);
       } finally {
         setIsRecording(false);
       }
     } else {
-      // Windows/Linux: use ffmpeg — minimize, start recording, user clicks Stop to finish
+      // Windows: start recording with overlay, overlay handles stop/pause
       try {
         await getCurrentWindow().minimize();
-        await invoke("start_recording", {
-          config: { output_path: outPath, screen_index: 0, width: 0, height: 0, fps: 30, offset_x: 0, offset_y: 0, capture_audio: false },
-        });
-      } catch (e) { console.error(e); }
-      // Recording is now running in background — user will click Stop
+        await startScreenRecording(projectId);
+        // Recording running; overlay window open; recording-stopped event will fire on stop
+      } catch (e) {
+        console.error("Failed to start recording:", e);
+        setIsRecording(false);
+        try { await getCurrentWindow().unminimize(); } catch { /* ignore */ }
+      }
     }
-  }, [projectId, setVideoFile]);
-
-  const handleStopRecording = useCallback(async () => {
-    try {
-      await invoke("stop_recording");
-      setIsRecording(false);
-      await getCurrentWindow().unminimize();
-      await getCurrentWindow().setFocus();
-      await new Promise((r) => setTimeout(r, 1500));
-      const outPath = `/tmp/narrator_recording_${projectId}.mp4`;
-      const m = await probeVideo(outPath);
-      setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
-    } catch (e) { console.error(e); setIsRecording(false); }
   }, [projectId, setVideoFile]);
 
   const handleVideoSelect = useCallback(async () => {
@@ -116,7 +111,7 @@ export function ProjectSetupScreen() {
             <Button variant="ghost" size="sm" onClick={() => setVideoFile(null)}>Remove</Button>
           </div>
         ) : isRecording ? (
-          /* Windows recording in progress — clean stop UI */
+          /* Recording in progress — controls are in the overlay (Windows) or native UI (macOS) */
           <div style={{
             padding: "28px 20px", borderRadius: 12,
             border: "2px solid rgba(239,68,68,0.3)", background: "rgba(239,68,68,0.04)",
@@ -124,20 +119,9 @@ export function ProjectSetupScreen() {
           }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 12 }}>
               <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#ef4444", animation: "recpulse 1s infinite" }} />
-              <span style={{ fontFamily: "monospace", fontSize: 24, fontWeight: 700, color: "#ef4444" }}>
-                {Math.floor(recSeconds / 60)}:{(recSeconds % 60).toString().padStart(2, "0")}
-              </span>
+              <span style={{ fontWeight: 600, fontSize: 15, color: "#ef4444" }}>Recording in progress</span>
             </div>
-            <p style={{ color: C.textMuted, fontSize: 12, marginBottom: 16 }}>Recording your screen...</p>
-            <button onClick={handleStopRecording} style={{
-              padding: "10px 32px", borderRadius: 10, border: "none",
-              background: "#ef4444", color: "#fff", fontSize: 14, fontWeight: 600,
-              cursor: "pointer", fontFamily: "inherit",
-              display: "inline-flex", alignItems: "center", gap: 8,
-            }}>
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="12" height="12" rx="2"/></svg>
-              Stop Recording
-            </button>
+            <p style={{ color: C.textMuted, fontSize: 12 }}>Use the recording controls to stop or pause.</p>
             <style>{`@keyframes recpulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }`}</style>
           </div>
         ) : (

@@ -41,6 +41,9 @@ futures = "0.3"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
 objc2-foundation = { version = "0.3", features = ["NSString"] }

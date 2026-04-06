@@ -69,6 +69,7 @@ pub fn run() {
             }
         })
         .manage(AppState::new())
+        .manage(commands::RecorderState::new())
         .manage(telemetry::TelemetryClient::new(
             env!("CARGO_PKG_VERSION").into(),
         ))
@@ -99,8 +100,11 @@ pub fn run() {
             commands::generate_tts,
             commands::get_home_dir,
             commands::record_screen_native,
-            commands::start_recording,
-            commands::stop_recording,
+            commands::start_screen_recording,
+            commands::pause_recording,
+            commands::resume_recording,
+            commands::stop_screen_recording,
+            commands::get_recordings_directory,
             commands::apply_video_edits,
             commands::extract_edit_thumbnails,
             commands::merge_audio_video,
