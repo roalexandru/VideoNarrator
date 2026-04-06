@@ -4,6 +4,13 @@ use crate::error::NarratorError;
 use crate::models::*;
 use std::path::{Path, PathBuf};
 
+/// Validate that a project ID is a valid UUID to prevent path traversal attacks.
+pub fn validate_project_id(id: &str) -> Result<(), NarratorError> {
+    uuid::Uuid::parse_str(id)
+        .map_err(|_| NarratorError::ProjectError(format!("Invalid project ID: {id}")))?;
+    Ok(())
+}
+
 pub fn get_narrator_dir() -> PathBuf {
     if let Some(home) = directories::UserDirs::new() {
         home.home_dir().join(".narrator")
@@ -30,6 +37,7 @@ pub fn ensure_directories() -> Result<(), NarratorError> {
 }
 
 pub fn create_project(config: &ProjectConfig) -> Result<String, NarratorError> {
+    validate_project_id(&config.id)?;
     let base = get_narrator_dir();
     let project_dir = base.join("projects").join(&config.id);
 
@@ -67,6 +75,7 @@ pub fn save_project(config: &ProjectConfig) -> Result<(), NarratorError> {
 }
 
 pub fn load_project(id: &str) -> Result<ProjectConfig, NarratorError> {
+    validate_project_id(id)?;
     let base = get_narrator_dir();
     let project_file = base.join("projects").join(id).join("project.json");
 
@@ -171,6 +180,7 @@ fn list_script_languages(scripts_dir: &Path) -> Vec<String> {
 }
 
 pub fn load_project_full(id: &str) -> Result<LoadedProject, NarratorError> {
+    validate_project_id(id)?;
     let config = load_project(id)?;
 
     let base = get_narrator_dir();
@@ -209,6 +219,7 @@ pub fn save_script(
     language: &str,
     script: &NarrationScript,
 ) -> Result<String, NarratorError> {
+    validate_project_id(project_id)?;
     let base = get_narrator_dir();
     let scripts_dir = base.join("projects").join(project_id).join("scripts");
     std::fs::create_dir_all(&scripts_dir)
@@ -410,6 +421,22 @@ mod tests {
         assert_eq!(styles.len(), 6);
         assert_eq!(styles[0].id, "executive");
         assert_eq!(styles[4].id, "training");
+    }
+
+    #[test]
+    fn test_validate_project_id_valid_uuid() {
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(validate_project_id(&id).is_ok());
+    }
+
+    #[test]
+    fn test_validate_project_id_rejects_invalid() {
+        assert!(validate_project_id("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn test_validate_project_id_rejects_path_traversal() {
+        assert!(validate_project_id("../../etc/passwd").is_err());
     }
 
     #[test]

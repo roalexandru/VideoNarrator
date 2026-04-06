@@ -73,7 +73,7 @@ export function PrivacyPolicy({ onClose }: { onClose: () => void }) {
 
           <Section title="Opt-Out">
             <p>
-              You can disable anonymous analytics at any time in <strong style={{ color: colors.text.primary }}>Settings &gt; Privacy &amp; Analytics</strong>. When disabled, no usage data is transmitted.
+              You can disable anonymous analytics at any time in <strong style={{ color: colors.text.primary }}>Settings &gt; Preferences</strong>. When disabled, no usage data is transmitted.
             </p>
           </Section>
 
@@ -84,7 +84,9 @@ export function PrivacyPolicy({ onClose }: { onClose: () => void }) {
             <ul style={{ paddingLeft: 20, marginTop: 8 }}>
               <li><strong style={{ color: colors.text.primary }}>Anthropic (Claude)</strong> — video frame analysis and narration generation</li>
               <li><strong style={{ color: colors.text.primary }}>OpenAI</strong> — alternative AI provider for narration generation</li>
+              <li><strong style={{ color: colors.text.primary }}>Google (Gemini)</strong> — alternative AI provider for narration generation</li>
               <li><strong style={{ color: colors.text.primary }}>ElevenLabs</strong> — text-to-speech audio generation</li>
+              <li><strong style={{ color: colors.text.primary }}>Microsoft (Azure TTS)</strong> — alternative text-to-speech audio generation</li>
             </ul>
             <p style={{ marginTop: 8 }}>
               Usage of these services is governed by their respective privacy policies. Narrator does not proxy, store, or log any data sent to these providers.

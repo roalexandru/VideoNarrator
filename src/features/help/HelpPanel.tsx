@@ -11,11 +11,11 @@ const sections = [
     items: [
       {
         q: "What is Narrator?",
-        a: "Narrator is an AI-powered video narration generator. Import a video or record your screen, and Narrator will analyze the visual content frame-by-frame to produce a professional narration script. You can then export the script in multiple formats or generate speech audio with ElevenLabs.",
+        a: "Narrator is an AI-powered video narration generator. Import a video or record your screen, and Narrator will analyze the visual content frame-by-frame to produce a professional narration script. You can then export the script in multiple formats or generate speech audio with ElevenLabs or Azure TTS.",
       },
       {
         q: "Prerequisites",
-        a: "FFmpeg must be installed on your system for video processing. You will also need at least one AI provider API key (Anthropic Claude or OpenAI) configured in Settings. For text-to-speech, an ElevenLabs API key is required.",
+        a: "FFmpeg must be installed on your system for video processing. You will also need at least one AI provider API key (Anthropic Claude, OpenAI, or Google Gemini) configured in Settings. For text-to-speech, an ElevenLabs or Azure TTS API key is required.",
       },
       {
         q: "Quick start",
@@ -39,8 +39,12 @@ const sections = [
         a: "Select multiple languages in Configuration before generating. The primary language is generated first from video frames; additional languages are translated from it. You can switch between languages in the Review step to edit each independently.",
       },
       {
+        q: "Auto-updates",
+        a: "Narrator checks for updates automatically on launch. You can also check manually via the app menu (Help > Check for Updates). When an update is available, a bar appears at the bottom of the window with an option to install.",
+      },
+      {
         q: "Export options",
-        a: "The Export step offers three outputs:\n• Video — burn subtitles directly onto the video, or merge with TTS audio\n• Audio Only — generate narration audio via ElevenLabs\n• Scripts — export as SRT (subtitles), VTT (web video), JSON (programmatic), Markdown (readable), or SSML (speech synthesis)",
+        a: "The Export step offers three outputs:\n• Video — burn subtitles directly onto the video, or merge with TTS audio\n• Audio Only — generate narration audio via ElevenLabs or Azure TTS\n• Scripts — export as SRT (subtitles), VTT (web video), JSON (programmatic), Markdown (readable), or SSML (speech synthesis)",
       },
     ],
   },
