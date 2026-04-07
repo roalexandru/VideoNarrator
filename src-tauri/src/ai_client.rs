@@ -562,28 +562,28 @@ pub async fn generate_narration(
             if let Some(last) = script.segments.last_mut() {
                 last.end_seconds = target;
             }
-        }
-
-        // Even if not scaled, ensure gaps exist between contiguous segments
-        // If all segments are back-to-back, add gaps
-        let all_contiguous = script
-            .segments
-            .windows(2)
-            .all(|w| (w[1].start_seconds - w[0].end_seconds).abs() < 0.1);
-        if all_contiguous && script.segments.len() > 1 {
-            let total = script.total_duration_seconds;
-            let n = script.segments.len() as f64;
-            // Redistribute: give each segment a slot of total/n seconds
-            // with 65% speech and 35% gap
-            let slot = total / n;
-            for (i, seg) in script.segments.iter_mut().enumerate() {
-                seg.start_seconds = i as f64 * slot;
-                seg.end_seconds = seg.start_seconds + slot * 0.65;
-                seg.pause_after_ms = (slot * 0.35 * 1000.0) as u32;
-            }
-            if let Some(last) = script.segments.last_mut() {
-                last.end_seconds = total;
-                last.pause_after_ms = 0;
+        } else {
+            // Only redistribute if NOT already scaled — avoid double adjustment
+            // If all segments are back-to-back, add gaps
+            let all_contiguous = script
+                .segments
+                .windows(2)
+                .all(|w| (w[1].start_seconds - w[0].end_seconds).abs() < 0.1);
+            if all_contiguous && script.segments.len() > 1 {
+                let total = script.total_duration_seconds;
+                let n = script.segments.len() as f64;
+                // Redistribute: give each segment a slot of total/n seconds
+                // with 65% speech and 35% gap
+                let slot = total / n;
+                for (i, seg) in script.segments.iter_mut().enumerate() {
+                    seg.start_seconds = i as f64 * slot;
+                    seg.end_seconds = seg.start_seconds + slot * 0.65;
+                    seg.pause_after_ms = (slot * 0.35 * 1000.0) as u32;
+                }
+                if let Some(last) = script.segments.last_mut() {
+                    last.end_seconds = total;
+                    last.pause_after_ms = 0;
+                }
             }
         }
     }

@@ -106,8 +106,12 @@ describe("ReviewScreen", () => {
     const delButtons = screen.getAllByText("Del");
     expect(delButtons).toHaveLength(2);
 
-    // Delete the first segment
+    // Delete the first segment — opens confirmation dialog
     await user.click(delButtons[0]);
+
+    // Confirm deletion in the dialog
+    const confirmBtn = screen.getByText("Delete");
+    await user.click(confirmBtn);
 
     // Store should now have 1 segment
     const segments = useScriptStore.getState().scripts["en"].segments;

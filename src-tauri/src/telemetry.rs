@@ -7,8 +7,14 @@ use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const APP_KEY: &str = "A-EU-3488292076";
 const API_URL: &str = "https://eu.aptabase.com/api/v0/events";
+
+fn app_key() -> &'static str {
+    static KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        std::env::var("NARRATOR_APTABASE_KEY").unwrap_or_else(|_| "A-EU-3488292076".to_string())
+    })
+}
 const SDK_VERSION: &str = concat!("narrator@", env!("CARGO_PKG_VERSION"));
 
 pub struct TelemetryClient {
@@ -53,7 +59,7 @@ impl TelemetryClient {
         tauri::async_runtime::spawn(async move {
             let _ = client
                 .post(API_URL)
-                .header("App-Key", APP_KEY)
+                .header("App-Key", app_key())
                 .json(&body)
                 .send()
                 .await;

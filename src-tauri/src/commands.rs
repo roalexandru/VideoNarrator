@@ -7,8 +7,10 @@ use crate::{
     screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+
+static LAST_VALIDATION: AtomicI64 = AtomicI64::new(0);
 use tauri::ipc::Channel;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -94,10 +96,18 @@ pub struct AppState {
     pub api_keys: Mutex<std::collections::HashMap<AiProviderKind, String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordingPhase {
+    Idle,
+    Recording,
+    Paused,
+    Stopping,
+}
+
 pub struct RecorderState {
     pub ffmpeg_child: Arc<Mutex<Option<tokio::process::Child>>>,
     pub segments: Arc<Mutex<Vec<String>>>,
-    pub is_paused: Arc<AtomicBool>,
+    pub phase: Arc<Mutex<RecordingPhase>>,
     pub output_dir: Arc<Mutex<Option<String>>>,
     pub output_path: Arc<Mutex<Option<String>>>,
     pub segment_counter: Arc<std::sync::atomic::AtomicU32>,
@@ -108,7 +118,7 @@ impl RecorderState {
         Self {
             ffmpeg_child: Arc::new(Mutex::new(None)),
             segments: Arc::new(Mutex::new(Vec::new())),
-            is_paused: Arc::new(AtomicBool::new(false)),
+            phase: Arc::new(Mutex::new(RecordingPhase::Idle)),
             output_dir: Arc::new(Mutex::new(None)),
             output_path: Arc::new(Mutex::new(None)),
             segment_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -118,7 +128,7 @@ impl RecorderState {
     async fn reset(&self) {
         *self.ffmpeg_child.lock().await = None;
         self.segments.lock().await.clear();
-        self.is_paused.store(false, Ordering::SeqCst);
+        *self.phase.lock().await = RecordingPhase::Idle;
         *self.output_dir.lock().await = None;
         *self.output_path.lock().await = None;
         self.segment_counter
@@ -235,6 +245,18 @@ pub async fn validate_api_key_cmd(
     provider: AiProviderKind,
     key: String,
 ) -> Result<bool, NarratorError> {
+    // Rate limit: max one validation per 2 seconds
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let last = LAST_VALIDATION.load(Ordering::SeqCst);
+    if now - last < 2 {
+        return Err(NarratorError::ApiError(
+            "Please wait before validating again".to_string(),
+        ));
+    }
+    LAST_VALIDATION.store(now, Ordering::SeqCst);
     ai_client::validate_api_key(&provider, &key).await
 }
 
@@ -242,10 +264,14 @@ pub async fn validate_api_key_cmd(
 
 #[tauri::command]
 pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
-    if !Path::new(&path).exists() {
+    let path = Path::new(&path);
+    if !path.exists() {
         return Err(NarratorError::VideoProbeError("File not found".to_string()));
     }
-    video_engine::probe_video(Path::new(&path)).await
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| NarratorError::VideoProbeError(format!("Invalid path: {e}")))?;
+    video_engine::probe_video(&canonical).await
 }
 
 // ── Document commands ──
@@ -263,7 +289,16 @@ pub async fn process_documents(
     let mut total_size: usize = 0;
     const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB
     for path in paths {
-        let doc = doc_processor::process_document(Path::new(&path))?;
+        let p = Path::new(&path);
+        if !p.exists() {
+            return Err(NarratorError::DocumentError(format!(
+                "File not found: {path}"
+            )));
+        }
+        let canonical = p
+            .canonicalize()
+            .map_err(|e| NarratorError::DocumentError(format!("Invalid path: {e}")))?;
+        let doc = doc_processor::process_document(&canonical)?;
         total_size += doc.content.len();
         if total_size > MAX_TOTAL_SIZE {
             return Err(NarratorError::DocumentError(
@@ -1021,12 +1056,13 @@ pub async fn start_screen_recording(
     *state.output_path.lock().await = Some(final_path);
 
     // Start the first recording segment
-    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0).await?;
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0, 30).await?;
     *state.ffmpeg_child.lock().await = Some(child);
     state.segments.lock().await.push(segment_path);
     state
         .segment_counter
         .store(1, std::sync::atomic::Ordering::SeqCst);
+    *state.phase.lock().await = RecordingPhase::Recording;
 
     // Create the overlay window
     #[cfg(target_os = "windows")]
@@ -1078,9 +1114,12 @@ pub async fn start_screen_recording(
 /// Pause the current recording (stops current segment, new one starts on resume).
 #[tauri::command]
 pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
-    if state.is_paused.load(Ordering::SeqCst) {
-        return Ok(()); // Already paused
+    let mut phase = state.phase.lock().await;
+    if *phase != RecordingPhase::Recording {
+        return Ok(());
     }
+    *phase = RecordingPhase::Paused;
+    drop(phase);
 
     // Stop the current segment
     let mut child_guard = state.ffmpeg_child.lock().await;
@@ -1088,7 +1127,6 @@ pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(
         screen_recorder::stop_segment(child).await?;
     }
     *child_guard = None;
-    state.is_paused.store(true, Ordering::SeqCst);
 
     tracing::info!("Recording paused");
     Ok(())
@@ -1097,9 +1135,12 @@ pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(
 /// Resume a paused recording (starts a new segment).
 #[tauri::command]
 pub async fn resume_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
-    if !state.is_paused.load(Ordering::SeqCst) {
-        return Ok(()); // Not paused
+    let mut phase = state.phase.lock().await;
+    if *phase != RecordingPhase::Paused {
+        return Ok(());
     }
+    *phase = RecordingPhase::Recording;
+    drop(phase);
 
     let out_dir = state.output_dir.lock().await;
     let out_dir = out_dir
@@ -1111,10 +1152,9 @@ pub async fn resume_recording(state: tauri::State<'_, RecorderState>) -> Result<
         .segment_counter
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    let (child, segment_path) = screen_recorder::start_segment(&out_dir, seg_idx).await?;
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, seg_idx, 30).await?;
     *state.ffmpeg_child.lock().await = Some(child);
     state.segments.lock().await.push(segment_path);
-    state.is_paused.store(false, Ordering::SeqCst);
 
     tracing::info!("Recording resumed (segment {seg_idx})");
     Ok(())
@@ -1126,8 +1166,18 @@ pub async fn stop_screen_recording(
     app: tauri::AppHandle,
     state: tauri::State<'_, RecorderState>,
 ) -> Result<String, NarratorError> {
-    // Stop current segment if not paused
-    if !state.is_paused.load(Ordering::SeqCst) {
+    let mut phase = state.phase.lock().await;
+    if *phase == RecordingPhase::Idle || *phase == RecordingPhase::Stopping {
+        return Err(NarratorError::FfmpegFailed(
+            "No active recording to stop".to_string(),
+        ));
+    }
+    let was_paused = *phase == RecordingPhase::Paused;
+    *phase = RecordingPhase::Stopping;
+    drop(phase);
+
+    // Only stop current segment if not paused
+    if !was_paused {
         let mut child_guard = state.ffmpeg_child.lock().await;
         if let Some(child) = child_guard.as_mut() {
             screen_recorder::stop_segment(child).await?;

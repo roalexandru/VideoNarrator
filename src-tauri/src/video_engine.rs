@@ -127,8 +127,13 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
         .unwrap_or("unknown")
         .to_string();
 
-    // Parse fps from r_frame_rate (e.g., "30/1" or "30000/1001")
-    let fps = parse_frame_rate(video_stream["r_frame_rate"].as_str().unwrap_or("0/1"));
+    // Prefer avg_frame_rate for VFR videos, fall back to r_frame_rate
+    let fps_str = video_stream["avg_frame_rate"]
+        .as_str()
+        .filter(|s| *s != "0/0")
+        .or_else(|| video_stream["r_frame_rate"].as_str())
+        .unwrap_or("0/1");
+    let fps = parse_frame_rate(fps_str);
 
     let duration = json["format"]["duration"]
         .as_str()
@@ -208,7 +213,16 @@ pub async fn extract_frames(
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let metadata = probe_video(video_path).await?;
-    let interval = config.density.interval_seconds();
+    let base_interval = config.density.interval_seconds();
+
+    // Adaptive: ensure we don't extract more frames than max_frames
+    // by increasing the interval if needed
+    let estimated_frames = (metadata.duration_seconds / base_interval).ceil() as usize;
+    let interval = if estimated_frames > config.max_frames && config.max_frames > 0 {
+        metadata.duration_seconds / config.max_frames as f64
+    } else {
+        base_interval
+    };
 
     // Extract frames at fixed intervals
     let output_pattern = output_dir.join("frame_%04d.jpg");

@@ -5,6 +5,7 @@ import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { listProjectFrames } from "../../lib/tauri/commands";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -19,6 +20,7 @@ export function ReviewScreen() {
   const [duration, setDuration] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [framePaths, setFramePaths] = useState<string[]>([]);
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
 
   const script = scripts[activeLanguage];
   const segments = script?.segments || [];
@@ -249,7 +251,7 @@ export function ReviewScreen() {
                   </div>
                   <div style={{ display: "flex", gap: 4, paddingTop: 2 }}>
                     <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
-                    <button onClick={(e) => { e.stopPropagation(); deleteSegment(activeLanguage, i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
+                    <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
                   </div>
                 </div>
               );
@@ -257,6 +259,16 @@ export function ReviewScreen() {
           </div>
         )}
       </div>
+
+      {deleteTarget !== null && (
+        <ConfirmDialog
+          title="Delete Segment"
+          message={`Are you sure you want to delete segment ${deleteTarget + 1}? This cannot be undone.`}
+          confirmLabel="Delete"
+          onConfirm={() => { deleteSegment(activeLanguage, deleteTarget); setDeleteTarget(null); }}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 }

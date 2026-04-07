@@ -17,6 +17,7 @@ export function EditVideoScreen() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const dragHandlersRef = useRef<{ onMove: (e: MouseEvent) => void; onUp: () => void } | null>(null);
+  const rafRef = useRef<number>(0);
   const [videoDuration, setVideoDuration] = useState(0); // actual source video duration
   const [isPlaying, setIsPlaying] = useState(false);
   const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
@@ -111,7 +112,7 @@ export function EditVideoScreen() {
   useEffect(() => {
     if (!isPlaying || !videoRef.current) return;
     const v = videoRef.current;
-    const interval = setInterval(() => {
+    const tick = () => {
       const sourceT = v.currentTime;
       // Find which clip contains current source time
       let inClip = false;
@@ -145,8 +146,12 @@ export function EditVideoScreen() {
       if (clips.length > 0 && sourceT >= clips[clips.length - 1].sourceEnd) {
         v.pause();
       }
-    }, 50);
-    return () => clearInterval(interval);
+      if (isPlaying) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
   }, [isPlaying, clips]);
 
   // Keyboard

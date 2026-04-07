@@ -125,13 +125,10 @@ pub async fn apply_edits(
             // Skip frames mode: drop audio entirely (it would be choppy)
             args.extend(["-an".into()]);
         } else if needs_speed {
+            // ffmpeg atempo supports 0.5-100.0 in a single filter since v4.0
+            // Chain only if below 0.5
             let mut atempo_chain = Vec::new();
             let mut remaining = clip.speed;
-            // Chain atempo filters for speeds outside 0.5-2.0
-            while remaining > 2.0 {
-                atempo_chain.push("atempo=2.0".to_string());
-                remaining /= 2.0;
-            }
             while remaining < 0.5 {
                 atempo_chain.push("atempo=0.5".to_string());
                 remaining /= 0.5;
@@ -194,6 +191,7 @@ pub async fn apply_edits(
 
         if !output.status.success() {
             // Fallback: re-encode concat
+            tracing::warn!("Stream-copy concat failed, falling back to re-encode");
             let output2 = Command::new(ffmpeg.as_os_str())
                 .args(["-y", "-f", "concat", "-safe", "0", "-i"])
                 .arg(concat_list.as_os_str())
@@ -450,7 +448,10 @@ pub async fn extract_edit_thumbnails(
             "-i",
             video_path,
             "-vf",
-            &format!("fps=1/{:.3},scale=120:-1", interval),
+            &format!(
+                "fps=1/{:.3},scale='min(120,iw)':'min(68,ih)':force_original_aspect_ratio=decrease",
+                interval
+            ),
             "-q:v",
             "5",
             &format!("{}/thumb_%04d.jpg", output_dir),

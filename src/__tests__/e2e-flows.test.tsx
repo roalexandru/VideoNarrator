@@ -252,10 +252,14 @@ describe("E2E Flow 2: Review and Edit Script", () => {
     expect(screen.getAllByText("Welcome to the demo.").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Here we see the main feature.").length).toBeGreaterThanOrEqual(1);
 
-    // Delete first segment
+    // Delete first segment — opens confirmation dialog
     const delButtons = screen.getAllByText("Del");
     expect(delButtons).toHaveLength(2);
     await user.click(delButtons[0]);
+
+    // Confirm deletion
+    const confirmBtn = screen.getByText("Delete");
+    await user.click(confirmBtn);
 
     // Verify store updated
     const segs = useScriptStore.getState().scripts["en"].segments;
