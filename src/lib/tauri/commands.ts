@@ -122,8 +122,8 @@ export const applyVideoEdits = (inputPath: string, outputPath: string, edits: Vi
 export const extractEditThumbnails = (videoPath: string, outputDir: string, count: number) =>
   invoke<string[]>("extract_edit_thumbnails", { videoPath, outputDir, count });
 
-export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean) =>
-  invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio });
+export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
+  invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel });
 
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 
@@ -183,8 +183,8 @@ export const validateAzureTtsKey = (apiKey: string, region: string) => invoke<bo
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });
 
-export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string) =>
-  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath });
+export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string, channel: Channel<import("../../types/processing").ProgressEvent>) =>
+  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath, channel });
 
 // Styles
 export const listStyles = () =>

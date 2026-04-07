@@ -11,6 +11,7 @@ mod menu;
 mod models;
 mod project_store;
 mod screen_recorder;
+mod secure_store;
 mod telemetry;
 mod video_edit;
 mod video_engine;

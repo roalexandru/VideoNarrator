@@ -2,6 +2,7 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
+use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, doc_processor, elevenlabs_client, export_engine, project_store,
     screen_recorder, video_edit, video_engine,
@@ -89,6 +90,18 @@ fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     Ok(())
 }
 
+// ── Secure API key helpers ──
+
+fn save_api_key_secure(provider: &str, key: &str) -> Result<(), NarratorError> {
+    let keychain_key = format!("api_key_{provider}");
+    secure_store::set_secret(&keychain_key, key)
+}
+
+fn load_api_key_secure(provider: &str) -> Option<String> {
+    let keychain_key = format!("api_key_{provider}");
+    secure_store::get_secret(&keychain_key).ok().flatten()
+}
+
 // ── App state ──
 
 pub struct AppState {
@@ -138,24 +151,67 @@ impl RecorderState {
 
 impl AppState {
     pub fn new() -> Self {
-        // Load persisted API keys on startup
         let config = load_config();
         let mut keys = std::collections::HashMap::new();
-        for (k, v) in &config.api_keys {
-            match k.as_str() {
-                "claude" => {
-                    keys.insert(AiProviderKind::Claude, v.clone());
+
+        // Migrate plaintext keys to keychain if they exist
+        if !config.api_keys.is_empty() {
+            let migrated = secure_store::migrate_from_plaintext(&config.api_keys);
+            if migrated > 0 {
+                // Remove keys from the JSON file now that they're in the keychain
+                let mut clean_config = config.clone();
+                clean_config.api_keys.clear();
+                if let Err(e) = save_config(&clean_config) {
+                    tracing::warn!("Failed to clean API keys from config.json: {e}");
                 }
-                "openai" => {
-                    keys.insert(AiProviderKind::OpenAi, v.clone());
-                }
-                "gemini" => {
-                    keys.insert(AiProviderKind::Gemini, v.clone());
-                }
-                _ => {}
+                tracing::info!("Migrated {migrated} API keys to OS keychain");
             }
         }
-        tracing::info!("Loaded {} persisted API keys", keys.len());
+
+        // Migrate ElevenLabs API key from config to keychain
+        if let Some(ref el) = config.elevenlabs {
+            if !el.api_key.is_empty() {
+                if let Ok(()) = save_api_key_secure("elevenlabs", &el.api_key) {
+                    let mut clean_config = load_config();
+                    if let Some(ref mut el_cfg) = clean_config.elevenlabs {
+                        el_cfg.api_key = String::new();
+                    }
+                    if let Err(e) = save_config(&clean_config) {
+                        tracing::warn!("Failed to clean ElevenLabs key from config.json: {e}");
+                    }
+                    tracing::info!("Migrated ElevenLabs API key to OS keychain");
+                }
+            }
+        }
+
+        // Migrate Azure TTS API key from config to keychain
+        if let Some(ref az) = config.azure_tts {
+            if !az.api_key.is_empty() {
+                if let Ok(()) = save_api_key_secure("azure_tts", &az.api_key) {
+                    let mut clean_config = load_config();
+                    if let Some(ref mut az_cfg) = clean_config.azure_tts {
+                        az_cfg.api_key = String::new();
+                    }
+                    if let Err(e) = save_config(&clean_config) {
+                        tracing::warn!("Failed to clean Azure TTS key from config.json: {e}");
+                    }
+                    tracing::info!("Migrated Azure TTS API key to OS keychain");
+                }
+            }
+        }
+
+        // Load AI provider keys from keychain
+        for (provider_str, provider_kind) in [
+            ("claude", AiProviderKind::Claude),
+            ("openai", AiProviderKind::OpenAi),
+            ("gemini", AiProviderKind::Gemini),
+        ] {
+            if let Some(key) = load_api_key_secure(provider_str) {
+                keys.insert(provider_kind, key);
+            }
+        }
+
+        tracing::info!("Loaded {} API keys from secure storage", keys.len());
 
         Self {
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -232,10 +288,8 @@ pub async fn set_api_key(
     keys.insert(provider.clone(), key.clone());
     drop(keys);
 
-    // Persist to disk
-    let mut config = load_config();
-    config.api_keys.insert(provider.to_string(), key);
-    save_config(&config)?;
+    // Persist to OS keychain
+    save_api_key_secure(&provider.to_string(), &key)?;
 
     Ok(())
 }
@@ -559,26 +613,32 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
 pub async fn get_elevenlabs_config(
 ) -> Result<Option<elevenlabs_client::ElevenLabsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config
-        .elevenlabs
-        .map(|e| elevenlabs_client::ElevenLabsConfig {
-            api_key: e.api_key,
+    Ok(config.elevenlabs.map(|e| {
+        // Inject API key from keychain (config.json stores empty string)
+        let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
+        elevenlabs_client::ElevenLabsConfig {
+            api_key,
             voice_id: e.voice_id,
             model_id: e.model_id,
             stability: e.stability,
             similarity_boost: e.similarity_boost,
             style: e.style,
             speed: e.speed,
-        }))
+        }
+    }))
 }
 
 #[tauri::command]
 pub async fn save_elevenlabs_config(
     config: elevenlabs_client::ElevenLabsConfig,
 ) -> Result<(), NarratorError> {
+    // Store API key in OS keychain
+    save_api_key_secure("elevenlabs", &config.api_key)?;
+
+    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.elevenlabs = Some(ElevenLabsPersisted {
-        api_key: config.api_key,
+        api_key: String::new(),
         voice_id: config.voice_id,
         model_id: config.model_id,
         stability: config.stability,
@@ -607,12 +667,16 @@ pub async fn validate_elevenlabs_key(api_key: String) -> Result<bool, NarratorEr
 pub async fn get_azure_tts_config(
 ) -> Result<Option<azure_tts_client::AzureTtsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config.azure_tts.map(|a| azure_tts_client::AzureTtsConfig {
-        api_key: a.api_key,
-        region: a.region,
-        voice_name: a.voice_name,
-        speaking_style: a.speaking_style,
-        speed: a.speed,
+    Ok(config.azure_tts.map(|a| {
+        // Inject API key from keychain (config.json stores empty string)
+        let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
+        azure_tts_client::AzureTtsConfig {
+            api_key,
+            region: a.region,
+            voice_name: a.voice_name,
+            speaking_style: a.speaking_style,
+            speed: a.speed,
+        }
     }))
 }
 
@@ -620,9 +684,13 @@ pub async fn get_azure_tts_config(
 pub async fn save_azure_tts_config(
     config: azure_tts_client::AzureTtsConfig,
 ) -> Result<(), NarratorError> {
+    // Store API key in OS keychain
+    save_api_key_secure("azure_tts", &config.api_key)?;
+
+    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.azure_tts = Some(AzureTtsPersisted {
-        api_key: config.api_key,
+        api_key: String::new(),
         region: config.region,
         voice_name: config.voice_name,
         speaking_style: config.speaking_style,
@@ -749,12 +817,15 @@ pub async fn generate_tts(
         "azure" => {
             let az_config = config
                 .azure_tts
-                .map(|a| azure_tts_client::AzureTtsConfig {
-                    api_key: a.api_key,
-                    region: a.region,
-                    voice_name: a.voice_name,
-                    speaking_style: a.speaking_style,
-                    speed: a.speed,
+                .map(|a| {
+                    let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
+                    azure_tts_client::AzureTtsConfig {
+                        api_key,
+                        region: a.region,
+                        voice_name: a.voice_name,
+                        speaking_style: a.speaking_style,
+                        speed: a.speed,
+                    }
                 })
                 .ok_or_else(|| NarratorError::NoApiKey("azure_tts".to_string()))?;
             TtsProvider::Azure(az_config)
@@ -762,14 +833,17 @@ pub async fn generate_tts(
         _ => {
             let el_config = config
                 .elevenlabs
-                .map(|e| elevenlabs_client::ElevenLabsConfig {
-                    api_key: e.api_key,
-                    voice_id: e.voice_id,
-                    model_id: e.model_id,
-                    stability: e.stability,
-                    similarity_boost: e.similarity_boost,
-                    style: e.style,
-                    speed: e.speed,
+                .map(|e| {
+                    let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
+                    elevenlabs_client::ElevenLabsConfig {
+                        api_key,
+                        voice_id: e.voice_id,
+                        model_id: e.model_id,
+                        stability: e.stability,
+                        similarity_boost: e.similarity_boost,
+                        style: e.style,
+                        speed: e.speed,
+                    }
                 })
                 .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
             TtsProvider::ElevenLabs(el_config)
@@ -1249,8 +1323,18 @@ pub async fn merge_audio_video(
     audio_path: String,
     output_path: String,
     replace_audio: bool,
+    channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::merge_audio_video(&video_path, &audio_path, &output_path, replace_audio).await
+    video_edit::merge_audio_video(
+        &video_path,
+        &audio_path,
+        &output_path,
+        replace_audio,
+        |pct| {
+            channel.send(ProgressEvent::Progress { percent: pct }).ok();
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1356,6 +1440,7 @@ pub async fn burn_subtitles(
     video_path: String,
     srt_content: String,
     output_path: String,
+    channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
     // Write SRT to temp file, then burn
     let out_dir = std::path::Path::new(&output_path)
@@ -1365,8 +1450,15 @@ pub async fn burn_subtitles(
     let srt_path = out_dir.join("_temp_subtitles.srt");
     std::fs::write(&srt_path, &srt_content)?;
 
-    let result =
-        video_edit::burn_subtitles(&video_path, &srt_path.to_string_lossy(), &output_path).await;
+    let result = video_edit::burn_subtitles(
+        &video_path,
+        &srt_path.to_string_lossy(),
+        &output_path,
+        |pct| {
+            channel.send(ProgressEvent::Progress { percent: pct }).ok();
+        },
+    )
+    .await;
 
     let _ = std::fs::remove_file(&srt_path);
     result
