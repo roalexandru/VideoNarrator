@@ -90,9 +90,12 @@ fn extract_pdf_text_basic(bytes: &[u8]) -> String {
             // Extract text from Tj or TJ operators
             if let Some(start) = trimmed.find('(') {
                 if let Some(end) = trimmed.rfind(')') {
-                    if start < end {
-                        result.push_str(&trimmed[start + 1..end]);
-                        result.push(' ');
+                    let start_byte = start + '('.len_utf8();
+                    if start_byte < end {
+                        if let Some(slice) = trimmed.get(start_byte..end) {
+                            result.push_str(slice);
+                            result.push(' ');
+                        }
                     }
                 }
             }
@@ -240,5 +243,56 @@ mod tests {
 
         let result = process_document(&file_path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_pdf_text_basic_empty() {
+        // Empty bytes: no BT/ET markers, fallback grabs printable ASCII (none here)
+        let result = extract_pdf_text_basic(&[]);
+        // Result should be empty or only whitespace
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_extract_pdf_text_basic_utf8_safe() {
+        // Multi-byte UTF-8 content with parentheses to exercise the BT/ET + Tj parsing path.
+        // The function uses get() for safe slicing so it should not panic.
+        let input = b"BT\n(Hello \xc3\xa9 world) Tj\nET\n";
+        let result = extract_pdf_text_basic(input);
+        // Should contain extracted text between parentheses
+        assert!(result.contains("Hello"));
+    }
+
+    #[test]
+    fn test_estimate_tokens_large() {
+        // 1 million characters => ~250,000 tokens
+        let large = "a".repeat(1_000_000);
+        assert_eq!(estimate_tokens(&large), 250_000);
+    }
+
+    #[test]
+    fn test_truncate_to_budget_empty() {
+        let docs: Vec<ProcessedDocument> = vec![];
+        let result = truncate_to_budget(docs, 1000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_to_budget_single_large_doc() {
+        let large_content = "x".repeat(40000); // 40000 chars = ~10000 tokens
+        let docs = vec![ProcessedDocument {
+            name: "huge.txt".to_string(),
+            content: large_content,
+            token_estimate: 10000,
+            source_path: "/tmp/huge.txt".to_string(),
+        }];
+
+        let result = truncate_to_budget(docs, 500);
+        assert_eq!(result.len(), 1);
+        // The doc should have been truncated to fit within the 500-token budget
+        assert_eq!(result[0].token_estimate, 500);
+        // Content should have been truncated (500 tokens * 4 chars = 2000 chars + truncation note)
+        assert!(result[0].content.contains("[... document truncated"));
+        assert!(result[0].content.len() < 40000);
     }
 }

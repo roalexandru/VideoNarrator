@@ -17,6 +17,7 @@ export function EditVideoScreen() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const dragHandlersRef = useRef<{ onMove: (e: MouseEvent) => void; onUp: () => void } | null>(null);
+  const rafRef = useRef<number>(0);
   const [videoDuration, setVideoDuration] = useState(0); // actual source video duration
   const [isPlaying, setIsPlaying] = useState(false);
   const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
@@ -83,7 +84,7 @@ export function EditVideoScreen() {
     // Scale thumbnail count: short videos get more detail, long videos fewer to stay fast
     const dur = videoFile.duration || 120;
     const thumbCount = dur > 600 ? 30 : dur > 300 ? 40 : 60;
-    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || "tmp"}`, thumbCount)
+    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || crypto.randomUUID()}`, thumbCount)
       .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p)))).catch(() => {});
   }, [videoFile?.path, projectId]);
 
@@ -111,7 +112,7 @@ export function EditVideoScreen() {
   useEffect(() => {
     if (!isPlaying || !videoRef.current) return;
     const v = videoRef.current;
-    const interval = setInterval(() => {
+    const tick = () => {
       const sourceT = v.currentTime;
       // Find which clip contains current source time
       let inClip = false;
@@ -145,8 +146,12 @@ export function EditVideoScreen() {
       if (clips.length > 0 && sourceT >= clips[clips.length - 1].sourceEnd) {
         v.pause();
       }
-    }, 50);
-    return () => clearInterval(interval);
+      if (isPlaying) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
   }, [isPlaying, clips]);
 
   // Keyboard
@@ -163,7 +168,7 @@ export function EditVideoScreen() {
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
-  }, [isPlaying, selectedClipIndex, outputTime, clips.length, seekToOutput]);
+  }, [isPlaying, selectedClipIndex, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo]);
 
   const togglePlay = () => { const v = videoRef.current; if (!v) return; isPlaying ? v.pause() : v.play(); };
 

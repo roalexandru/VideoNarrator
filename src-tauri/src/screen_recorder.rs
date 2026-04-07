@@ -100,10 +100,12 @@ pub async fn record_native(_output_path: &str) -> Result<String, NarratorError> 
 // ── Windows: ffmpeg gdigrab segment-based recording ──
 
 /// Start an ffmpeg gdigrab recording segment. Returns the child process handle.
+/// `fps` controls the capture framerate (typically 30).
 #[cfg(target_os = "windows")]
 pub async fn start_segment(
     output_dir: &str,
     segment_index: u32,
+    fps: u32,
 ) -> Result<(tokio::process::Child, String), NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let segment_path = PathBuf::from(output_dir)
@@ -111,7 +113,11 @@ pub async fn start_segment(
         .to_string_lossy()
         .to_string();
 
-    tracing::info!("Starting recording segment {segment_index} → {segment_path}");
+    tracing::info!("Starting recording segment {segment_index} at {fps}fps → {segment_path}");
+
+    // GOP size = 2 seconds worth of frames for keyframe alignment
+    let gop_size = (fps * 2).to_string();
+    let fps_str = fps.to_string();
 
     let mut cmd = tokio::process::Command::new(ffmpeg.as_os_str());
     cmd.args([
@@ -119,7 +125,7 @@ pub async fn start_segment(
         "-f",
         "gdigrab",
         "-framerate",
-        "30",
+        &fps_str,
         "-i",
         "desktop",
         "-vcodec",
@@ -128,6 +134,8 @@ pub async fn start_segment(
         "ultrafast",
         "-pix_fmt",
         "yuv420p",
+        "-g",
+        &gop_size,
         &segment_path,
     ])
     .stdin(std::process::Stdio::piped())
@@ -154,6 +162,7 @@ pub async fn start_segment(
 pub async fn start_segment(
     _output_dir: &str,
     _segment_index: u32,
+    _fps: u32,
 ) -> Result<(tokio::process::Child, String), NarratorError> {
     Err(NarratorError::FfmpegFailed(
         "Segment-based recording is only supported on Windows.".into(),

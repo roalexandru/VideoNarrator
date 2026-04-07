@@ -36,7 +36,7 @@ impl AiProvider for ClaudeProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_default();
+            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
 
         let body = json!({
             "model": self.model,
@@ -93,8 +93,9 @@ impl AiProvider for ClaudeProvider {
                 } else {
                     &error_text
                 };
+                tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
-                    "Claude API error ({status}): {truncated}"
+                    "Claude API error (HTTP {status}). Check your API key and try again."
                 )));
             }
         }
@@ -127,7 +128,7 @@ impl AiProvider for OpenAiProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_default();
+            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
 
         // Convert user_message to OpenAI format
         let user_content = if user_message.is_array() {
@@ -219,8 +220,9 @@ impl AiProvider for OpenAiProvider {
                 } else {
                     &error_text
                 };
+                tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
-                    "OpenAI API error ({status}): {truncated}"
+                    "OpenAI API error (HTTP {status}). Check your API key and try again."
                 )));
             }
         }
@@ -288,8 +290,8 @@ impl AiProvider for GeminiProvider {
         };
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
         );
 
         let body = json!({
@@ -307,6 +309,7 @@ impl AiProvider for GeminiProvider {
         loop {
             let resp = client
                 .post(&url)
+                .header("x-goog-api-key", &self.api_key)
                 .header("content-type", "application/json")
                 .json(&body)
                 .send()
@@ -335,8 +338,9 @@ impl AiProvider for GeminiProvider {
                 } else {
                     &error_text
                 };
+                tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
-                    "Gemini API error ({status}): {truncated}"
+                    "Gemini API error (HTTP {status}). Check your API key and try again."
                 )));
             }
         }
@@ -558,28 +562,28 @@ pub async fn generate_narration(
             if let Some(last) = script.segments.last_mut() {
                 last.end_seconds = target;
             }
-        }
-
-        // Even if not scaled, ensure gaps exist between contiguous segments
-        // If all segments are back-to-back, add gaps
-        let all_contiguous = script
-            .segments
-            .windows(2)
-            .all(|w| (w[1].start_seconds - w[0].end_seconds).abs() < 0.1);
-        if all_contiguous && script.segments.len() > 1 {
-            let total = script.total_duration_seconds;
-            let n = script.segments.len() as f64;
-            // Redistribute: give each segment a slot of total/n seconds
-            // with 65% speech and 35% gap
-            let slot = total / n;
-            for (i, seg) in script.segments.iter_mut().enumerate() {
-                seg.start_seconds = i as f64 * slot;
-                seg.end_seconds = seg.start_seconds + slot * 0.65;
-                seg.pause_after_ms = (slot * 0.35 * 1000.0) as u32;
-            }
-            if let Some(last) = script.segments.last_mut() {
-                last.end_seconds = total;
-                last.pause_after_ms = 0;
+        } else {
+            // Only redistribute if NOT already scaled — avoid double adjustment
+            // If all segments are back-to-back, add gaps
+            let all_contiguous = script
+                .segments
+                .windows(2)
+                .all(|w| (w[1].start_seconds - w[0].end_seconds).abs() < 0.1);
+            if all_contiguous && script.segments.len() > 1 {
+                let total = script.total_duration_seconds;
+                let n = script.segments.len() as f64;
+                // Redistribute: give each segment a slot of total/n seconds
+                // with 65% speech and 35% gap
+                let slot = total / n;
+                for (i, seg) in script.segments.iter_mut().enumerate() {
+                    seg.start_seconds = i as f64 * slot;
+                    seg.end_seconds = seg.start_seconds + slot * 0.65;
+                    seg.pause_after_ms = (slot * 0.35 * 1000.0) as u32;
+                }
+                if let Some(last) = script.segments.last_mut() {
+                    last.end_seconds = total;
+                    last.pause_after_ms = 0;
+                }
             }
         }
     }
@@ -658,8 +662,8 @@ pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bo
             Ok(resp.status().is_success())
         }
         AiProviderKind::Gemini => {
-            let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={key}");
-            let resp = client.get(&url).send().await?;
+            let url = "https://generativelanguage.googleapis.com/v1beta/models";
+            let resp = client.get(url).header("x-goog-api-key", key).send().await?;
 
             let status = resp.status().as_u16();
             // 200 = valid key, 400/403 = invalid key
@@ -747,5 +751,161 @@ mod tests {
         let provider = create_provider(&config, "test-key".to_string());
         assert_eq!(provider.name(), "gemini");
         assert_eq!(provider.model(), "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn test_build_user_message_basic() {
+        let metadata = VideoMetadata {
+            path: "/tmp/test.mp4".to_string(),
+            duration_seconds: 60.0,
+            width: 1920,
+            height: 1080,
+            codec: "h264".to_string(),
+            fps: 30.0,
+            file_size: 1000000,
+        };
+
+        // Call with empty frames
+        let result = build_user_message(&[], "Test Video", "A test description", &metadata, "en");
+        assert!(result.is_ok());
+
+        let msg = result.unwrap();
+        // Should be a JSON array
+        assert!(msg.is_array());
+        let arr = msg.as_array().unwrap();
+        // With no frames, there should be exactly 1 text element (the context)
+        assert_eq!(arr.len(), 1);
+
+        // Verify the text content contains key information
+        let text = arr[0]["text"].as_str().unwrap();
+        assert!(text.contains("Test Video"));
+        assert!(text.contains("A test description"));
+        assert!(text.contains("60.0"));
+        assert!(text.contains("1920x1080"));
+        assert!(text.contains("30.0"));
+        assert!(text.contains("en"));
+        assert!(text.contains("Number of frames: 0"));
+    }
+
+    struct MockProvider {
+        response: String,
+    }
+
+    #[async_trait]
+    impl AiProvider for MockProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _user_message: serde_json::Value,
+        ) -> Result<String, NarratorError> {
+            Ok(self.response.clone())
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn model(&self) -> &str {
+            "mock-v1"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_narration_parse_valid_json() {
+        let valid_response = r#"{
+            "title": "Test Narration",
+            "total_duration_seconds": 30.0,
+            "segments": [
+                {
+                    "index": 0,
+                    "start_seconds": 0.0,
+                    "end_seconds": 15.0,
+                    "text": "Welcome to the video.",
+                    "visual_description": "Opening",
+                    "emphasis": [],
+                    "pace": "medium",
+                    "pause_after_ms": 500,
+                    "frame_refs": [0]
+                },
+                {
+                    "index": 1,
+                    "start_seconds": 17.0,
+                    "end_seconds": 30.0,
+                    "text": "Thank you for watching.",
+                    "visual_description": "Closing",
+                    "emphasis": [],
+                    "pace": "slow",
+                    "pause_after_ms": 0,
+                    "frame_refs": [1]
+                }
+            ],
+            "metadata": {
+                "style": "technical",
+                "language": "en",
+                "provider": "",
+                "model": "",
+                "generated_at": ""
+            }
+        }"#;
+
+        let mock = MockProvider {
+            response: valid_response.to_string(),
+        };
+
+        let result = generate_narration(
+            &mock,
+            "system prompt",
+            json!("user message"),
+            "technical",
+            "en",
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.title, "Test Narration");
+        assert_eq!(script.segments.len(), 2);
+        assert_eq!(script.segments[0].text, "Welcome to the video.");
+        assert_eq!(script.segments[1].text, "Thank you for watching.");
+        // Metadata should be filled in from provider since original was empty
+        assert_eq!(script.metadata.provider, "mock");
+        assert_eq!(script.metadata.model, "mock-v1");
+        // generated_at should be filled in since it was empty
+        assert!(!script.metadata.generated_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_generate_narration_parse_invalid_json() {
+        let mock = MockProvider {
+            response: "this is not valid json at all".to_string(),
+        };
+
+        let result = generate_narration(
+            &mock,
+            "system prompt",
+            json!("user message"),
+            "technical",
+            "en",
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse AI response"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_narration_strips_code_fences() {
+        // Some AI providers wrap JSON in markdown code fences
+        let actual_response = "```json\n{\"title\":\"Fenced\",\"total_duration_seconds\":10.0,\"segments\":[],\"metadata\":{\"style\":\"test\",\"language\":\"en\",\"provider\":\"mock\",\"model\":\"mock-v1\",\"generated_at\":\"2026-01-01T00:00:00Z\"}}\n```";
+
+        let mock = MockProvider {
+            response: actual_response.to_string(),
+        };
+
+        let result =
+            generate_narration(&mock, "system prompt", json!("user message"), "test", "en").await;
+
+        assert!(result.is_ok());
+        let script = result.unwrap();
+        assert_eq!(script.title, "Fenced");
     }
 }

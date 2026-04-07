@@ -157,10 +157,16 @@ export function ExportScreen() {
     getElevenLabsConfig().then((cfg) => {
       if (cfg?.api_key) {
         setElConfig(cfg);
-        listElevenLabsVoices(cfg.api_key).then(setElVoices).catch(() => {});
+        listElevenLabsVoices(cfg.api_key).then(setElVoices).catch((err: unknown) => {
+          console.error("Failed to load export config:", err);
+        });
       }
-    }).catch(() => {});
-    getAzureTtsConfig().then(setAzureConfig).catch(() => {});
+    }).catch((err: unknown) => {
+      console.error("Failed to load export config:", err);
+    });
+    getAzureTtsConfig().then(setAzureConfig).catch((err: unknown) => {
+      console.error("Failed to load export config:", err);
+    });
   }, []);
 
   const changePath = async () => {
@@ -217,16 +223,28 @@ export function ExportScreen() {
       if (exp.burnSubtitles) {
         // Merge to temp file first, then burn subtitles to final
         const mergedPath = `${dir}/${base}_merged.mp4`;
-        await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio);
+        const mergeChannel = new Channel<ProgressEvent>();
+        mergeChannel.onmessage = (e: ProgressEvent) => {
+          if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.15); // 65-80%
+        };
+        await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio, mergeChannel);
         setVideoProgress(80);
 
         setVideoPhase("subtitles");
         setVideoProgress(85);
         const srtContent = generateSrt(script);
-        await burnSubtitles(mergedPath, srtContent, finalPath);
+        const burnChannel = new Channel<ProgressEvent>();
+        burnChannel.onmessage = (e: ProgressEvent) => {
+          if (e.kind === "progress") setVideoProgress(85 + e.percent * 0.15); // 85-100%
+        };
+        await burnSubtitles(mergedPath, srtContent, finalPath, burnChannel);
       } else {
         // Merge directly to final path
-        await mergeAudioVideo(videoPath, audioFile, finalPath, exp.replaceAudio);
+        const mergeChannel = new Channel<ProgressEvent>();
+        mergeChannel.onmessage = (e: ProgressEvent) => {
+          if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.35); // 65-100%
+        };
+        await mergeAudioVideo(videoPath, audioFile, finalPath, exp.replaceAudio, mergeChannel);
       }
 
       setVideoProgress(100);

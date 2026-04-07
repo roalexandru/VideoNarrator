@@ -127,8 +127,13 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
         .unwrap_or("unknown")
         .to_string();
 
-    // Parse fps from r_frame_rate (e.g., "30/1" or "30000/1001")
-    let fps = parse_frame_rate(video_stream["r_frame_rate"].as_str().unwrap_or("0/1"));
+    // Prefer avg_frame_rate for VFR videos, fall back to r_frame_rate
+    let fps_str = video_stream["avg_frame_rate"]
+        .as_str()
+        .filter(|s| *s != "0/0")
+        .or_else(|| video_stream["r_frame_rate"].as_str())
+        .unwrap_or("0/1");
+    let fps = parse_frame_rate(fps_str);
 
     let duration = json["format"]["duration"]
         .as_str()
@@ -156,13 +161,7 @@ pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
     let ffprobe = detect_ffprobe()?;
 
     let output = Command::new(ffprobe.as_os_str())
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-        ])
+        .args(["-v", "quiet", "-print_format", "json", "-show_format"])
         .arg(path.as_os_str())
         .output()
         .await
@@ -186,11 +185,19 @@ fn parse_frame_rate(rate: &str) -> f64 {
     if parts.len() == 2 {
         let num = parts[0].parse::<f64>().unwrap_or(0.0);
         let den = parts[1].parse::<f64>().unwrap_or(1.0);
-        if den > 0.0 {
-            return num / den;
+        if den > 0.0 && num >= 0.0 {
+            let fps = num / den;
+            if fps > 0.0 && fps < 1000.0 {
+                return fps;
+            }
         }
     }
-    rate.parse::<f64>().unwrap_or(0.0)
+    let parsed = rate.parse::<f64>().unwrap_or(0.0);
+    if parsed > 0.0 && parsed < 1000.0 {
+        parsed
+    } else {
+        30.0 // Safe default for unreadable frame rates
+    }
 }
 
 pub async fn extract_frames(
@@ -206,7 +213,16 @@ pub async fn extract_frames(
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let metadata = probe_video(video_path).await?;
-    let interval = config.density.interval_seconds();
+    let base_interval = config.density.interval_seconds();
+
+    // Adaptive: ensure we don't extract more frames than max_frames
+    // by increasing the interval if needed
+    let estimated_frames = (metadata.duration_seconds / base_interval).ceil() as usize;
+    let interval = if estimated_frames > config.max_frames && config.max_frames > 0 {
+        metadata.duration_seconds / config.max_frames as f64
+    } else {
+        base_interval
+    };
 
     // Extract frames at fixed intervals
     let output_pattern = output_dir.join("frame_%04d.jpg");
@@ -255,7 +271,15 @@ pub async fn extract_frames(
         let timestamp = i as f64 * interval;
 
         // Get image dimensions
-        let (width, height) = get_image_dimensions(&path).unwrap_or((0, 0));
+        let dims = get_image_dimensions(&path);
+        if dims.is_none() {
+            tracing::warn!(
+                "Skipping frame with unreadable dimensions: {}",
+                path.display()
+            );
+            continue;
+        }
+        let (width, height) = dims.unwrap();
 
         let frame = Frame {
             index: i,
@@ -331,7 +355,8 @@ mod tests {
         assert!((parse_frame_rate("30/1") - 30.0).abs() < 0.01);
         assert!((parse_frame_rate("30000/1001") - 29.97).abs() < 0.01);
         assert!((parse_frame_rate("24/1") - 24.0).abs() < 0.01);
-        assert!((parse_frame_rate("0/1") - 0.0).abs() < 0.01);
+        // 0/1 returns safe default of 30.0 to prevent division-by-zero downstream
+        assert!((parse_frame_rate("0/1") - 30.0).abs() < 0.01);
     }
 
     #[test]
@@ -362,5 +387,69 @@ mod tests {
         }];
         let result = deduplicate_frames(frames);
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_frame_rate_edge_cases() {
+        // Empty string falls through to parse::<f64> which fails, returns safe default 30.0
+        assert!((parse_frame_rate("") - 30.0).abs() < 0.01);
+
+        // Single number (no slash) should parse directly
+        assert!((parse_frame_rate("25") - 25.0).abs() < 0.01);
+        assert!((parse_frame_rate("60") - 60.0).abs() < 0.01);
+
+        // Negative values: num < 0 so fps < 0, returns safe default
+        assert!((parse_frame_rate("-30/1") - 30.0).abs() < 0.01);
+
+        // Very large values: fps >= 1000, returns safe default
+        assert!((parse_frame_rate("100000/1") - 30.0).abs() < 0.01);
+
+        // Malformed strings like "abc/def": parse fails, falls through to default
+        assert!((parse_frame_rate("abc/def") - 30.0).abs() < 0.01);
+
+        // Denominator 0: den is 0.0 which is not > 0.0, falls through to default
+        assert!((parse_frame_rate("30/0") - 30.0).abs() < 0.01);
+
+        // Valid edge: very small fps
+        assert!((parse_frame_rate("1/10") - 0.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_deduplicate_frames_all_same() {
+        // All frames point to the same nonexistent path, so hash_frame_file returns ""
+        // for all of them. Since all hashes are equal, only the first frame survives.
+        let frames = vec![
+            Frame {
+                index: 0,
+                timestamp_seconds: 0.0,
+                path: PathBuf::from("/nonexistent_same"),
+                width: 100,
+                height: 100,
+            },
+            Frame {
+                index: 1,
+                timestamp_seconds: 1.0,
+                path: PathBuf::from("/nonexistent_same"),
+                width: 100,
+                height: 100,
+            },
+            Frame {
+                index: 2,
+                timestamp_seconds: 2.0,
+                path: PathBuf::from("/nonexistent_same"),
+                width: 100,
+                height: 100,
+            },
+        ];
+        let result = deduplicate_frames(frames);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].index, 0);
+        assert!((result[0].timestamp_seconds - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_to_base64_nonexistent() {
+        let result = frame_to_base64(Path::new("/nonexistent/frame.jpg"));
+        assert!(result.is_err());
     }
 }

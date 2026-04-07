@@ -17,7 +17,7 @@
     "opener:default",
     "dialog:default",
     "fs:default",
-    "shell:default",
+    "shell:allow-open",
     "updater:default",
     "process:allow-restart"
   ]

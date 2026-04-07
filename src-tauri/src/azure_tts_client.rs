@@ -164,6 +164,23 @@ fn xml_escape(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Strip any XML/SSML-like tags from text to prevent injection.
+fn strip_ssml_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+            }
+            _ if !in_tag => result.push(ch),
+            _ => {} // skip chars inside tags
+        }
+    }
+    result
+}
+
 pub async fn generate_speech(
     config: &AzureTtsConfig,
     text: &str,
@@ -179,7 +196,7 @@ pub async fn generate_speech(
         config.region
     );
 
-    let escaped_text = xml_escape(text);
+    let escaped_text = xml_escape(&strip_ssml_tags(text));
     let escaped_voice = xml_escape(&config.voice_name);
     let escaped_style = xml_escape(&config.speaking_style);
     let speed_str = format!("{:.0}%", (config.speed * 100.0) as i32);
@@ -234,6 +251,71 @@ pub async fn generate_speech(
                 "Azure TTS error ({status}): {text}"
             )));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xml_escape() {
+        assert_eq!(xml_escape("hello"), "hello");
+        assert_eq!(xml_escape("a & b"), "a &amp; b");
+        assert_eq!(xml_escape("<script>"), "&lt;script&gt;");
+        assert_eq!(xml_escape("say \"hi\""), "say &quot;hi&quot;");
+        assert_eq!(xml_escape("it's"), "it&apos;s");
+        // Multiple entities in one string
+        assert_eq!(
+            xml_escape("<a & b \"c\" 'd'>"),
+            "&lt;a &amp; b &quot;c&quot; &apos;d&apos;&gt;"
+        );
+        // Empty string
+        assert_eq!(xml_escape(""), "");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags() {
+        assert_eq!(strip_ssml_tags("hello"), "hello");
+        assert_eq!(strip_ssml_tags("<b>bold</b>"), "bold");
+        assert_eq!(
+            strip_ssml_tags("<speak>Hello <break/>world</speak>"),
+            "Hello world"
+        );
+        // Nested tags
+        assert_eq!(
+            strip_ssml_tags("<prosody rate='fast'><emphasis>text</emphasis></prosody>"),
+            "text"
+        );
+        // No tags
+        assert_eq!(strip_ssml_tags("plain text"), "plain text");
+        // Empty string
+        assert_eq!(strip_ssml_tags(""), "");
+        // Self-closing tag
+        assert_eq!(strip_ssml_tags("before<br/>after"), "beforeafter");
+    }
+
+    #[test]
+    fn test_default_voices() {
+        let voices = default_voices();
+        assert!(!voices.is_empty());
+        // Should have at least 2 voices (male + female for English)
+        assert!(voices.len() >= 2);
+
+        // Verify structure of each voice
+        for voice in &voices {
+            assert!(!voice.short_name.is_empty());
+            assert!(!voice.display_name.is_empty());
+            assert!(!voice.locale.is_empty());
+            assert!(
+                voice.gender == "Male" || voice.gender == "Female",
+                "Unexpected gender: {}",
+                voice.gender
+            );
+        }
+
+        // Verify that the default voice (Jenny) is present
+        assert!(voices.iter().any(|v| v.short_name == "en-US-JennyNeural"));
     }
 }
 

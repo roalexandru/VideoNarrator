@@ -2,13 +2,16 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
+use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, doc_processor, elevenlabs_client, export_engine, project_store,
     screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
+
+static LAST_VALIDATION: AtomicI64 = AtomicI64::new(0);
 use tauri::ipc::Channel;
 use tauri::Manager;
 use tokio::sync::Mutex;
@@ -87,6 +90,18 @@ fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     Ok(())
 }
 
+// ── Secure API key helpers ──
+
+fn save_api_key_secure(provider: &str, key: &str) -> Result<(), NarratorError> {
+    let keychain_key = format!("api_key_{provider}");
+    secure_store::set_secret(&keychain_key, key)
+}
+
+fn load_api_key_secure(provider: &str) -> Option<String> {
+    let keychain_key = format!("api_key_{provider}");
+    secure_store::get_secret(&keychain_key).ok().flatten()
+}
+
 // ── App state ──
 
 pub struct AppState {
@@ -94,10 +109,18 @@ pub struct AppState {
     pub api_keys: Mutex<std::collections::HashMap<AiProviderKind, String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecordingPhase {
+    Idle,
+    Recording,
+    Paused,
+    Stopping,
+}
+
 pub struct RecorderState {
     pub ffmpeg_child: Arc<Mutex<Option<tokio::process::Child>>>,
     pub segments: Arc<Mutex<Vec<String>>>,
-    pub is_paused: Arc<AtomicBool>,
+    pub phase: Arc<Mutex<RecordingPhase>>,
     pub output_dir: Arc<Mutex<Option<String>>>,
     pub output_path: Arc<Mutex<Option<String>>>,
     pub segment_counter: Arc<std::sync::atomic::AtomicU32>,
@@ -108,7 +131,7 @@ impl RecorderState {
         Self {
             ffmpeg_child: Arc::new(Mutex::new(None)),
             segments: Arc::new(Mutex::new(Vec::new())),
-            is_paused: Arc::new(AtomicBool::new(false)),
+            phase: Arc::new(Mutex::new(RecordingPhase::Idle)),
             output_dir: Arc::new(Mutex::new(None)),
             output_path: Arc::new(Mutex::new(None)),
             segment_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -118,7 +141,7 @@ impl RecorderState {
     async fn reset(&self) {
         *self.ffmpeg_child.lock().await = None;
         self.segments.lock().await.clear();
-        self.is_paused.store(false, Ordering::SeqCst);
+        *self.phase.lock().await = RecordingPhase::Idle;
         *self.output_dir.lock().await = None;
         *self.output_path.lock().await = None;
         self.segment_counter
@@ -128,24 +151,67 @@ impl RecorderState {
 
 impl AppState {
     pub fn new() -> Self {
-        // Load persisted API keys on startup
         let config = load_config();
         let mut keys = std::collections::HashMap::new();
-        for (k, v) in &config.api_keys {
-            match k.as_str() {
-                "claude" => {
-                    keys.insert(AiProviderKind::Claude, v.clone());
+
+        // Migrate plaintext keys to keychain if they exist
+        if !config.api_keys.is_empty() {
+            let migrated = secure_store::migrate_from_plaintext(&config.api_keys);
+            if migrated > 0 {
+                // Remove keys from the JSON file now that they're in the keychain
+                let mut clean_config = config.clone();
+                clean_config.api_keys.clear();
+                if let Err(e) = save_config(&clean_config) {
+                    tracing::warn!("Failed to clean API keys from config.json: {e}");
                 }
-                "openai" => {
-                    keys.insert(AiProviderKind::OpenAi, v.clone());
-                }
-                "gemini" => {
-                    keys.insert(AiProviderKind::Gemini, v.clone());
-                }
-                _ => {}
+                tracing::info!("Migrated {migrated} API keys to OS keychain");
             }
         }
-        tracing::info!("Loaded {} persisted API keys", keys.len());
+
+        // Migrate ElevenLabs API key from config to keychain
+        if let Some(ref el) = config.elevenlabs {
+            if !el.api_key.is_empty() {
+                if let Ok(()) = save_api_key_secure("elevenlabs", &el.api_key) {
+                    let mut clean_config = load_config();
+                    if let Some(ref mut el_cfg) = clean_config.elevenlabs {
+                        el_cfg.api_key = String::new();
+                    }
+                    if let Err(e) = save_config(&clean_config) {
+                        tracing::warn!("Failed to clean ElevenLabs key from config.json: {e}");
+                    }
+                    tracing::info!("Migrated ElevenLabs API key to OS keychain");
+                }
+            }
+        }
+
+        // Migrate Azure TTS API key from config to keychain
+        if let Some(ref az) = config.azure_tts {
+            if !az.api_key.is_empty() {
+                if let Ok(()) = save_api_key_secure("azure_tts", &az.api_key) {
+                    let mut clean_config = load_config();
+                    if let Some(ref mut az_cfg) = clean_config.azure_tts {
+                        az_cfg.api_key = String::new();
+                    }
+                    if let Err(e) = save_config(&clean_config) {
+                        tracing::warn!("Failed to clean Azure TTS key from config.json: {e}");
+                    }
+                    tracing::info!("Migrated Azure TTS API key to OS keychain");
+                }
+            }
+        }
+
+        // Load AI provider keys from keychain
+        for (provider_str, provider_kind) in [
+            ("claude", AiProviderKind::Claude),
+            ("openai", AiProviderKind::OpenAi),
+            ("gemini", AiProviderKind::Gemini),
+        ] {
+            if let Some(key) = load_api_key_secure(provider_str) {
+                keys.insert(provider_kind, key);
+            }
+        }
+
+        tracing::info!("Loaded {} API keys from secure storage", keys.len());
 
         Self {
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -158,7 +224,7 @@ impl AppState {
 
 #[tauri::command]
 pub fn get_telemetry_enabled() -> bool {
-    load_config().telemetry_enabled.unwrap_or(true)
+    load_config().telemetry_enabled.unwrap_or(false)
 }
 
 #[tauri::command]
@@ -222,10 +288,8 @@ pub async fn set_api_key(
     keys.insert(provider.clone(), key.clone());
     drop(keys);
 
-    // Persist to disk
-    let mut config = load_config();
-    config.api_keys.insert(provider.to_string(), key);
-    save_config(&config)?;
+    // Persist to OS keychain
+    save_api_key_secure(&provider.to_string(), &key)?;
 
     Ok(())
 }
@@ -235,6 +299,18 @@ pub async fn validate_api_key_cmd(
     provider: AiProviderKind,
     key: String,
 ) -> Result<bool, NarratorError> {
+    // Rate limit: max one validation per 2 seconds
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let last = LAST_VALIDATION.load(Ordering::SeqCst);
+    if now - last < 2 {
+        return Err(NarratorError::ApiError(
+            "Please wait before validating again".to_string(),
+        ));
+    }
+    LAST_VALIDATION.store(now, Ordering::SeqCst);
     ai_client::validate_api_key(&provider, &key).await
 }
 
@@ -242,10 +318,14 @@ pub async fn validate_api_key_cmd(
 
 #[tauri::command]
 pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
-    if !Path::new(&path).exists() {
+    let path = Path::new(&path);
+    if !path.exists() {
         return Err(NarratorError::VideoProbeError("File not found".to_string()));
     }
-    video_engine::probe_video(Path::new(&path)).await
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| NarratorError::VideoProbeError(format!("Invalid path: {e}")))?;
+    video_engine::probe_video(&canonical).await
 }
 
 // ── Document commands ──
@@ -254,9 +334,31 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
 pub async fn process_documents(
     paths: Vec<String>,
 ) -> Result<Vec<ProcessedDocument>, NarratorError> {
+    if paths.len() > 20 {
+        return Err(NarratorError::DocumentError(
+            "Maximum 20 documents allowed".to_string(),
+        ));
+    }
     let mut docs = Vec::new();
+    let mut total_size: usize = 0;
+    const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB
     for path in paths {
-        let doc = doc_processor::process_document(Path::new(&path))?;
+        let p = Path::new(&path);
+        if !p.exists() {
+            return Err(NarratorError::DocumentError(format!(
+                "File not found: {path}"
+            )));
+        }
+        let canonical = p
+            .canonicalize()
+            .map_err(|e| NarratorError::DocumentError(format!("Invalid path: {e}")))?;
+        let doc = doc_processor::process_document(&canonical)?;
+        total_size += doc.content.len();
+        if total_size > MAX_TOTAL_SIZE {
+            return Err(NarratorError::DocumentError(
+                "Total document size exceeds 10MB limit".to_string(),
+            ));
+        }
         docs.push(doc);
     }
     Ok(docs)
@@ -311,6 +413,16 @@ pub async fn generate_narration(
     } else {
         params.project_id.clone()
     };
+    // Validate frame config bounds
+    let mut frame_config = params.frame_config.clone();
+    if frame_config.max_frames > 100 {
+        tracing::warn!(
+            "max_frames {} exceeds limit, capping to 100",
+            frame_config.max_frames
+        );
+        frame_config.max_frames = 100;
+    }
+
     let frames_dir = project_store::get_project_frames_dir(&project_id);
     std::fs::create_dir_all(&frames_dir)
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
@@ -319,7 +431,7 @@ pub async fn generate_narration(
     let frames_dir_cleanup = frames_dir.clone();
     let frames = match video_engine::extract_frames(
         Path::new(&params.video_path),
-        &params.frame_config,
+        &frame_config,
         &frames_dir,
         move |frame| {
             channel_clone
@@ -501,26 +613,32 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
 pub async fn get_elevenlabs_config(
 ) -> Result<Option<elevenlabs_client::ElevenLabsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config
-        .elevenlabs
-        .map(|e| elevenlabs_client::ElevenLabsConfig {
-            api_key: e.api_key,
+    Ok(config.elevenlabs.map(|e| {
+        // Inject API key from keychain (config.json stores empty string)
+        let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
+        elevenlabs_client::ElevenLabsConfig {
+            api_key,
             voice_id: e.voice_id,
             model_id: e.model_id,
             stability: e.stability,
             similarity_boost: e.similarity_boost,
             style: e.style,
             speed: e.speed,
-        }))
+        }
+    }))
 }
 
 #[tauri::command]
 pub async fn save_elevenlabs_config(
     config: elevenlabs_client::ElevenLabsConfig,
 ) -> Result<(), NarratorError> {
+    // Store API key in OS keychain
+    save_api_key_secure("elevenlabs", &config.api_key)?;
+
+    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.elevenlabs = Some(ElevenLabsPersisted {
-        api_key: config.api_key,
+        api_key: String::new(),
         voice_id: config.voice_id,
         model_id: config.model_id,
         stability: config.stability,
@@ -549,12 +667,16 @@ pub async fn validate_elevenlabs_key(api_key: String) -> Result<bool, NarratorEr
 pub async fn get_azure_tts_config(
 ) -> Result<Option<azure_tts_client::AzureTtsConfig>, NarratorError> {
     let config = load_config();
-    Ok(config.azure_tts.map(|a| azure_tts_client::AzureTtsConfig {
-        api_key: a.api_key,
-        region: a.region,
-        voice_name: a.voice_name,
-        speaking_style: a.speaking_style,
-        speed: a.speed,
+    Ok(config.azure_tts.map(|a| {
+        // Inject API key from keychain (config.json stores empty string)
+        let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
+        azure_tts_client::AzureTtsConfig {
+            api_key,
+            region: a.region,
+            voice_name: a.voice_name,
+            speaking_style: a.speaking_style,
+            speed: a.speed,
+        }
     }))
 }
 
@@ -562,9 +684,13 @@ pub async fn get_azure_tts_config(
 pub async fn save_azure_tts_config(
     config: azure_tts_client::AzureTtsConfig,
 ) -> Result<(), NarratorError> {
+    // Store API key in OS keychain
+    save_api_key_secure("azure_tts", &config.api_key)?;
+
+    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.azure_tts = Some(AzureTtsPersisted {
-        api_key: config.api_key,
+        api_key: String::new(),
         region: config.region,
         voice_name: config.voice_name,
         speaking_style: config.speaking_style,
@@ -616,10 +742,7 @@ fn tts_cache_key(tts: &TtsProvider, text: &str) -> String {
             "el|{}|{}|{:.2}|{:.2}|{:.2}|{:.2}",
             c.voice_id, c.model_id, c.stability, c.similarity_boost, c.style, c.speed
         ),
-        TtsProvider::Azure(c) => format!(
-            "az|{}|{}|{:.2}",
-            c.voice_name, c.speaking_style, c.speed
-        ),
+        TtsProvider::Azure(c) => format!("az|{}|{}|{:.2}", c.voice_name, c.speaking_style, c.speed),
     };
     let input = format!("{settings}|{text}");
     let hash = blake3::hash(input.as_bytes());
@@ -647,9 +770,16 @@ async fn generate_speech_for_provider(
     if let Ok(cache_dir) = tts_cache_dir() {
         let cached = cache_dir.join(format!("{cache_key}.mp3"));
         if cached.exists() {
-            tracing::info!("TTS cache hit: {cache_key}");
-            std::fs::copy(&cached, filepath)?;
-            return Ok(());
+            match std::fs::copy(&cached, filepath) {
+                Ok(_) => {
+                    tracing::info!("TTS cache hit: {cache_key}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("TTS cache read failed, regenerating: {e}");
+                    // Fall through to API generation
+                }
+            }
         }
     }
 
@@ -687,12 +817,15 @@ pub async fn generate_tts(
         "azure" => {
             let az_config = config
                 .azure_tts
-                .map(|a| azure_tts_client::AzureTtsConfig {
-                    api_key: a.api_key,
-                    region: a.region,
-                    voice_name: a.voice_name,
-                    speaking_style: a.speaking_style,
-                    speed: a.speed,
+                .map(|a| {
+                    let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
+                    azure_tts_client::AzureTtsConfig {
+                        api_key,
+                        region: a.region,
+                        voice_name: a.voice_name,
+                        speaking_style: a.speaking_style,
+                        speed: a.speed,
+                    }
                 })
                 .ok_or_else(|| NarratorError::NoApiKey("azure_tts".to_string()))?;
             TtsProvider::Azure(az_config)
@@ -700,18 +833,26 @@ pub async fn generate_tts(
         _ => {
             let el_config = config
                 .elevenlabs
-                .map(|e| elevenlabs_client::ElevenLabsConfig {
-                    api_key: e.api_key,
-                    voice_id: e.voice_id,
-                    model_id: e.model_id,
-                    stability: e.stability,
-                    similarity_boost: e.similarity_boost,
-                    style: e.style,
-                    speed: e.speed,
+                .map(|e| {
+                    let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
+                    elevenlabs_client::ElevenLabsConfig {
+                        api_key,
+                        voice_id: e.voice_id,
+                        model_id: e.model_id,
+                        stability: e.stability,
+                        similarity_boost: e.similarity_boost,
+                        style: e.style,
+                        speed: e.speed,
+                    }
                 })
                 .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
             TtsProvider::ElevenLabs(el_config)
         }
+    };
+
+    let silence_sample_rate = match &tts {
+        TtsProvider::Azure(_) => "24000",
+        TtsProvider::ElevenLabs(_) => "44100",
     };
 
     let out = PathBuf::from(&output_dir);
@@ -779,13 +920,11 @@ pub async fn generate_tts(
 
                 if gap > 0.05 {
                     let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                    let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                     let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                        .args(["-y", "-f", "lavfi", "-i"])
+                        .arg(&anullsrc)
                         .args([
-                            "-y",
-                            "-f",
-                            "lavfi",
-                            "-i",
-                            "anullsrc=r=44100:cl=stereo",
                             "-t",
                             &format!("{:.3}", gap),
                             "-codec:a",
@@ -804,7 +943,10 @@ pub async fn generate_tts(
                 // Probe actual TTS audio duration
                 let seg_dur = video_engine::probe_duration(seg_path.as_path())
                     .await
-                    .unwrap_or(3.0); // fallback estimate
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Could not probe TTS segment duration: {e}, estimating from time window");
+                        (_end - start).max(0.5)
+                    });
 
                 concat_parts.push(seg_path.clone());
                 audio_pos += seg_dur;
@@ -815,13 +957,11 @@ pub async fn generate_tts(
             if video_dur > last_end + 0.1 {
                 let trail = video_dur - last_end;
                 let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                 let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                    .args(["-y", "-f", "lavfi", "-i"])
+                    .arg(&anullsrc)
                     .args([
-                        "-y",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "anullsrc=r=44100:cl=stereo",
                         "-t",
                         &format!("{:.3}", trail),
                         "-codec:a",
@@ -839,7 +979,14 @@ pub async fn generate_tts(
             let concat_list_path = out.join("_concat_list.txt");
             let concat_content: String = concat_parts
                 .iter()
-                .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
+                .map(|p| {
+                    let escaped = p
+                        .to_string_lossy()
+                        .replace('\\', "\\\\")
+                        .replace(['\n', '\r'], "")
+                        .replace('\'', "'\\''");
+                    format!("file '{}'", escaped)
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             std::fs::write(&concat_list_path, &concat_content)?;
@@ -983,12 +1130,13 @@ pub async fn start_screen_recording(
     *state.output_path.lock().await = Some(final_path);
 
     // Start the first recording segment
-    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0).await?;
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0, 30).await?;
     *state.ffmpeg_child.lock().await = Some(child);
     state.segments.lock().await.push(segment_path);
     state
         .segment_counter
         .store(1, std::sync::atomic::Ordering::SeqCst);
+    *state.phase.lock().await = RecordingPhase::Recording;
 
     // Create the overlay window
     #[cfg(target_os = "windows")]
@@ -1040,9 +1188,12 @@ pub async fn start_screen_recording(
 /// Pause the current recording (stops current segment, new one starts on resume).
 #[tauri::command]
 pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
-    if state.is_paused.load(Ordering::SeqCst) {
-        return Ok(()); // Already paused
+    let mut phase = state.phase.lock().await;
+    if *phase != RecordingPhase::Recording {
+        return Ok(());
     }
+    *phase = RecordingPhase::Paused;
+    drop(phase);
 
     // Stop the current segment
     let mut child_guard = state.ffmpeg_child.lock().await;
@@ -1050,7 +1201,6 @@ pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(
         screen_recorder::stop_segment(child).await?;
     }
     *child_guard = None;
-    state.is_paused.store(true, Ordering::SeqCst);
 
     tracing::info!("Recording paused");
     Ok(())
@@ -1059,9 +1209,12 @@ pub async fn pause_recording(state: tauri::State<'_, RecorderState>) -> Result<(
 /// Resume a paused recording (starts a new segment).
 #[tauri::command]
 pub async fn resume_recording(state: tauri::State<'_, RecorderState>) -> Result<(), NarratorError> {
-    if !state.is_paused.load(Ordering::SeqCst) {
-        return Ok(()); // Not paused
+    let mut phase = state.phase.lock().await;
+    if *phase != RecordingPhase::Paused {
+        return Ok(());
     }
+    *phase = RecordingPhase::Recording;
+    drop(phase);
 
     let out_dir = state.output_dir.lock().await;
     let out_dir = out_dir
@@ -1073,10 +1226,9 @@ pub async fn resume_recording(state: tauri::State<'_, RecorderState>) -> Result<
         .segment_counter
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    let (child, segment_path) = screen_recorder::start_segment(&out_dir, seg_idx).await?;
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, seg_idx, 30).await?;
     *state.ffmpeg_child.lock().await = Some(child);
     state.segments.lock().await.push(segment_path);
-    state.is_paused.store(false, Ordering::SeqCst);
 
     tracing::info!("Recording resumed (segment {seg_idx})");
     Ok(())
@@ -1088,8 +1240,18 @@ pub async fn stop_screen_recording(
     app: tauri::AppHandle,
     state: tauri::State<'_, RecorderState>,
 ) -> Result<String, NarratorError> {
-    // Stop current segment if not paused
-    if !state.is_paused.load(Ordering::SeqCst) {
+    let mut phase = state.phase.lock().await;
+    if *phase == RecordingPhase::Idle || *phase == RecordingPhase::Stopping {
+        return Err(NarratorError::FfmpegFailed(
+            "No active recording to stop".to_string(),
+        ));
+    }
+    let was_paused = *phase == RecordingPhase::Paused;
+    *phase = RecordingPhase::Stopping;
+    drop(phase);
+
+    // Only stop current segment if not paused
+    if !was_paused {
         let mut child_guard = state.ffmpeg_child.lock().await;
         if let Some(child) = child_guard.as_mut() {
             screen_recorder::stop_segment(child).await?;
@@ -1161,8 +1323,18 @@ pub async fn merge_audio_video(
     audio_path: String,
     output_path: String,
     replace_audio: bool,
+    channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::merge_audio_video(&video_path, &audio_path, &output_path, replace_audio).await
+    video_edit::merge_audio_video(
+        &video_path,
+        &audio_path,
+        &output_path,
+        replace_audio,
+        |pct| {
+            channel.send(ProgressEvent::Progress { percent: pct }).ok();
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1268,6 +1440,7 @@ pub async fn burn_subtitles(
     video_path: String,
     srt_content: String,
     output_path: String,
+    channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
     // Write SRT to temp file, then burn
     let out_dir = std::path::Path::new(&output_path)
@@ -1277,8 +1450,15 @@ pub async fn burn_subtitles(
     let srt_path = out_dir.join("_temp_subtitles.srt");
     std::fs::write(&srt_path, &srt_content)?;
 
-    let result =
-        video_edit::burn_subtitles(&video_path, &srt_path.to_string_lossy(), &output_path).await;
+    let result = video_edit::burn_subtitles(
+        &video_path,
+        &srt_path.to_string_lossy(),
+        &output_path,
+        |pct| {
+            channel.send(ProgressEvent::Progress { percent: pct }).ok();
+        },
+    )
+    .await;
 
     let _ = std::fs::remove_file(&srt_path);
     result
@@ -1289,4 +1469,160 @@ pub async fn burn_subtitles(
 #[tauri::command]
 pub async fn list_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
     project_store::load_styles()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── sanitize_tts_text tests ──
+
+    #[test]
+    fn test_sanitize_tts_text_removes_pause_markers() {
+        assert_eq!(sanitize_tts_text("Hello [pause] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [break] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello (pause) world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello (break) world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [silence] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [Pause] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [PAUSE] world"), "Hello world");
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_removes_multiple_markers() {
+        assert_eq!(
+            sanitize_tts_text("Start [pause] middle [break] end"),
+            "Start middle end"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_preserves_normal() {
+        assert_eq!(sanitize_tts_text("Hello world"), "Hello world");
+        assert_eq!(
+            sanitize_tts_text("This is a normal sentence."),
+            "This is a normal sentence."
+        );
+        assert_eq!(
+            sanitize_tts_text("Numbers 123 and symbols!"),
+            "Numbers 123 and symbols!"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_whitespace() {
+        // Multiple spaces are collapsed to single spaces
+        assert_eq!(sanitize_tts_text("Hello   world"), "Hello world");
+        assert_eq!(
+            sanitize_tts_text("  leading and trailing  "),
+            "leading and trailing"
+        );
+        assert_eq!(sanitize_tts_text("Hello  [pause]  world"), "Hello world");
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_empty_string() {
+        assert_eq!(sanitize_tts_text(""), "");
+    }
+
+    // ── tts_cache_key tests ──
+
+    fn make_elevenlabs_provider() -> TtsProvider {
+        TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        })
+    }
+
+    fn make_azure_provider() -> TtsProvider {
+        TtsProvider::Azure(azure_tts_client::AzureTtsConfig {
+            api_key: "test-key".to_string(),
+            region: "eastus".to_string(),
+            voice_name: "en-US-JennyNeural".to_string(),
+            speaking_style: "chat".to_string(),
+            speed: 1.0,
+        })
+    }
+
+    #[test]
+    fn test_tts_cache_key_deterministic() {
+        let provider = make_elevenlabs_provider();
+        let key1 = tts_cache_key(&provider, "Hello world");
+        let key2 = tts_cache_key(&provider, "Hello world");
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_text() {
+        let provider = make_elevenlabs_provider();
+        let key1 = tts_cache_key(&provider, "Hello world");
+        let key2 = tts_cache_key(&provider, "Goodbye world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_provider_settings() {
+        let el_provider = make_elevenlabs_provider();
+        let az_provider = make_azure_provider();
+        let key1 = tts_cache_key(&el_provider, "Hello world");
+        let key2 = tts_cache_key(&az_provider, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_voice() {
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "different-voice-id".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_speed() {
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.5,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_api_key_not_in_hash() {
+        // Different API keys should produce the same cache key (API key is not used in hash)
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "different-api-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_eq!(key1, key2);
+    }
 }

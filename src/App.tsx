@@ -113,6 +113,7 @@ export default function App() {
   const [showTelemetryNotice, setShowTelemetryNotice] = useState(false);
   // Tracks what triggered the save dialog: "new" (⌘N) or "open" (⌘O)
   const pendingAction = useRef<"new" | "open">("new");
+  const isLoadingProject = useRef(false);
 
   // ── Sync menu enabled states whenever the view changes ──
   useEffect(() => {
@@ -233,8 +234,8 @@ export default function App() {
     autoSaveTimer.current = setTimeout(async () => {
       try {
         await saveProject(buildSavePayload());
-      } catch {
-        // Silent — auto-save shouldn't spam the user with errors
+      } catch (err: unknown) {
+        console.error("Auto-save failed:", err);
       }
     }, 2000);
 
@@ -287,6 +288,8 @@ export default function App() {
   }, [handleNewProject, handleSaveProject]);
 
   const handleOpenProject = async (id: string) => {
+    if (isLoadingProject.current) return;
+    isLoadingProject.current = true;
     try {
       const loaded = await loadProjectFull(id);
       const cfg = loaded.config;
@@ -358,7 +361,11 @@ export default function App() {
       }
 
       setView("editor");
-    } catch (err) { console.error("Failed to load project:", err); }
+    } catch (err) {
+      console.error("Failed to load project:", err);
+    } finally {
+      isLoadingProject.current = false;
+    }
   };
 
   const settingsEl = settingsState.open && (

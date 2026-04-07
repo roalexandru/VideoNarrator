@@ -29,6 +29,10 @@ export function ProcessingScreen() {
 
   const run = useCallback(async () => {
     proc.reset(); proc.setPhase("extracting_frames");
+
+    // Snapshot edit state at generation start to prevent mid-run mutations
+    const editSnapshot = useEditStore.getState();
+
     const ch = new Channel<ProgressEvent>();
     ch.onmessage = (e: ProgressEvent) => {
       if (e.kind === "phase_change") proc.setPhase(e.phase);
@@ -40,20 +44,19 @@ export function ProcessingScreen() {
 
     // Check if video edits need to be applied first
     let videoPath = project.videoFile!.path;
-    const editState = useEditStore.getState();
-    const hasEdits = editState.clips.length > 1
-      || editState.clips.some((c) => c.speed !== 1.0)
-      || (editState.clips.length === 1 && editState.sourceDuration > 0
-          && (editState.clips[0].sourceStart > 0.5 || Math.abs(editState.clips[0].sourceEnd - editState.sourceDuration) > 0.5));
+    const hasEdits = editSnapshot.clips.length > 1
+      || editSnapshot.clips.some((c) => c.speed !== 1.0)
+      || (editSnapshot.clips.length === 1 && editSnapshot.sourceDuration > 0
+          && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
 
-    if (hasEdits && editState.clips.length > 0) {
+    if (hasEdits && editSnapshot.clips.length > 0) {
       try {
         proc.setPhase("extracting_frames"); // reuse phase for "applying edits" visual
         const homeDir = await getHomeDir();
         const ext = videoPath.split(".").pop() || "mp4";
         const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
         const editPlan = {
-          clips: editState.clips.map((c) => ({
+          clips: editSnapshot.clips.map((c) => ({
             start_seconds: c.sourceStart,
             end_seconds: c.sourceEnd,
             speed: c.speed,
@@ -65,7 +68,7 @@ export function ProcessingScreen() {
           if (e.kind === "progress") proc.setProgress(e.percent * 0.3); // 0-30% for edits
         };
         videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
-        editState.setEditedVideoPath(videoPath);
+        editSnapshot.setEditedVideoPath(videoPath);
       } catch (err: unknown) {
         proc.setError(`Failed to apply video edits: ${typeof err === "string" ? err : (err as Error)?.message || "Unknown error"}`);
         proc.setPhase("error");
