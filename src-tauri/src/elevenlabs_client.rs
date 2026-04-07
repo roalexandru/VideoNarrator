@@ -48,7 +48,7 @@ pub async fn list_voices(api_key: &str) -> Result<Vec<ElevenLabsVoice>, Narrator
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
     let resp = client
         .get("https://api.elevenlabs.io/v2/voices?page_size=100")
         .header("xi-api-key", api_key)
@@ -137,6 +137,61 @@ pub fn default_voices() -> Vec<ElevenLabsVoice> {
     ]
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_voices_not_empty() {
+        let voices = default_voices();
+        assert!(!voices.is_empty());
+        // Should have a reasonable number of default voices
+        assert!(voices.len() >= 5);
+    }
+
+    #[test]
+    fn test_default_voices_have_ids() {
+        let voices = default_voices();
+        for voice in &voices {
+            assert!(
+                !voice.voice_id.is_empty(),
+                "Voice has empty voice_id: {:?}",
+                voice.name
+            );
+            assert!(
+                !voice.name.is_empty(),
+                "Voice has empty name for id: {}",
+                voice.voice_id
+            );
+            assert!(
+                !voice.category.is_empty(),
+                "Voice has empty category: {} ({})",
+                voice.name,
+                voice.voice_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_config_voice_is_in_default_voices() {
+        let config = ElevenLabsConfig::default();
+        let voices = default_voices();
+        assert!(
+            voices.iter().any(|v| v.voice_id == config.voice_id),
+            "Default config voice_id '{}' not found in default voices list",
+            config.voice_id
+        );
+    }
+
+    #[test]
+    fn test_default_voices_unique_ids() {
+        let voices = default_voices();
+        let ids: Vec<&str> = voices.iter().map(|v| v.voice_id.as_str()).collect();
+        let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "Duplicate voice IDs found");
+    }
+}
+
 pub async fn generate_speech(
     config: &ElevenLabsConfig,
     text: &str,
@@ -145,7 +200,7 @@ pub async fn generate_speech(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format=mp3_44100_128",
         config.voice_id
@@ -196,7 +251,7 @@ pub async fn validate_key(api_key: &str) -> Result<bool, NarratorError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .unwrap_or_default();
+        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
     let key = api_key.trim();
 
     // Test with a minimal TTS request — this works even with restricted keys

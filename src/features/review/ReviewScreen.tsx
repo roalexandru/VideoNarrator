@@ -239,6 +239,7 @@ export function ReviewScreen() {
                     <textarea value={seg.text}
                       onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
                       onClick={(e) => e.stopPropagation()}
+                      aria-label={`Narration text for segment ${i + 1}`}
                       rows={2}
                       style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : C.dim, background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 6, padding: "8px 10px", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
                     />

@@ -296,4 +296,169 @@ mod tests {
         assert!(json.contains("\"title\": \"Test Video\""));
         assert!(json.contains("\"segments\""));
     }
+
+    // ── Additional tests ──
+
+    fn test_script() -> NarrationScript {
+        NarrationScript {
+            title: "Test".to_string(),
+            total_duration_seconds: 30.0,
+            segments: vec![
+                Segment {
+                    index: 0,
+                    start_seconds: 0.0,
+                    end_seconds: 10.0,
+                    text: "First segment.".to_string(),
+                    visual_description: "Opening".to_string(),
+                    emphasis: vec![],
+                    pace: Pace::Medium,
+                    pause_after_ms: 500,
+                    frame_refs: vec![0],
+                },
+                Segment {
+                    index: 1,
+                    start_seconds: 12.0,
+                    end_seconds: 25.0,
+                    text: "Second segment.".to_string(),
+                    visual_description: "Main".to_string(),
+                    emphasis: vec![],
+                    pace: Pace::Fast,
+                    pause_after_ms: 0,
+                    frame_refs: vec![1],
+                },
+            ],
+            metadata: ScriptMetadata {
+                style: "technical".to_string(),
+                language: "en".to_string(),
+                provider: "claude".to_string(),
+                model: "test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_export_srt_with_test_script() {
+        let script = test_script();
+        let srt = export_srt(&script);
+        // Verify SRT sequence numbers and timestamp format (comma separator)
+        assert!(srt.contains("1\n00:00:00,000 --> 00:00:10,000"));
+        assert!(srt.contains("2\n00:00:12,000 --> 00:00:25,000"));
+        assert!(srt.contains("First segment."));
+        assert!(srt.contains("Second segment."));
+    }
+
+    #[test]
+    fn test_export_vtt_with_test_script() {
+        let script = test_script();
+        let vtt = export_vtt(&script);
+        // VTT must start with WEBVTT header
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        // VTT uses dot separator for milliseconds
+        assert!(vtt.contains("00:00:00.000 --> 00:00:10.000"));
+        assert!(vtt.contains("00:00:12.000 --> 00:00:25.000"));
+    }
+
+    #[test]
+    fn test_export_json_roundtrip() {
+        let script = test_script();
+        let json_str = export_json(&script);
+        // Verify it's valid JSON by parsing it back
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(parsed["title"], "Test");
+        assert_eq!(parsed["segments"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["metadata"]["style"], "technical");
+    }
+
+    #[test]
+    fn test_export_txt_with_test_script() {
+        let script = test_script();
+        let txt = export_txt(&script);
+        // Verify human-readable time format
+        assert!(txt.contains("[0:00 - 0:10]"));
+        assert!(txt.contains("[0:12 - 0:25]"));
+        assert!(txt.contains("First segment."));
+        assert!(txt.contains("Second segment."));
+    }
+
+    #[test]
+    fn test_export_markdown_with_test_script() {
+        let script = test_script();
+        let md = export_markdown(&script);
+        // Title
+        assert!(md.contains("# Test"));
+        // Markdown table header
+        assert!(md.contains("| # | Time | Text | Pace |"));
+        assert!(md.contains("|---|------|------|------|"));
+        // Metadata line
+        assert!(md.contains("**Duration:** 30s"));
+        assert!(md.contains("**Style:** technical"));
+        // Segment data in table
+        assert!(md.contains("First segment."));
+        assert!(md.contains("medium"));
+        assert!(md.contains("fast"));
+    }
+
+    #[test]
+    fn test_export_ssml_with_test_script() {
+        let script = test_script();
+        let ssml = export_ssml(&script);
+        // SSML structure
+        assert!(ssml.starts_with("<speak version=\"1.1\""));
+        assert!(ssml.contains("xml:lang=\"en-US\""));
+        assert!(ssml.ends_with("</speak>\n"));
+        // Prosody rates
+        assert!(ssml.contains("<prosody rate=\"medium\">"));
+        assert!(ssml.contains("<prosody rate=\"fast\">"));
+        // Break after first segment (500ms pause)
+        assert!(ssml.contains("<break time=\"500ms\"/>"));
+        // No break after second segment (0ms pause)
+        // Count occurrences of break — should be exactly 1
+        let break_count = ssml.matches("<break time=").count();
+        assert_eq!(break_count, 1);
+    }
+
+    #[test]
+    fn test_export_empty_segments() {
+        let script = NarrationScript {
+            title: "Empty".to_string(),
+            total_duration_seconds: 0.0,
+            segments: vec![],
+            metadata: ScriptMetadata {
+                style: "technical".to_string(),
+                language: "en".to_string(),
+                provider: "claude".to_string(),
+                model: "test".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        };
+
+        // SRT: should be empty (no segments)
+        let srt = export_srt(&script);
+        assert!(srt.is_empty());
+
+        // VTT: should only contain the header
+        let vtt = export_vtt(&script);
+        assert_eq!(vtt, "WEBVTT\n\n");
+
+        // TXT: should be empty
+        let txt = export_txt(&script);
+        assert!(txt.is_empty());
+
+        // JSON: should be valid and have empty segments array
+        let json_str = export_json(&script);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(parsed["segments"].as_array().unwrap().is_empty());
+
+        // Markdown: should contain title and table header but no data rows
+        let md = export_markdown(&script);
+        assert!(md.contains("# Empty"));
+        assert!(md.contains("| # | Time | Text | Pace |"));
+
+        // SSML: should contain speak tags but no prosody
+        let ssml = export_ssml(&script);
+        assert!(ssml.contains("<speak"));
+        assert!(ssml.contains("</speak>"));
+        assert!(!ssml.contains("<prosody"));
+    }
 }

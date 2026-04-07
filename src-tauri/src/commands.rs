@@ -158,7 +158,7 @@ impl AppState {
 
 #[tauri::command]
 pub fn get_telemetry_enabled() -> bool {
-    load_config().telemetry_enabled.unwrap_or(true)
+    load_config().telemetry_enabled.unwrap_or(false)
 }
 
 #[tauri::command]
@@ -254,9 +254,22 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
 pub async fn process_documents(
     paths: Vec<String>,
 ) -> Result<Vec<ProcessedDocument>, NarratorError> {
+    if paths.len() > 20 {
+        return Err(NarratorError::DocumentError(
+            "Maximum 20 documents allowed".to_string(),
+        ));
+    }
     let mut docs = Vec::new();
+    let mut total_size: usize = 0;
+    const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB
     for path in paths {
         let doc = doc_processor::process_document(Path::new(&path))?;
+        total_size += doc.content.len();
+        if total_size > MAX_TOTAL_SIZE {
+            return Err(NarratorError::DocumentError(
+                "Total document size exceeds 10MB limit".to_string(),
+            ));
+        }
         docs.push(doc);
     }
     Ok(docs)
@@ -311,6 +324,16 @@ pub async fn generate_narration(
     } else {
         params.project_id.clone()
     };
+    // Validate frame config bounds
+    let mut frame_config = params.frame_config.clone();
+    if frame_config.max_frames > 100 {
+        tracing::warn!(
+            "max_frames {} exceeds limit, capping to 100",
+            frame_config.max_frames
+        );
+        frame_config.max_frames = 100;
+    }
+
     let frames_dir = project_store::get_project_frames_dir(&project_id);
     std::fs::create_dir_all(&frames_dir)
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
@@ -319,7 +342,7 @@ pub async fn generate_narration(
     let frames_dir_cleanup = frames_dir.clone();
     let frames = match video_engine::extract_frames(
         Path::new(&params.video_path),
-        &params.frame_config,
+        &frame_config,
         &frames_dir,
         move |frame| {
             channel_clone
@@ -616,10 +639,7 @@ fn tts_cache_key(tts: &TtsProvider, text: &str) -> String {
             "el|{}|{}|{:.2}|{:.2}|{:.2}|{:.2}",
             c.voice_id, c.model_id, c.stability, c.similarity_boost, c.style, c.speed
         ),
-        TtsProvider::Azure(c) => format!(
-            "az|{}|{}|{:.2}",
-            c.voice_name, c.speaking_style, c.speed
-        ),
+        TtsProvider::Azure(c) => format!("az|{}|{}|{:.2}", c.voice_name, c.speaking_style, c.speed),
     };
     let input = format!("{settings}|{text}");
     let hash = blake3::hash(input.as_bytes());
@@ -647,9 +667,16 @@ async fn generate_speech_for_provider(
     if let Ok(cache_dir) = tts_cache_dir() {
         let cached = cache_dir.join(format!("{cache_key}.mp3"));
         if cached.exists() {
-            tracing::info!("TTS cache hit: {cache_key}");
-            std::fs::copy(&cached, filepath)?;
-            return Ok(());
+            match std::fs::copy(&cached, filepath) {
+                Ok(_) => {
+                    tracing::info!("TTS cache hit: {cache_key}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("TTS cache read failed, regenerating: {e}");
+                    // Fall through to API generation
+                }
+            }
         }
     }
 
@@ -712,6 +739,11 @@ pub async fn generate_tts(
                 .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
             TtsProvider::ElevenLabs(el_config)
         }
+    };
+
+    let silence_sample_rate = match &tts {
+        TtsProvider::Azure(_) => "24000",
+        TtsProvider::ElevenLabs(_) => "44100",
     };
 
     let out = PathBuf::from(&output_dir);
@@ -779,13 +811,11 @@ pub async fn generate_tts(
 
                 if gap > 0.05 {
                     let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                    let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                     let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                        .args(["-y", "-f", "lavfi", "-i"])
+                        .arg(&anullsrc)
                         .args([
-                            "-y",
-                            "-f",
-                            "lavfi",
-                            "-i",
-                            "anullsrc=r=44100:cl=stereo",
                             "-t",
                             &format!("{:.3}", gap),
                             "-codec:a",
@@ -804,7 +834,10 @@ pub async fn generate_tts(
                 // Probe actual TTS audio duration
                 let seg_dur = video_engine::probe_duration(seg_path.as_path())
                     .await
-                    .unwrap_or(3.0); // fallback estimate
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Could not probe TTS segment duration: {e}, estimating from time window");
+                        (_end - start).max(0.5)
+                    });
 
                 concat_parts.push(seg_path.clone());
                 audio_pos += seg_dur;
@@ -815,13 +848,11 @@ pub async fn generate_tts(
             if video_dur > last_end + 0.1 {
                 let trail = video_dur - last_end;
                 let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
+                let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                 let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                    .args(["-y", "-f", "lavfi", "-i"])
+                    .arg(&anullsrc)
                     .args([
-                        "-y",
-                        "-f",
-                        "lavfi",
-                        "-i",
-                        "anullsrc=r=44100:cl=stereo",
                         "-t",
                         &format!("{:.3}", trail),
                         "-codec:a",
@@ -839,7 +870,14 @@ pub async fn generate_tts(
             let concat_list_path = out.join("_concat_list.txt");
             let concat_content: String = concat_parts
                 .iter()
-                .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
+                .map(|p| {
+                    let escaped = p
+                        .to_string_lossy()
+                        .replace('\\', "\\\\")
+                        .replace(['\n', '\r'], "")
+                        .replace('\'', "'\\''");
+                    format!("file '{}'", escaped)
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             std::fs::write(&concat_list_path, &concat_content)?;
@@ -1289,4 +1327,160 @@ pub async fn burn_subtitles(
 #[tauri::command]
 pub async fn list_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
     project_store::load_styles()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── sanitize_tts_text tests ──
+
+    #[test]
+    fn test_sanitize_tts_text_removes_pause_markers() {
+        assert_eq!(sanitize_tts_text("Hello [pause] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [break] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello (pause) world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello (break) world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [silence] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [Pause] world"), "Hello world");
+        assert_eq!(sanitize_tts_text("Hello [PAUSE] world"), "Hello world");
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_removes_multiple_markers() {
+        assert_eq!(
+            sanitize_tts_text("Start [pause] middle [break] end"),
+            "Start middle end"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_preserves_normal() {
+        assert_eq!(sanitize_tts_text("Hello world"), "Hello world");
+        assert_eq!(
+            sanitize_tts_text("This is a normal sentence."),
+            "This is a normal sentence."
+        );
+        assert_eq!(
+            sanitize_tts_text("Numbers 123 and symbols!"),
+            "Numbers 123 and symbols!"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_whitespace() {
+        // Multiple spaces are collapsed to single spaces
+        assert_eq!(sanitize_tts_text("Hello   world"), "Hello world");
+        assert_eq!(
+            sanitize_tts_text("  leading and trailing  "),
+            "leading and trailing"
+        );
+        assert_eq!(sanitize_tts_text("Hello  [pause]  world"), "Hello world");
+    }
+
+    #[test]
+    fn test_sanitize_tts_text_empty_string() {
+        assert_eq!(sanitize_tts_text(""), "");
+    }
+
+    // ── tts_cache_key tests ──
+
+    fn make_elevenlabs_provider() -> TtsProvider {
+        TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        })
+    }
+
+    fn make_azure_provider() -> TtsProvider {
+        TtsProvider::Azure(azure_tts_client::AzureTtsConfig {
+            api_key: "test-key".to_string(),
+            region: "eastus".to_string(),
+            voice_name: "en-US-JennyNeural".to_string(),
+            speaking_style: "chat".to_string(),
+            speed: 1.0,
+        })
+    }
+
+    #[test]
+    fn test_tts_cache_key_deterministic() {
+        let provider = make_elevenlabs_provider();
+        let key1 = tts_cache_key(&provider, "Hello world");
+        let key2 = tts_cache_key(&provider, "Hello world");
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_text() {
+        let provider = make_elevenlabs_provider();
+        let key1 = tts_cache_key(&provider, "Hello world");
+        let key2 = tts_cache_key(&provider, "Goodbye world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_provider_settings() {
+        let el_provider = make_elevenlabs_provider();
+        let az_provider = make_azure_provider();
+        let key1 = tts_cache_key(&el_provider, "Hello world");
+        let key2 = tts_cache_key(&az_provider, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_voice() {
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "different-voice-id".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_different_speed() {
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "test-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.5,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_tts_cache_key_api_key_not_in_hash() {
+        // Different API keys should produce the same cache key (API key is not used in hash)
+        let provider1 = make_elevenlabs_provider();
+        let provider2 = TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+            api_key: "different-api-key".to_string(),
+            voice_id: "JBFqnCBsd6RMkjVDRZzb".to_string(),
+            model_id: "eleven_multilingual_v2".to_string(),
+            stability: 0.5,
+            similarity_boost: 0.75,
+            style: 0.0,
+            speed: 1.0,
+        });
+        let key1 = tts_cache_key(&provider1, "Hello world");
+        let key2 = tts_cache_key(&provider2, "Hello world");
+        assert_eq!(key1, key2);
+    }
 }

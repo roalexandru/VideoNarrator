@@ -233,8 +233,8 @@ export default function App() {
     autoSaveTimer.current = setTimeout(async () => {
       try {
         await saveProject(buildSavePayload());
-      } catch {
-        // Silent — auto-save shouldn't spam the user with errors
+      } catch (err: unknown) {
+        console.error("Auto-save failed:", err);
       }
     }, 2000);
 

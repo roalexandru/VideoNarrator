@@ -18,7 +18,7 @@ pub struct EditClip {
     pub speed: f64,
     #[serde(default)]
     pub skip_frames: bool,
-    pub fps_override: Option<u32>,
+    pub fps_override: Option<f64>,
 }
 
 pub async fn apply_edits(
@@ -41,8 +41,8 @@ pub async fn apply_edits(
 
         // Probe original duration to check if the clip covers the full video
         let probe = video_engine::probe_video(std::path::Path::new(input_path)).await?;
-        let covers_full = clip.start_seconds < 0.5
-            && (clip.end_seconds - probe.duration_seconds).abs() < 0.5;
+        let covers_full =
+            clip.start_seconds < 0.5 && (clip.end_seconds - probe.duration_seconds).abs() < 0.5;
 
         if covers_full {
             // No edits — just use the original file directly (symlink or copy)
@@ -99,7 +99,7 @@ pub async fn apply_edits(
         let needs_speed = (clip.speed - 1.0).abs() > 0.01;
 
         if let Some(fps) = clip.fps_override {
-            vfilters.push(format!("fps={}", fps));
+            vfilters.push(format!("fps={:.3}", fps));
         }
 
         if needs_speed {
@@ -172,7 +172,14 @@ pub async fn apply_edits(
         let concat_list = out_dir.join("_edit_concat.txt");
         let list_content: String = clip_files
             .iter()
-            .map(|p| format!("file '{}'", p.to_string_lossy().replace('\'', "'\\''")))
+            .map(|p| {
+                let escaped = p
+                    .to_string_lossy()
+                    .replace('\\', "\\\\")
+                    .replace(['\n', '\r'], "")
+                    .replace('\'', "'\\''");
+                format!("file '{}'", escaped)
+            })
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(&concat_list, &list_content)?;
@@ -190,7 +197,19 @@ pub async fn apply_edits(
             let output2 = Command::new(ffmpeg.as_os_str())
                 .args(["-y", "-f", "concat", "-safe", "0", "-i"])
                 .arg(concat_list.as_os_str())
-                .args(["-c:v", "libx264", "-c:a", "aac", output_path])
+                .args([
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "18",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    output_path,
+                ])
                 .output()
                 .await
                 .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
@@ -256,7 +275,7 @@ pub async fn merge_audio_video(
                 "-i",
                 audio_path,
                 "-filter_complex",
-                "[0:a][1:a]amix=inputs=2:duration=first:normalize=0[a]",
+                "[0:a][1:a]amix=inputs=2:duration=first:normalize=1[a]",
                 "-map",
                 "0:v",
                 "-map",
@@ -272,6 +291,52 @@ pub async fn merge_audio_video(
     };
 
     let output = output.map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    if !output.status.success() && !replace_audio {
+        // Fallback: video might not have audio stream, use narration audio only
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("does not contain")
+            || stderr.contains("Stream map")
+            || stderr.contains("Invalid input")
+        {
+            tracing::warn!("Video has no audio stream, using narration audio only");
+            let fallback = Command::new(ffmpeg.as_os_str())
+                .args([
+                    "-y",
+                    "-i",
+                    video_path,
+                    "-i",
+                    audio_path,
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
+                    output_path,
+                ])
+                .output()
+                .await
+                .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+            if !fallback.status.success() {
+                let stderr = String::from_utf8_lossy(&fallback.stderr);
+                return Err(NarratorError::FfmpegFailed(format!(
+                    "Audio merge failed: {}",
+                    &stderr[..stderr.len().min(300)]
+                )));
+            }
+
+            return Ok(output_path.to_string());
+        }
+
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Audio merge failed: {}",
+            &stderr[..stderr.len().min(300)]
+        )));
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -291,22 +356,26 @@ pub async fn burn_subtitles(
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
-    // Copy SRT to /tmp with a simple name to avoid path escaping issues
+    // Copy SRT to temp dir with a unique name to avoid path escaping issues
     // with ffmpeg's subtitles filter (chokes on colons, spaces, special chars)
-    let temp_srt = PathBuf::from("/tmp/_narrator_burn_subs.srt");
+    let temp_srt =
+        std::env::temp_dir().join(format!("_narrator_burn_subs_{}.srt", uuid::Uuid::new_v4()));
     std::fs::copy(srt_path, &temp_srt)?;
 
     // Try subtitles filter first (requires libass), fall back to SRT input method
-    let subtitle_filter =
-        "subtitles='/tmp/_narrator_burn_subs.srt':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'";
+    let srt_path_str = temp_srt
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(':', "\\:");
+    let subtitle_filter = format!(
+        "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",
+        srt_path_str
+    );
 
     let output = Command::new(ffmpeg.as_os_str())
+        .args(["-y", "-i", video_path, "-vf"])
+        .arg(&subtitle_filter)
         .args([
-            "-y",
-            "-i",
-            video_path,
-            "-vf",
-            subtitle_filter,
             "-c:a",
             "copy",
             "-c:v",

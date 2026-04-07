@@ -14,9 +14,11 @@ pub fn validate_project_id(id: &str) -> Result<(), NarratorError> {
 pub fn get_narrator_dir() -> PathBuf {
     if let Some(home) = directories::UserDirs::new() {
         home.home_dir().join(".narrator")
+    } else if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+        PathBuf::from(home).join(".narrator")
     } else {
-        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-            .join(".narrator")
+        // Last resort: use system temp dir (not /tmp directly)
+        std::env::temp_dir().join(".narrator")
     }
 }
 
@@ -521,5 +523,68 @@ mod tests {
 
         assert_eq!(find_next_version(temp.path(), "en"), 3);
         assert_eq!(find_next_version(temp.path(), "ja"), 1);
+    }
+
+    #[test]
+    fn test_validate_project_id_with_special_chars() {
+        // Empty string
+        assert!(validate_project_id("").is_err());
+        // Spaces
+        assert!(validate_project_id("hello world").is_err());
+        // SQL injection attempt
+        assert!(validate_project_id("'; DROP TABLE projects; --").is_err());
+        // Null bytes
+        assert!(validate_project_id("abc\0def").is_err());
+        // Just dots
+        assert!(validate_project_id("..").is_err());
+        // Slash-based path traversal
+        assert!(validate_project_id("/etc/passwd").is_err());
+        // Backslash-based path traversal (Windows)
+        assert!(validate_project_id("..\\..\\windows\\system32").is_err());
+        // Unicode
+        assert!(validate_project_id("\u{1F600}").is_err());
+        // Partial UUID (too short)
+        assert!(validate_project_id("550e8400-e29b-41d4").is_err());
+        // Valid UUID should pass
+        assert!(validate_project_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn test_default_styles_have_required_fields() {
+        let styles = default_styles();
+        assert!(!styles.is_empty());
+
+        for style in &styles {
+            assert!(
+                !style.id.is_empty(),
+                "Style id is empty for: {:?}",
+                style.label
+            );
+            assert!(
+                !style.label.is_empty(),
+                "Style label is empty for: {}",
+                style.id
+            );
+            assert!(
+                !style.system_prompt.is_empty(),
+                "Style system_prompt is empty for: {}",
+                style.id
+            );
+            assert!(
+                !style.description.is_empty(),
+                "Style description is empty for: {}",
+                style.id
+            );
+            assert!(
+                !style.pacing.is_empty(),
+                "Style pacing is empty for: {}",
+                style.id
+            );
+        }
+
+        // Verify all style IDs are unique
+        let ids: Vec<&str> = styles.iter().map(|s| s.id.as_str()).collect();
+        let unique_ids: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique_ids.len(), "Duplicate style IDs found");
     }
 }

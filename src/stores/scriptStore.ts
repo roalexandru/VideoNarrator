@@ -90,16 +90,27 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       if (!seg || splitAtSeconds <= seg.start_seconds || splitAtSeconds >= seg.end_seconds)
         return state;
 
+      // Split text at nearest word boundary to midpoint
+      const midpoint = Math.floor(seg.text.length / 2);
+      let splitPos = midpoint;
+      // Search for nearest space around midpoint
+      for (let offset = 0; offset < midpoint; offset++) {
+        if (seg.text[midpoint + offset] === ' ') { splitPos = midpoint + offset; break; }
+        if (midpoint - offset >= 0 && seg.text[midpoint - offset] === ' ') { splitPos = midpoint - offset; break; }
+      }
+      const firstText = seg.text.slice(0, splitPos).trim();
+      const secondText = seg.text.slice(splitPos).trim();
+
       const first: Segment = {
         ...seg,
         end_seconds: splitAtSeconds,
-        text: seg.text.slice(0, Math.floor(seg.text.length / 2)),
+        text: firstText,
       };
       const second: Segment = {
         ...seg,
         index: index + 1,
         start_seconds: splitAtSeconds,
-        text: seg.text.slice(Math.floor(seg.text.length / 2)),
+        text: secondText,
       };
 
       const segments = [

@@ -83,7 +83,7 @@ export function EditVideoScreen() {
     // Scale thumbnail count: short videos get more detail, long videos fewer to stay fast
     const dur = videoFile.duration || 120;
     const thumbCount = dur > 600 ? 30 : dur > 300 ? 40 : 60;
-    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || "tmp"}`, thumbCount)
+    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || crypto.randomUUID()}`, thumbCount)
       .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p)))).catch(() => {});
   }, [videoFile?.path, projectId]);
 
@@ -163,7 +163,7 @@ export function EditVideoScreen() {
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
-  }, [isPlaying, selectedClipIndex, outputTime, clips.length, seekToOutput]);
+  }, [isPlaying, selectedClipIndex, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo]);
 
   const togglePlay = () => { const v = videoRef.current; if (!v) return; isPlaying ? v.pause() : v.play(); };
 

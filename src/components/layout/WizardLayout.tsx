@@ -67,7 +67,7 @@ export function WizardLayout({ children, onOpenSettings, onBackToLibrary }: { ch
             const active = i === currentStep;
             const done = completedSteps.has(i);
             return (
-              <button key={i} onClick={() => goToStep(i)} style={{
+              <button key={i} onClick={() => goToStep(i)} aria-current={active ? "step" : undefined} style={{
                 display: "flex", alignItems: "center", gap: 10,
                 padding: "9px 10px", borderRadius: 8, border: "none",
                 background: active ? "rgba(99,102,241,0.12)" : "transparent",

@@ -313,6 +313,137 @@ pub struct ProjectFrame {
 
 // ── Progress Events ──
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_narration_script() {
+        let script = NarrationScript {
+            title: "Roundtrip Test".to_string(),
+            total_duration_seconds: 60.0,
+            segments: vec![Segment {
+                index: 0,
+                start_seconds: 0.0,
+                end_seconds: 30.0,
+                text: "Hello world.".to_string(),
+                visual_description: "Opening scene".to_string(),
+                emphasis: vec!["world".to_string()],
+                pace: Pace::Slow,
+                pause_after_ms: 200,
+                frame_refs: vec![0, 1],
+            }],
+            metadata: ScriptMetadata {
+                style: "technical".to_string(),
+                language: "en".to_string(),
+                provider: "claude".to_string(),
+                model: "test-model".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&script).unwrap();
+
+        // Deserialize back
+        let deserialized: NarrationScript = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.title, "Roundtrip Test");
+        assert_eq!(deserialized.total_duration_seconds, 60.0);
+        assert_eq!(deserialized.segments.len(), 1);
+        assert_eq!(deserialized.segments[0].text, "Hello world.");
+        assert_eq!(deserialized.segments[0].emphasis, vec!["world".to_string()]);
+        assert_eq!(deserialized.metadata.style, "technical");
+        assert_eq!(deserialized.metadata.language, "en");
+        assert_eq!(deserialized.metadata.model, "test-model");
+    }
+
+    #[test]
+    fn test_frame_density_intervals() {
+        assert!((FrameDensity::Light.interval_seconds() - 10.0).abs() < 0.01);
+        assert!((FrameDensity::Medium.interval_seconds() - 5.0).abs() < 0.01);
+        assert!((FrameDensity::Heavy.interval_seconds() - 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_ai_provider_kind_display() {
+        assert_eq!(AiProviderKind::Claude.to_string(), "claude");
+        assert_eq!(AiProviderKind::OpenAi.to_string(), "openai");
+        assert_eq!(AiProviderKind::Gemini.to_string(), "gemini");
+    }
+
+    #[test]
+    fn test_export_format_display() {
+        assert_eq!(ExportFormat::Json.to_string(), "json");
+        assert_eq!(ExportFormat::Srt.to_string(), "srt");
+        assert_eq!(ExportFormat::Vtt.to_string(), "vtt");
+        assert_eq!(ExportFormat::Txt.to_string(), "txt");
+        assert_eq!(ExportFormat::Markdown.to_string(), "md");
+        assert_eq!(ExportFormat::Ssml.to_string(), "ssml");
+    }
+
+    #[test]
+    fn test_pace_display() {
+        assert_eq!(Pace::Slow.to_string(), "slow");
+        assert_eq!(Pace::Medium.to_string(), "medium");
+        assert_eq!(Pace::Fast.to_string(), "fast");
+    }
+
+    #[test]
+    fn test_pace_default() {
+        let pace = Pace::default();
+        assert_eq!(pace.to_string(), "medium");
+    }
+
+    #[test]
+    fn test_frame_config_default() {
+        let config = FrameConfig::default();
+        assert!((config.density.interval_seconds() - 5.0).abs() < 0.01);
+        assert!((config.scene_threshold - 0.3).abs() < 0.01);
+        assert_eq!(config.max_frames, 30);
+    }
+
+    #[test]
+    fn test_ai_config_default() {
+        let config = AiConfig::default();
+        assert_eq!(config.provider.to_string(), "claude");
+        assert!(config.model.contains("sonnet"));
+        assert!((config.temperature - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_ai_provider_kind_serde_roundtrip() {
+        // Verify serde rename_all = "lowercase" works correctly
+        let json = serde_json::to_string(&AiProviderKind::Claude).unwrap();
+        assert_eq!(json, "\"claude\"");
+
+        let json = serde_json::to_string(&AiProviderKind::OpenAi).unwrap();
+        assert_eq!(json, "\"openai\"");
+
+        let json = serde_json::to_string(&AiProviderKind::Gemini).unwrap();
+        assert_eq!(json, "\"gemini\"");
+
+        // Deserialize back
+        let provider: AiProviderKind = serde_json::from_str("\"claude\"").unwrap();
+        assert_eq!(provider, AiProviderKind::Claude);
+
+        let provider: AiProviderKind = serde_json::from_str("\"openai\"").unwrap();
+        assert_eq!(provider, AiProviderKind::OpenAi);
+
+        let provider: AiProviderKind = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(provider, AiProviderKind::Gemini);
+    }
+
+    #[test]
+    fn test_export_format_serde_roundtrip() {
+        let json = serde_json::to_string(&ExportFormat::Markdown).unwrap();
+        assert_eq!(json, "\"md\"");
+
+        let format: ExportFormat = serde_json::from_str("\"md\"").unwrap();
+        assert_eq!(format.to_string(), "md");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum ProgressEvent {
