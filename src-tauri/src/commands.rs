@@ -322,10 +322,10 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     if !path.exists() {
         return Err(NarratorError::VideoProbeError("File not found".to_string()));
     }
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| NarratorError::VideoProbeError(format!("Invalid path: {e}")))?;
-    video_engine::probe_video(&canonical).await
+    // Try to canonicalize (resolves symlinks, prevents traversal), but fall back
+    // to the original path if canonicalization fails (e.g., sandboxed macOS apps)
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    video_engine::probe_video(&resolved).await
 }
 
 // ── Document commands ──
@@ -349,10 +349,8 @@ pub async fn process_documents(
                 "File not found: {path}"
             )));
         }
-        let canonical = p
-            .canonicalize()
-            .map_err(|e| NarratorError::DocumentError(format!("Invalid path: {e}")))?;
-        let doc = doc_processor::process_document(&canonical)?;
+        let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let doc = doc_processor::process_document(&resolved)?;
         total_size += doc.content.len();
         if total_size > MAX_TOTAL_SIZE {
             return Err(NarratorError::DocumentError(

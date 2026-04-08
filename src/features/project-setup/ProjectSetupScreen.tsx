@@ -80,7 +80,10 @@ export function ProjectSetupScreen() {
       const m = await probeVideo(file as string);
       setVideoFile({ path: m.path, name: m.path.split("/").pop() || "video", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
       trackEvent("video_imported", { source: "file" });
-    } catch (err) { console.error("Probe failed:", err); }
+    } catch (err) {
+      console.error("Probe failed:", err);
+      await message(`Failed to load video: ${String(err)}`, { title: "Video Error", kind: "error" });
+    }
     finally { setProbing(false); }
   }, [setVideoFile]);
 
