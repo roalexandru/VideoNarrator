@@ -99,6 +99,8 @@ pub fn run() {
             commands::save_azure_tts_config,
             commands::list_azure_tts_voices,
             commands::validate_azure_tts_key,
+            commands::get_tts_provider,
+            commands::save_tts_provider,
             commands::generate_tts,
             commands::get_home_dir,
             commands::record_screen_native,

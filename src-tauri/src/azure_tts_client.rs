@@ -199,7 +199,8 @@ pub async fn generate_speech(
     let escaped_text = xml_escape(&strip_ssml_tags(text));
     let escaped_voice = xml_escape(&config.voice_name);
     let escaped_style = xml_escape(&config.speaking_style);
-    let speed_str = format!("{:.0}%", (config.speed * 100.0) as i32);
+    // Azure TTS rate: relative percentage (e.g. "+0%", "+50%", "-20%") or multiplier number
+    let speed_str = format!("{:+.0}%", (config.speed - 1.0) * 100.0);
 
     // Build inner content: optionally wrap with express-as
     let inner_content = format!("<prosody rate='{}'>{}</prosody>", speed_str, escaped_text);
@@ -230,6 +231,7 @@ pub async fn generate_speech(
                 "X-Microsoft-OutputFormat",
                 "audio-24khz-160kbitrate-mono-mp3",
             )
+            .header("User-Agent", "Narrator")
             .body(ssml.clone())
             .send()
             .await?;

@@ -189,6 +189,10 @@ export interface BuiltinVoice {
 export const listBuiltinVoices = () =>
   invoke<BuiltinVoice[]>("list_builtin_voices");
 
+// TTS provider preference
+export const getTtsProvider = () => invoke<string | null>("get_tts_provider");
+export const saveTtsProvider = (provider: string) => invoke<void>("save_tts_provider", { provider });
+
 // Export
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });

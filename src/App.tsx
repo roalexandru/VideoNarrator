@@ -24,7 +24,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
-import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
+import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsProvider } from "./lib/tauri/commands";
 import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
@@ -121,7 +121,7 @@ export default function App() {
     invoke("set_menu_context", { hasProject: view === "editor" }).catch(() => {});
   }, [view]);
 
-  // ── Init telemetry on mount ──
+  // ── Init telemetry + TTS provider preference on mount ──
   useEffect(() => {
     initTelemetry().then(() => {
       trackEvent("app_launched", {
@@ -136,6 +136,14 @@ export default function App() {
       .then(() => {
         // Telemetry is enabled by default; can be disabled in Settings.
         // Notice popup is disabled — no user prompt needed.
+      })
+      .catch(() => {});
+    // Restore persisted TTS provider preference
+    getTtsProvider()
+      .then((provider) => {
+        if (provider === "azure" || provider === "elevenlabs") {
+          useConfigStore.getState().setTtsProvider(provider);
+        }
       })
       .catch(() => {});
   }, []);

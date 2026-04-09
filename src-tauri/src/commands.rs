@@ -26,6 +26,9 @@ struct PersistentConfig {
     elevenlabs: Option<ElevenLabsPersisted>,
     #[serde(default)]
     azure_tts: Option<AzureTtsPersisted>,
+    /// Persisted TTS provider preference ("elevenlabs" or "azure").
+    #[serde(default)]
+    tts_provider: Option<String>,
     /// Whether anonymous telemetry is enabled. Defaults to true when missing (first launch).
     #[serde(default)]
     telemetry_enabled: Option<bool>,
@@ -767,6 +770,29 @@ pub async fn validate_azure_tts_key(
 #[tauri::command]
 pub async fn list_builtin_voices() -> Result<Vec<builtin_tts::BuiltinVoice>, NarratorError> {
     builtin_tts::list_voices().await
+}
+
+// ── TTS provider preference ──
+
+#[tauri::command]
+pub async fn get_tts_provider() -> Result<Option<String>, NarratorError> {
+    let config = load_config();
+    // Return persisted preference, or auto-detect from which provider has a key
+    if let Some(provider) = config.tts_provider {
+        return Ok(Some(provider));
+    }
+    // Auto-detect: if azure_tts is configured but elevenlabs is not, default to azure
+    if config.azure_tts.is_some() && config.elevenlabs.is_none() {
+        return Ok(Some("azure".to_string()));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub async fn save_tts_provider(provider: String) -> Result<(), NarratorError> {
+    let mut config = load_config();
+    config.tts_provider = Some(provider);
+    save_config(&config)
 }
 
 // ── TTS generation command ──
