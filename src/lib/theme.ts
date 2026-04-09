@@ -52,5 +52,5 @@ export const typography = {
   sectionLabel: { fontSize: 11, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: 1.2 } as const,
   body: { fontSize: 13, fontWeight: 400 } as const,
   caption: { fontSize: 11, fontWeight: 400 } as const,
-  mono: { fontFamily: "'SF Mono', Menlo, monospace" } as const,
+  mono: { fontFamily: "'SF Mono', 'Cascadia Code', 'Segoe UI Mono', Menlo, 'Courier New', monospace" } as const,
 } as const;

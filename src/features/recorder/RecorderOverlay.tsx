@@ -1,18 +1,26 @@
 import { useState, useEffect, useCallback, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { trackError } from "../telemetry/analytics";
 
 export function RecorderOverlay() {
+  const [initializing, setInitializing] = useState(true);
   const [paused, setPaused] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [busy, setBusy] = useState(false);
 
-  // Timer — counts up while recording, freezes while paused
+  // Listen for the backend "recording-started" event (FFmpeg is ready)
   useEffect(() => {
-    if (paused) return;
+    const unlisten = listen("recording-started", () => setInitializing(false));
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  // Timer — counts up while recording, freezes while paused or initializing
+  useEffect(() => {
+    if (initializing || paused) return;
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
-  }, [paused]);
+  }, [initializing, paused]);
 
   const handlePause = useCallback(async () => {
     if (busy) return;
@@ -55,6 +63,17 @@ export function RecorderOverlay() {
 
   const mm = Math.floor(seconds / 60);
   const ss = (seconds % 60).toString().padStart(2, "0");
+
+  if (initializing) {
+    return (
+      <div style={container}>
+        <div data-tauri-drag-region style={dragBar} onDoubleClick={() => {}} />
+        <div style={content}>
+          <span style={initText}>Starting...</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={container}>
@@ -138,6 +157,13 @@ const dot: CSSProperties = {
   borderRadius: "50%",
   background: "#ef4444",
   flexShrink: 0,
+};
+
+const initText: CSSProperties = {
+  fontSize: 14,
+  fontWeight: 600,
+  color: "#a0a0b0",
+  letterSpacing: 0.5,
 };
 
 const timerText: CSSProperties = {

@@ -1,6 +1,7 @@
 //! Video editing operations: trim, speed, frame dropping, and concatenation.
 
 use crate::error::NarratorError;
+use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -31,7 +32,8 @@ async fn run_ffmpeg_with_progress(
     on_progress: &impl Fn(f64),
 ) -> Result<(), NarratorError> {
     let mut cmd = Command::new(ffmpeg.as_os_str());
-    cmd.args(args)
+    cmd.no_window()
+        .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
@@ -138,6 +140,7 @@ pub async fn apply_edits(
         // Trimmed single clip — use accurate seek (input seeking + output duration)
         let duration = clip.end_seconds - clip.start_seconds;
         let output = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-ss",
@@ -225,6 +228,7 @@ pub async fn apply_edits(
         args.push(clip_path.to_string_lossy().to_string());
 
         let output = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args(&args)
             .output()
             .await
@@ -264,6 +268,7 @@ pub async fn apply_edits(
         std::fs::write(&concat_list, &list_content)?;
 
         let output = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args(["-y", "-f", "concat", "-safe", "0", "-i"])
             .arg(concat_list.as_os_str())
             .args(["-c", "copy", output_path])
@@ -275,6 +280,7 @@ pub async fn apply_edits(
             // Fallback: re-encode concat
             tracing::warn!("Stream-copy concat failed, falling back to re-encode");
             let output2 = Command::new(ffmpeg.as_os_str())
+                .no_window()
                 .args(["-y", "-f", "concat", "-safe", "0", "-i"])
                 .arg(concat_list.as_os_str())
                 .args([
@@ -328,6 +334,7 @@ pub async fn merge_audio_video(
         // Replace original audio entirely with narration.
         // Uses -c:v copy so it's fast — no re-encoding needed.
         let output = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -394,6 +401,7 @@ pub async fn merge_audio_video(
         // Fallback: video might not have audio stream, use narration audio only
         tracing::warn!("amix failed, trying narration-only fallback");
         let fallback = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -482,6 +490,7 @@ pub async fn burn_subtitles(
         // Fallback: use SRT as an input stream and overlay with mov_text → drawtext
         tracing::warn!("subtitles filter failed, trying SRT input overlay fallback");
         let fallback = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -534,6 +543,7 @@ pub async fn extract_edit_thumbnails(
     std::fs::create_dir_all(output_dir)?;
 
     let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
         .args([
             "-y",
             "-i",

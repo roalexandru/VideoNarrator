@@ -2,6 +2,7 @@
 
 use crate::error::NarratorError;
 use crate::models::{Frame, FrameConfig, VideoMetadata};
+use crate::process_utils::CommandNoWindow;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -71,7 +72,11 @@ fn detect_binary(name: &str) -> Result<PathBuf, NarratorError> {
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = std::process::Command::new("where").arg(name).output() {
+        if let Ok(output) = std::process::Command::new("where")
+            .no_window()
+            .arg(name)
+            .output()
+        {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -93,6 +98,7 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
     let ffprobe = detect_ffprobe()?;
 
     let output = Command::new(ffprobe.as_os_str())
+        .no_window()
         .args([
             "-v",
             "quiet",
@@ -161,6 +167,7 @@ pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
     let ffprobe = detect_ffprobe()?;
 
     let output = Command::new(ffprobe.as_os_str())
+        .no_window()
         .args(["-v", "quiet", "-print_format", "json", "-show_format"])
         .arg(path.as_os_str())
         .output()
@@ -229,6 +236,7 @@ pub async fn extract_frames(
     let vf_filter = format!("fps=1/{interval}");
 
     let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
         .args([
             "-i",
             &video_path.to_string_lossy(),

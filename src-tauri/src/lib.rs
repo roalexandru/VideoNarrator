@@ -10,6 +10,7 @@ mod error;
 mod export_engine;
 mod menu;
 mod models;
+mod process_utils;
 mod project_store;
 mod screen_recorder;
 mod secure_store;
@@ -21,10 +22,15 @@ use commands::AppState;
 use tauri::Emitter;
 
 /// Called from the frontend whenever the view changes so we can
-/// enable/disable project-dependent menu items.
+/// enable/disable project-dependent menu items (macOS native menu only).
 #[tauri::command]
 fn set_menu_context(app: tauri::AppHandle, has_project: bool) {
+    #[cfg(target_os = "macos")]
     menu::set_project_context(&app, has_project);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (&app, has_project);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,11 +49,15 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|app| {
-            let m = menu::build(app)?;
-            app.set_menu(m)?;
+        .setup(|_app| {
+            // Only use native menu on macOS (it supports dark mode).
+            // On Windows/Linux, a custom webview menu bar is used instead.
             #[cfg(target_os = "macos")]
-            menu::set_native_help_menu();
+            {
+                let m = menu::build(_app)?;
+                _app.set_menu(m)?;
+                menu::set_native_help_menu();
+            }
             Ok(())
         })
         .on_menu_event(|app, event| {

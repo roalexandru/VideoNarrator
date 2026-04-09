@@ -1,5 +1,8 @@
 //! Native application menu builder for Narrator.
 //! Uses `#[cfg]` for strict platform separation.
+//! On Windows/Linux, the native menu is replaced by a custom webview menu bar,
+//! so these functions are only called on macOS.
+#![allow(dead_code)]
 
 use tauri::{
     menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
@@ -20,6 +23,7 @@ pub const RECENT_PREFIX: &str = "recent:";
 const PROJECT_ITEMS: &[&str] = &[SAVE_PROJECT];
 
 /// Build the native application menu for the current platform.
+#[allow(dead_code)]
 pub fn build(app: &App) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
 
@@ -208,6 +212,7 @@ fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
 // ─── Windows / Linux ─────────────────────────────────────────────────────────
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
     // ── &File ──  (& prefix = Windows mnemonic/access key)
     let file_menu = Submenu::new(app, "&File", true)?;

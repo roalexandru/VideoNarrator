@@ -55,18 +55,24 @@ mod tests {
 
         // Write
         let write_result = set_secret(test_key, test_value);
-        assert!(write_result.is_ok(), "Keyring write failed: {:?}", write_result.err());
+        assert!(
+            write_result.is_ok(),
+            "Keyring write failed: {:?}",
+            write_result.err()
+        );
 
         // Read
         let read_result = get_secret(test_key);
-        assert!(read_result.is_ok(), "Keyring read failed: {:?}", read_result.err());
+        assert!(
+            read_result.is_ok(),
+            "Keyring read failed: {:?}",
+            read_result.err()
+        );
         assert_eq!(read_result.unwrap(), Some(test_value.to_string()));
 
         // Cleanup
         let _ = delete_secret(test_key);
     }
-
-
 }
 
 /// Migrate keys from a plaintext config HashMap to the keychain.

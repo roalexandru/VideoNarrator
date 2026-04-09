@@ -218,6 +218,8 @@ pub struct ProjectConfig {
     pub updated_at: String,
     #[serde(default)]
     pub edit_clips: Option<Vec<EditClip>>,
+    #[serde(default)]
+    pub video_metadata: Option<VideoMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
