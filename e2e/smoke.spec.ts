@@ -10,7 +10,7 @@ test.describe("Smoke Tests", () => {
     await page.goto("/");
     // The app should load without crashing
     await expect(page.locator("body")).toBeVisible();
-    // Should see "Narrator" somewhere in the app
-    await expect(page.getByText("Narrator")).toBeVisible({ timeout: 10000 });
+    // Should see "Projects" heading in the library view
+    await expect(page.getByText("Projects")).toBeVisible({ timeout: 10000 });
   });
 });

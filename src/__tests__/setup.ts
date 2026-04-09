@@ -189,6 +189,11 @@ export function setupDefaultMocks() {
       case "validate_azure_tts_key":
         return true;
 
+      case "list_builtin_voices":
+        return [
+          { id: "default", name: "System Default", locale: "en-US" },
+        ];
+
       case "validate_elevenlabs_key":
         return true;
 

@@ -5,6 +5,7 @@ import { extractEditThumbnails } from "../../lib/tauri/commands";
 import { Button } from "../../components/ui/Button";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { trackError } from "../telemetry/analytics";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -394,7 +395,7 @@ export function EditVideoScreen() {
                         // TODO: multi-source support requires backend changes
                         // For images, this won't work yet - just videos from same source
                         useEditStore.getState().addClip(file as string, 0, m.duration_seconds);
-                      } catch (err) { console.error("Failed to add media:", err); }
+                      } catch (err) { console.error("Failed to add media:", err); trackError("edit_add_media", err); }
                     }}
                     style={{
                       position: "absolute", top: 2, height: 60, left: endPx, width: 48,

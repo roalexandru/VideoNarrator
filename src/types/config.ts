@@ -33,7 +33,7 @@ export type ModelId =
   | "gemini-2.5-flash"
   | "gemini-2.5-pro";
 
-export type TtsProvider = "elevenlabs" | "azure";
+export type TtsProvider = "elevenlabs" | "azure" | "builtin";
 
 export interface TtsProviderKeyStatus {
   provider: TtsProvider;

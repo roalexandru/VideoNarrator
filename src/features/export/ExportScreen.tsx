@@ -13,6 +13,8 @@ import {
 } from "../../lib/tauri/commands";
 import { EXPORT_FORMATS } from "../../lib/constants";
 import { useOpenSettings } from "../../contexts/SettingsContext";
+import { trackError } from "../telemetry/analytics";
+import { toUserMessage } from "../../lib/errorMessages";
 import { trackEvent } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
@@ -122,8 +124,21 @@ export function ExportScreen() {
   const [elConfig, setElConfig] = useState<ElevenLabsConfig | null>(null);
   const [elVoices, setElVoices] = useState<ElevenLabsVoice[]>([]);
   const [azureConfig, setAzureConfig] = useState<AzureTtsConfig | null>(null);
-  const ttsProvider = useConfigStore((s) => s.ttsProvider);
+  const ttsProviderRaw = useConfigStore((s) => s.ttsProvider);
   const openSettings = useOpenSettings();
+
+  // Build the full TTS provider string — for builtin, include voice and speed from localStorage
+  const ttsProvider = (() => {
+    if (ttsProviderRaw !== "builtin") return ttsProviderRaw;
+    try {
+      const saved = localStorage.getItem("narrator_builtin_tts");
+      if (saved) {
+        const { voice, speed } = JSON.parse(saved);
+        return `builtin:${voice || "default"}:${speed || 1.0}`;
+      }
+    } catch {}
+    return "builtin:default:1.0";
+  })();
 
   // Video export pipeline
   const [videoPhase, setVideoPhase] = useState<"idle" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
@@ -137,7 +152,7 @@ export function ExportScreen() {
   const [, setAudioOutputPath] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
 
-  const hasTtsKey = ttsProvider === "elevenlabs" ? !!elConfig?.api_key : !!azureConfig?.api_key;
+  const hasTtsKey = ttsProvider.startsWith("builtin") ? true : ttsProviderRaw === "elevenlabs" ? !!elConfig?.api_key : !!azureConfig?.api_key;
   const primaryScript = Object.values(scripts)[0];
   const segCount = primaryScript?.segments.length || 0;
 
@@ -184,6 +199,7 @@ export function ExportScreen() {
     if (!exp.outputDirectory || !videoPath) return;
     if (ttsProvider === "elevenlabs" && !elConfig) return;
     if (ttsProvider === "azure" && !azureConfig) return;
+    // builtin provider needs no config check
 
     if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
     if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
@@ -210,7 +226,14 @@ export function ExportScreen() {
       const audioDir = `${dir}/audio`;
       const ttsResults = await generateTts(script.segments, audioDir, true, ch, ttsProvider);
       const ttsOk = ttsResults.filter((r) => r.success);
-      if (ttsOk.length === 0) throw new Error("Audio generation failed");
+      if (ttsOk.length === 0) {
+        const firstError = ttsResults.find((r) => r.error)?.error || "Unknown TTS error";
+        throw new Error(`Audio generation failed: ${firstError}`);
+      }
+      const ttsFailed = ttsResults.filter((r) => !r.success);
+      if (ttsFailed.length > 0 && ttsOk.length > 0) {
+        console.warn(`${ttsFailed.length} of ${ttsResults.length} TTS segments failed:`, ttsFailed.map(r => r.error).join("; "));
+      }
 
       const audioFile = ttsOk[0].file_path;
 
@@ -250,10 +273,11 @@ export function ExportScreen() {
       setVideoProgress(100);
       setVideoOutputPath(finalPath);
       setVideoPhase("done");
-      trackEvent("export_completed", { type: "video" });
+      trackEvent("export_completed", { type: "video", tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
     } catch (e: any) {
       console.error("Export video:", e);
-      setVideoError(typeof e === "string" ? e : e?.message || "Export failed");
+      trackError("export_video", e, { tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
+      setVideoError(toUserMessage(e));
       setVideoPhase("error");
     }
   };
@@ -263,6 +287,7 @@ export function ExportScreen() {
     if (!exp.outputDirectory) return;
     if (ttsProvider === "elevenlabs" && !elConfig) return;
     if (ttsProvider === "azure" && !azureConfig) return;
+    // builtin provider needs no config check
 
     if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
     if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
@@ -284,14 +309,22 @@ export function ExportScreen() {
       const audioDir = `${exp.outputDirectory}/audio`;
       const ttsResults = await generateTts(script.segments, audioDir, true, ch, ttsProvider);
       const ttsOk = ttsResults.filter((r) => r.success);
-      if (ttsOk.length === 0) throw new Error("Audio generation failed");
+      if (ttsOk.length === 0) {
+        const firstError = ttsResults.find((r) => r.error)?.error || "Unknown TTS error";
+        throw new Error(`Audio generation failed: ${firstError}`);
+      }
+      const ttsFailed = ttsResults.filter((r) => !r.success);
+      if (ttsFailed.length > 0 && ttsOk.length > 0) {
+        console.warn(`${ttsFailed.length} of ${ttsResults.length} TTS segments failed:`, ttsFailed.map(r => r.error).join("; "));
+      }
 
       setAudioOutputPath(ttsOk[0].file_path);
       setAudioPhase("done");
-      trackEvent("export_completed", { type: "audio" });
+      trackEvent("export_completed", { type: "audio", tts_provider: ttsProvider });
     } catch (e: any) {
       console.error("Export audio:", e);
-      setAudioError(typeof e === "string" ? e : e?.message || "Audio export failed");
+      trackError("export_audio", e, { tts_provider: ttsProvider });
+      setAudioError(toUserMessage(e));
       setAudioPhase("error");
     }
   };
@@ -310,9 +343,10 @@ export function ExportScreen() {
         basename: exp.basename,
       });
       setScriptResults(results);
-      trackEvent("export_completed", { type: "script", format_count: results.length });
+      trackEvent("export_completed", { type: "script", format_count: results.length, formats: exp.selectedFormats.join(","), language_count: langs.length });
     } catch (e) {
       console.error(e);
+      trackError("export_script", e);
     } finally {
       setScriptExporting(false);
     }
@@ -418,7 +452,9 @@ export function ExportScreen() {
                 <line x1="8" y1="23" x2="16" y2="23"/>
               </svg>
               <span style={{ flex: 1, fontSize: 13, color: C.dim }}>
-                {ttsProvider === "elevenlabs"
+                {ttsProvider === "builtin"
+                  ? "Built-in (Free) · System Default"
+                  : ttsProvider === "elevenlabs"
                   ? `ElevenLabs${elVoices.find(v => v.voice_id === elConfig?.voice_id)?.name ? ` · ${elVoices.find(v => v.voice_id === elConfig?.voice_id)?.name}` : ""}${elConfig?.model_id ? ` · ${elConfig.model_id.replace("eleven_", "").replace(/_/g, " ")}` : ""}`
                   : `Azure TTS${azureConfig?.voice_name ? ` · ${azureConfig.voice_name}` : ""}`
                 }

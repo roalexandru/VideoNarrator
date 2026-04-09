@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { trackEvent } from "../features/telemetry/analytics";
 
 const STEP_LABELS = [
   "Project Setup",
@@ -24,18 +25,29 @@ export const useWizardStore = create<WizardState>((set) => ({
   completedSteps: new Set<number>(),
 
   goNext: () =>
-    set((state) => ({
-      currentStep: Math.min(state.currentStep + 1, 5),
-      completedSteps: new Set([...state.completedSteps, state.currentStep]),
-    })),
+    set((state) => {
+      const next = Math.min(state.currentStep + 1, 5);
+      trackEvent("step_visited", { step: STEP_LABELS[next] || `step_${next}`, step_index: next });
+      return {
+        currentStep: next,
+        completedSteps: new Set([...state.completedSteps, state.currentStep]),
+      };
+    }),
 
   goBack: () =>
-    set((state) => ({
-      currentStep: Math.max(state.currentStep - 1, 0),
-    })),
+    set((state) => {
+      const prev = Math.max(state.currentStep - 1, 0);
+      trackEvent("step_visited", { step: STEP_LABELS[prev] || `step_${prev}`, step_index: prev });
+      return {
+        currentStep: prev,
+      };
+    }),
 
-  goToStep: (step) =>
-    set({ currentStep: Math.max(0, Math.min(step, 5)) }),
+  goToStep: (step) => {
+    const clamped = Math.max(0, Math.min(step, 5));
+    trackEvent("step_visited", { step: STEP_LABELS[clamped] || `step_${clamped}`, step_index: clamped });
+    set({ currentStep: clamped });
+  },
 
   markCompleted: (step) =>
     set((state) => ({

@@ -13,6 +13,7 @@ import {
   validateAzureTtsKey,
   getTelemetryEnabled,
   setTelemetryEnabled as setTelemetrySetting,
+  listBuiltinVoices,
 } from "../../lib/tauri/commands";
 import type {
   ElevenLabsConfig,
@@ -23,7 +24,7 @@ import type {
 import { PROVIDERS, TTS_PROVIDERS, ELEVEN_MODELS } from "../../lib/constants";
 import { useConfigStore } from "../../stores/configStore";
 import { Button } from "../../components/ui/Button";
-import { setTelemetryEnabled as setAnalyticsEnabled } from "../telemetry/analytics";
+import { setTelemetryEnabled as setAnalyticsEnabled, trackEvent, trackError } from "../telemetry/analytics";
 import type { AiProvider, ProviderKeyStatus } from "../../types/config";
 
 /* ------------------------------------------------------------------ */
@@ -153,6 +154,11 @@ export function SettingsPanel({
   const [azVoices, setAzVoices] = useState<AzureTtsVoice[]>([]);
   const [azVoicesLoading, setAzVoicesLoading] = useState(false);
 
+  /* ------------- Built-in TTS ------------- */
+  const [builtinVoices, setBuiltinVoices] = useState<{ id: string; name: string; locale: string }[]>([]);
+  const [builtinVoice, setBuiltinVoice] = useState("default");
+  const [builtinSpeed, setBuiltinSpeed] = useState(1.0);
+
   /* ------------- Telemetry ------------- */
   const [telemetryOn, setTelemetryOn] = useState(true);
 
@@ -195,6 +201,17 @@ export function SettingsPanel({
       .catch(() => {});
 
     getTelemetryEnabled().then(setTelemetryOn).catch(() => {});
+
+    // Load builtin voices + persisted config
+    listBuiltinVoices().then(setBuiltinVoices).catch(() => {});
+    try {
+      const saved = localStorage.getItem("narrator_builtin_tts");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.voice) setBuiltinVoice(parsed.voice);
+        if (parsed.speed) setBuiltinSpeed(parsed.speed);
+      }
+    } catch { /* ignore */ }
   }, []);
 
   /* ---------------------------------------------------------------- */
@@ -269,7 +286,9 @@ export function SettingsPanel({
       setKeys((k) => ({ ...k, [provider]: "" }));
       getProviderStatus().then(setStatuses);
       setTimeout(() => setSaved(null), 2000);
+      trackEvent("api_key_saved", { provider });
     } catch (err: unknown) {
+      trackError("save_ai_api_key", err);
       setError(String(err));
     } finally {
       setSaving(null);
@@ -308,7 +327,9 @@ export function SettingsPanel({
       setElKeyInput("");
       setSaved("elevenlabs");
       setTimeout(() => setSaved(null), 2000);
+      trackEvent("api_key_saved", { provider: "elevenlabs" });
     } catch (err: unknown) {
+      trackError("save_elevenlabs_key", err);
       setError(String(err));
     } finally {
       setSaving(null);
@@ -346,7 +367,9 @@ export function SettingsPanel({
       setAzKeyInput("");
       setSaved("azure");
       setTimeout(() => setSaved(null), 2000);
+      trackEvent("api_key_saved", { provider: "azure_tts", region: azRegionInput });
     } catch (err: unknown) {
+      trackError("save_azure_tts_key", err);
       setError(String(err));
     } finally {
       setSaving(null);
@@ -375,6 +398,7 @@ export function SettingsPanel({
     try {
       await saveElevenLabsConfig(updated);
     } catch (err: unknown) {
+      trackError("save_elevenlabs_voice_config", err);
       setError(String(err));
     }
   };
@@ -390,6 +414,7 @@ export function SettingsPanel({
     try {
       await saveAzureTtsConfig(updated);
     } catch (err: unknown) {
+      trackError("save_azure_voice_config", err);
       setError(String(err));
     }
   };
@@ -645,6 +670,40 @@ export function SettingsPanel({
             ))}
           </select>
         </div>
+      </div>
+
+      <div
+        style={{
+          height: 1,
+          background: C.borderSubtle,
+          margin: "0 0 0 16px",
+        }}
+      />
+
+      {/* Built-in TTS row (always ready) */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          height: 40,
+        }}
+      >
+        <Dot on={true} />
+        <span
+          style={{
+            width: 130,
+            flexShrink: 0,
+            fontSize: 13,
+            fontWeight: 500,
+            color: C.text,
+          }}
+        >
+          Built-in (Free)
+        </span>
+        <span style={{ flex: 1, fontSize: 11, color: C.dim }}>
+          No API key needed &mdash; uses OS speech engine
+        </span>
       </div>
 
       {/* ---- PREFERENCES section (merged from General) ---- */}
@@ -989,7 +1048,7 @@ export function SettingsPanel({
         .finally(() => setAzVoicesLoading(false));
     };
 
-    const handleTtsSwitch = (id: "elevenlabs" | "azure") => {
+    const handleTtsSwitch = (id: "elevenlabs" | "azure" | "builtin") => {
       setTtsProvider(id);
       if (id === "elevenlabs" && elVoices.length === 0 && elHasKey)
         loadElVoices();
@@ -1006,52 +1065,41 @@ export function SettingsPanel({
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={sectionLabel}>TTS Provider</div>
 
-        {/* Provider cards (2-col, compact 52px) */}
-        <div
-          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
-        >
+        {/* Provider selector — clean row layout */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {TTS_PROVIDERS.map((tp) => {
             const isActive = ttsProvider === tp.id;
-            const hasKey = tp.id === "elevenlabs" ? elHasKey : azHasKey;
+            const hasKey = tp.id === "builtin" ? true : tp.id === "elevenlabs" ? elHasKey : azHasKey;
             return (
               <div
                 key={tp.id}
                 onClick={() => handleTtsSwitch(tp.id)}
                 style={{
-                  height: 52,
-                  padding: "8px 12px",
+                  padding: "10px 14px",
                   borderRadius: 8,
                   border: `1px solid ${isActive ? "rgba(99,102,241,0.4)" : C.border}`,
                   background: isActive ? C.accentDim : C.bg,
                   cursor: "pointer",
                   transition: "all 0.15s",
                   display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "center",
+                  alignItems: "center",
+                  gap: 10,
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    marginBottom: 2,
-                  }}
-                >
-                  <span
-                    style={{
-                      fontWeight: 600,
-                      fontSize: 13,
-                      color: isActive ? C.text : C.dim,
-                    }}
-                  >
-                    {tp.label}
-                  </span>
-                  <Dot on={hasKey} />
+                <div style={{
+                  width: 16, height: 16, borderRadius: "50%",
+                  border: `2px solid ${isActive ? C.accent : C.muted}`,
+                  display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                }}>
+                  {isActive && <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.accent }} />}
                 </div>
-                <span style={{ fontSize: 11, color: C.muted, lineHeight: 1.2 }}>
-                  {tp.description}
-                </span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13, color: isActive ? C.text : C.dim }}>{tp.label}</span>
+                    <Dot on={hasKey} />
+                  </div>
+                  <span style={{ fontSize: 11, color: C.muted }}>{tp.description}</span>
+                </div>
               </div>
             );
           })}
@@ -1424,6 +1472,62 @@ export function SettingsPanel({
                 </div>
               </>
             )}
+          </>
+        )}
+
+        {/* Built-in settings */}
+        {ttsProvider === "builtin" && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 11, color: C.dim, display: "block", marginBottom: 4 }}>Voice</label>
+                <select
+                  value={builtinVoice}
+                  onChange={(e) => {
+                    setBuiltinVoice(e.target.value);
+                    try { localStorage.setItem("narrator_builtin_tts", JSON.stringify({ voice: e.target.value, speed: builtinSpeed })); } catch {}
+                  }}
+                  style={{ ...selectStyle, width: "100%", height: 30 }}
+                >
+                  {builtinVoices.length === 0 && <option value="default">System Default</option>}
+                  {builtinVoices.map((v) => (
+                    <option key={v.id} value={v.id}>{v.name}{v.locale ? ` (${v.locale})` : ""}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: C.dim, display: "block", marginBottom: 4 }}>Quality</label>
+                <div style={{
+                  padding: "5px 10px", borderRadius: 6, fontSize: 12, color: C.dim,
+                  background: "rgba(74,222,128,0.06)", border: "1px solid rgba(74,222,128,0.15)",
+                  height: 30, display: "flex", alignItems: "center",
+                }}>
+                  Free — No API key needed
+                </div>
+              </div>
+            </div>
+
+            {/* Speed slider */}
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <label style={{ fontSize: 11, color: C.dim }}>Speed</label>
+                <span style={{ fontSize: 11, color: C.text, fontVariantNumeric: "tabular-nums" }}>{builtinSpeed.toFixed(1)}x</span>
+              </div>
+              <input
+                type="range" min={0.5} max={2.0} step={0.1}
+                value={builtinSpeed}
+                onChange={(e) => {
+                  const speed = parseFloat(e.target.value);
+                  setBuiltinSpeed(speed);
+                  try { localStorage.setItem("narrator_builtin_tts", JSON.stringify({ voice: builtinVoice, speed })); } catch {}
+                }}
+                style={{ width: "100%", accentColor: C.accent }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginTop: 4 }}>
+                <span>0.5x</span>
+                <span>2.0x</span>
+              </div>
+            </div>
           </>
         )}
       </div>
