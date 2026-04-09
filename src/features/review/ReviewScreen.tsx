@@ -3,9 +3,11 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames } from "../../lib/tauri/commands";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { listProjectFrames, generateTts, getHomeDir } from "../../lib/tauri/commands";
+import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { trackEvent } from "../telemetry/analytics";
+import type { ProgressEvent } from "../../types/processing";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -21,6 +23,17 @@ export function ReviewScreen() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [framePaths, setFramePaths] = useState<string[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
+  const [previewingIdx, setPreviewingIdx] = useState<number | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Per-project preview voice — persisted in localStorage, defaults to "builtin"
+  const previewVoiceKey = `narrator_preview_voice_${projectId || "default"}`;
+  const [previewVoice, setPreviewVoice] = useState<"builtin" | "elevenlabs" | "azure">(() => {
+    try { return (localStorage.getItem(previewVoiceKey) as "builtin" | "elevenlabs" | "azure") || "builtin"; } catch { return "builtin"; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(previewVoiceKey, previewVoice); } catch { /* storage unavailable */ }
+  }, [previewVoice, previewVoiceKey]);
 
   const script = scripts[activeLanguage];
   const segments = script?.segments || [];
@@ -49,6 +62,77 @@ export function ReviewScreen() {
     setActiveSegment(i);
     if (segments[i] && videoRef.current) videoRef.current.currentTime = segments[i].start_seconds;
   }, [segments, setActiveSegment]);
+
+  const handlePreview = useCallback(async (segmentIndex: number) => {
+    // Stop any currently playing preview
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+
+    if (previewingIdx === segmentIndex) {
+      setPreviewingIdx(null);
+      return; // Toggle off
+    }
+
+    const seg = segments[segmentIndex];
+    if (!seg) return;
+
+    setPreviewingIdx(segmentIndex);
+
+    try {
+      const ch = new Channel<ProgressEvent>();
+      const home = await getHomeDir();
+
+      // Build provider string — for builtin, include voice + speed from localStorage
+      let providerStr: string = previewVoice;
+      if (previewVoice === "builtin") {
+        try {
+          const saved = localStorage.getItem("narrator_builtin_tts");
+          if (saved) {
+            const { voice, speed } = JSON.parse(saved);
+            providerStr = `builtin:${voice || "default"}:${speed || 1.0}`;
+          } else {
+            providerStr = "builtin:default:1.0";
+          }
+        } catch { providerStr = "builtin:default:1.0"; }
+      }
+
+      const results = await generateTts(
+        [{ ...seg, index: 0 }],
+        `${home}/.narrator/cache/preview`,
+        false,
+        ch,
+        providerStr,
+      );
+
+      const ok = results.find(r => r.success);
+      if (!ok) {
+        console.error("Preview TTS failed:", results[0]?.error);
+        setPreviewingIdx(null);
+        return;
+      }
+
+      const audio = new Audio(convertFileSrc(ok.file_path));
+      audio.onended = () => setPreviewingIdx(null);
+      audio.onerror = () => setPreviewingIdx(null);
+      previewAudioRef.current = audio;
+      await audio.play();
+    } catch (err) {
+      console.error("Preview failed:", err);
+      setPreviewingIdx(null);
+    }
+  }, [segments, previewingIdx, previewVoice]);
+
+  // Cleanup preview audio on unmount
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+    };
+  }, []);
 
   // Load video
   useEffect(() => {
@@ -104,7 +188,25 @@ export function ReviewScreen() {
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
-        <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text }}>Review & Edit</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review & Edit</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 11, color: C.muted }}>Preview voice:</span>
+            <select
+              value={previewVoice}
+              onChange={(e) => setPreviewVoice(e.target.value as "builtin" | "elevenlabs" | "azure")}
+              style={{
+                fontSize: 11, padding: "3px 8px", borderRadius: 6,
+                background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`,
+                color: C.dim, fontFamily: "inherit", cursor: "pointer", outline: "none",
+              }}
+            >
+              <option value="builtin">Built-in (Free)</option>
+              <option value="elevenlabs">ElevenLabs</option>
+              <option value="azure">Azure TTS</option>
+            </select>
+          </div>
+        </div>
         {languages.length > 1 && (
           <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 3 }}>
             {languages.map((l) => (
@@ -251,6 +353,21 @@ export function ReviewScreen() {
                   </div>
                   <div style={{ display: "flex", gap: 4, paddingTop: 2 }}>
                     <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
+                      style={{
+                        fontSize: 11,
+                        color: previewingIdx === i ? "#818cf8" : "#8b8ba0",
+                        background: previewingIdx === i ? "rgba(99,102,241,0.1)" : "none",
+                        border: "none",
+                        cursor: "pointer",
+                        fontFamily: "inherit",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                      }}
+                    >
+                      {previewingIdx === i ? "\u25A0 Stop" : "\u25B6 Play"}
+                    </button>
                     <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
                   </div>
                 </div>
@@ -265,7 +382,7 @@ export function ReviewScreen() {
           title="Delete Segment"
           message={`Are you sure you want to delete segment ${deleteTarget + 1}? This cannot be undone.`}
           confirmLabel="Delete"
-          onConfirm={() => { deleteSegment(activeLanguage, deleteTarget); setDeleteTarget(null); }}
+          onConfirm={() => { deleteSegment(activeLanguage, deleteTarget); trackEvent("script_edited", { action: "delete" }); setDeleteTarget(null); }}
           onCancel={() => setDeleteTarget(null)}
         />
       )}

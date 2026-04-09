@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { trackError } from "../telemetry/analytics";
 
 export function RecorderOverlay() {
   const [paused, setPaused] = useState(false);
@@ -21,6 +22,7 @@ export function RecorderOverlay() {
       setPaused(true);
     } catch (e) {
       console.error("Pause failed:", e);
+      trackError("recording_pause", e);
     }
     setBusy(false);
   }, [busy]);
@@ -33,6 +35,7 @@ export function RecorderOverlay() {
       setPaused(false);
     } catch (e) {
       console.error("Resume failed:", e);
+      trackError("recording_resume", e);
     }
     setBusy(false);
   }, [busy]);
@@ -45,6 +48,7 @@ export function RecorderOverlay() {
       // Overlay will be closed by the backend
     } catch (e) {
       console.error("Stop failed:", e);
+      trackError("recording_stop", e);
       setBusy(false);
     }
   }, [busy]);

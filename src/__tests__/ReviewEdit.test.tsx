@@ -239,4 +239,34 @@ describe("ReviewScreen", () => {
     render(<ReviewScreen />);
     expect(screen.getByText("No narration generated yet")).toBeInTheDocument();
   });
+
+  // ── Preview (Play/Stop) button tests ──
+
+  it("renders Play button for each segment", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    const playButtons = screen.getAllByText(/Play/);
+    expect(playButtons).toHaveLength(2);
+  });
+
+  it("clicking Play button changes it to Stop state", async () => {
+    seedStores();
+    const user = userEvent.setup();
+    render(<ReviewScreen />);
+
+    const playButtons = screen.getAllByText(/Play/);
+    expect(playButtons[0].textContent).toContain("Play");
+
+    // Click the first Play button — it will try to generate TTS (mocked) and play audio.
+    // In jsdom audio won't actually play, but the state should change to "previewing"
+    // which shows the Stop text. The handlePreview sets previewingIdx immediately.
+    await user.click(playButtons[0]);
+
+    // After clicking, the button for that segment should show Stop
+    // (the mock IPC returns a TTS result, but jsdom's Audio won't fire events,
+    // so previewingIdx stays set until audio ends or errors)
+    const stopButtons = screen.queryAllByText(/Stop/);
+    expect(stopButtons.length).toBeGreaterThanOrEqual(1);
+  });
 });

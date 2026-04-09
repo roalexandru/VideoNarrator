@@ -4,8 +4,8 @@ use crate::error::NarratorError;
 use crate::models::*;
 use crate::secure_store;
 use crate::{
-    ai_client, azure_tts_client, doc_processor, elevenlabs_client, export_engine, project_store,
-    screen_recorder, video_edit, video_engine,
+    ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
+    project_store, screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -512,6 +512,27 @@ pub async fn generate_narration(
         &params.primary_language,
     )?;
 
+    // Start estimated progress reporter — gives the user a smooth progress bar
+    // during the 30-60 second AI call instead of a frozen UI.
+    let progress_channel = channel.clone();
+    let cancel_progress = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel_progress.clone();
+
+    let progress_task = tokio::spawn(async move {
+        let mut pct = 0.0_f64;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if cancel_clone.load(Ordering::SeqCst) {
+                break;
+            }
+            // Logarithmic progress: approaches but never reaches 95%
+            pct += (95.0 - pct) * 0.15;
+            progress_channel
+                .send(ProgressEvent::Progress { percent: pct })
+                .ok();
+        }
+    });
+
     let script = ai_client::generate_narration(
         provider.as_ref(),
         &system_prompt,
@@ -519,7 +540,18 @@ pub async fn generate_narration(
         &params.style,
         &params.primary_language,
     )
-    .await?;
+    .await;
+
+    // Stop estimated progress reporter
+    cancel_progress.store(true, Ordering::SeqCst);
+    let _ = progress_task.await;
+
+    // Jump to 100% once the AI call completes
+    channel
+        .send(ProgressEvent::Progress { percent: 100.0 })
+        .ok();
+
+    let script = script?;
 
     for segment in &script.segments {
         channel
@@ -730,11 +762,19 @@ pub async fn validate_azure_tts_key(
     azure_tts_client::validate_key(&api_key, &region).await
 }
 
+// ── Built-in TTS commands ──
+
+#[tauri::command]
+pub async fn list_builtin_voices() -> Result<Vec<builtin_tts::BuiltinVoice>, NarratorError> {
+    builtin_tts::list_voices().await
+}
+
 // ── TTS generation command ──
 
 enum TtsProvider {
     ElevenLabs(elevenlabs_client::ElevenLabsConfig),
     Azure(azure_tts_client::AzureTtsConfig),
+    Builtin { voice: String, speed: f32 },
 }
 
 /// Clean text before sending to TTS: remove [pause], [break], (pause), etc.
@@ -758,6 +798,7 @@ fn tts_cache_key(tts: &TtsProvider, text: &str) -> String {
             c.voice_id, c.model_id, c.stability, c.similarity_boost, c.style, c.speed
         ),
         TtsProvider::Azure(c) => format!("az|{}|{}|{:.2}", c.voice_name, c.speaking_style, c.speed),
+        TtsProvider::Builtin { voice, speed } => format!("builtin|{}|{:.2}", voice, speed),
     };
     let input = format!("{settings}|{text}");
     let hash = blake3::hash(input.as_bytes());
@@ -806,6 +847,9 @@ async fn generate_speech_for_provider(
         TtsProvider::Azure(cfg) => {
             azure_tts_client::generate_speech(cfg, text, filepath).await?;
         }
+        TtsProvider::Builtin { voice, speed } => {
+            builtin_tts::generate_speech(text, voice, *speed, filepath).await?;
+        }
     }
 
     // Store in cache
@@ -828,46 +872,58 @@ pub async fn generate_tts(
     let provider_name = tts_provider.unwrap_or_else(|| "elevenlabs".to_string());
     let config = load_config();
 
-    let tts = match provider_name.as_str() {
-        "azure" => {
-            let az_config = config
-                .azure_tts
-                .map(|a| {
-                    let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
-                    azure_tts_client::AzureTtsConfig {
-                        api_key,
-                        region: a.region,
-                        voice_name: a.voice_name,
-                        speaking_style: a.speaking_style,
-                        speed: a.speed,
-                    }
-                })
-                .ok_or_else(|| NarratorError::NoApiKey("azure_tts".to_string()))?;
-            TtsProvider::Azure(az_config)
-        }
-        _ => {
-            let el_config = config
-                .elevenlabs
-                .map(|e| {
-                    let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
-                    elevenlabs_client::ElevenLabsConfig {
-                        api_key,
-                        voice_id: e.voice_id,
-                        model_id: e.model_id,
-                        stability: e.stability,
-                        similarity_boost: e.similarity_boost,
-                        style: e.style,
-                        speed: e.speed,
-                    }
-                })
-                .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
-            TtsProvider::ElevenLabs(el_config)
+    let tts = if provider_name.starts_with("builtin") {
+        // Format: "builtin" or "builtin:voice_id:speed"
+        let parts: Vec<&str> = provider_name.splitn(3, ':').collect();
+        let voice = parts.get(1).unwrap_or(&"default").to_string();
+        let speed = parts
+            .get(2)
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1.0);
+        TtsProvider::Builtin { voice, speed }
+    } else {
+        match provider_name.as_str() {
+            "azure" => {
+                let az_config = config
+                    .azure_tts
+                    .map(|a| {
+                        let api_key = load_api_key_secure("azure_tts").unwrap_or(a.api_key);
+                        azure_tts_client::AzureTtsConfig {
+                            api_key,
+                            region: a.region,
+                            voice_name: a.voice_name,
+                            speaking_style: a.speaking_style,
+                            speed: a.speed,
+                        }
+                    })
+                    .ok_or_else(|| NarratorError::NoApiKey("azure_tts".to_string()))?;
+                TtsProvider::Azure(az_config)
+            }
+            _ => {
+                let el_config = config
+                    .elevenlabs
+                    .map(|e| {
+                        let api_key = load_api_key_secure("elevenlabs").unwrap_or(e.api_key);
+                        elevenlabs_client::ElevenLabsConfig {
+                            api_key,
+                            voice_id: e.voice_id,
+                            model_id: e.model_id,
+                            stability: e.stability,
+                            similarity_boost: e.similarity_boost,
+                            style: e.style,
+                            speed: e.speed,
+                        }
+                    })
+                    .ok_or_else(|| NarratorError::NoApiKey("elevenlabs".to_string()))?;
+                TtsProvider::ElevenLabs(el_config)
+            }
         }
     };
 
     let silence_sample_rate = match &tts {
         TtsProvider::Azure(_) => "24000",
         TtsProvider::ElevenLabs(_) => "44100",
+        TtsProvider::Builtin { .. } => "44100",
     };
 
     let out = PathBuf::from(&output_dir);
@@ -1639,5 +1695,83 @@ mod tests {
         let key1 = tts_cache_key(&provider1, "Hello world");
         let key2 = tts_cache_key(&provider2, "Hello world");
         assert_eq!(key1, key2);
+    }
+
+    // ── Builtin TTS cache key tests ──
+
+    #[test]
+    fn test_tts_cache_key_builtin() {
+        let provider = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        let key = tts_cache_key(&provider, "Hello world");
+        // Should produce a valid non-empty hex string
+        assert!(!key.is_empty());
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_tts_cache_key_builtin_deterministic() {
+        let provider1 = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        let provider2 = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        assert_eq!(
+            tts_cache_key(&provider1, "Hello"),
+            tts_cache_key(&provider2, "Hello")
+        );
+    }
+
+    #[test]
+    fn test_tts_cache_key_builtin_different_voice() {
+        let provider1 = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        let provider2 = TtsProvider::Builtin {
+            voice: "Samantha".to_string(),
+            speed: 1.0,
+        };
+        assert_ne!(
+            tts_cache_key(&provider1, "Hello"),
+            tts_cache_key(&provider2, "Hello")
+        );
+    }
+
+    #[test]
+    fn test_tts_cache_key_builtin_different_speed() {
+        let provider1 = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        let provider2 = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.5,
+        };
+        assert_ne!(
+            tts_cache_key(&provider1, "Hello"),
+            tts_cache_key(&provider2, "Hello")
+        );
+    }
+
+    #[test]
+    fn test_tts_cache_key_builtin_differs_from_other_providers() {
+        let builtin = TtsProvider::Builtin {
+            voice: "default".to_string(),
+            speed: 1.0,
+        };
+        let el = make_elevenlabs_provider();
+        let az = make_azure_provider();
+        let text = "Hello world";
+        let key_builtin = tts_cache_key(&builtin, text);
+        let key_el = tts_cache_key(&el, text);
+        let key_az = tts_cache_key(&az, text);
+        assert_ne!(key_builtin, key_el);
+        assert_ne!(key_builtin, key_az);
     }
 }

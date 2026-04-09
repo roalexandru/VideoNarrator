@@ -2,7 +2,7 @@ import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../../stores/projectStore";
 import { probeVideo, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
-import { trackEvent } from "../telemetry/analytics";
+import { trackEvent, trackError } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,9 +29,10 @@ export function ProjectSetupScreen() {
       try {
         const m = await probeVideo(event.payload);
         setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
-        trackEvent("video_imported", { source: "screen_recording" });
+        trackEvent("video_imported", { source: "screen_recording", duration_s: Math.round(m.duration_seconds), codec: m.codec, width: m.width, height: m.height });
       } catch (e) {
         console.error("Failed to probe recorded video:", e);
+        trackError("probe_recorded_video", e);
       }
     });
     return () => { unlistenPromise.then((fn) => fn()); };
@@ -50,10 +51,10 @@ export function ProjectSetupScreen() {
         await getCurrentWindow().setFocus();
         const m = await probeVideo(outputPath);
         setVideoFile({ path: m.path, name: "Screen Recording", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
-        trackEvent("video_imported", { source: "screen_recording" });
+        trackEvent("video_imported", { source: "screen_recording", duration_s: Math.round(m.duration_seconds), codec: m.codec, width: m.width, height: m.height });
       } catch (e: unknown) {
         try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch { /* ignore */ }
-        if (!String(e).includes("Cancelled")) console.error("Recording failed:", e);
+        if (!String(e).includes("Cancelled")) { console.error("Recording failed:", e); trackError("screen_recording_macos", e); }
       } finally {
         setIsRecording(false);
       }
@@ -65,6 +66,7 @@ export function ProjectSetupScreen() {
         // Recording running; overlay window open; recording-stopped event will fire on stop
       } catch (e) {
         console.error("Failed to start recording:", e);
+        trackError("screen_recording_windows", e);
         setIsRecording(false);
         try { await getCurrentWindow().unminimize(); await getCurrentWindow().setFocus(); } catch { /* ignore */ }
         await message(`Recording failed: ${String(e)}`, { title: "Narrator", kind: "error" });
@@ -79,9 +81,10 @@ export function ProjectSetupScreen() {
     try {
       const m = await probeVideo(file as string);
       setVideoFile({ path: m.path, name: m.path.split("/").pop() || "video", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
-      trackEvent("video_imported", { source: "file" });
+      trackEvent("video_imported", { source: "file", duration_s: Math.round(m.duration_seconds), codec: m.codec, width: m.width, height: m.height, fps: Math.round(m.fps), size_mb: Math.round(m.file_size / 1048576) });
     } catch (err) {
       console.error("Probe failed:", err);
+      trackError("probe_video_file_select", err);
       await message(`Failed to load video: ${String(err)}`, { title: "Video Error", kind: "error" });
     }
     finally { setProbing(false); }
@@ -92,6 +95,7 @@ export function ProjectSetupScreen() {
     if (!files) return;
     const paths = Array.isArray(files) ? files : [files];
     addDocuments(paths.map((p) => ({ id: crypto.randomUUID(), path: p, name: p.split("/").pop() || "document", size: 0, type: (p.split(".").pop() || "txt") as "md" | "txt" | "pdf" })));
+    trackEvent("context_docs_added", { count: paths.length, types: paths.map(p => p.split(".").pop() || "unknown").join(",") });
   }, [addDocuments]);
 
   return (

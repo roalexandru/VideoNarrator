@@ -6,7 +6,8 @@ import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useEditStore } from "../../stores/editStore";
 import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir } from "../../lib/tauri/commands";
-import { trackEvent } from "../telemetry/analytics";
+import { trackEvent, trackError } from "../telemetry/analytics";
+import { toUserMessage } from "../../lib/errorMessages";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { secondsToTimestamp } from "../../lib/formatters";
@@ -29,6 +30,15 @@ export function ProcessingScreen() {
 
   const run = useCallback(async () => {
     proc.reset(); proc.setPhase("extracting_frames");
+    trackEvent("generation_started", {
+      provider: config.aiProvider,
+      model: config.model,
+      style: config.style,
+      language: config.primaryLanguage,
+      has_custom_prompt: !!config.customPrompt.trim(),
+      has_context_docs: project.contextDocuments.length > 0,
+      doc_count: project.contextDocuments.length,
+    });
 
     // Snapshot edit state at generation start to prevent mid-run mutations
     const editSnapshot = useEditStore.getState();
@@ -50,6 +60,11 @@ export function ProcessingScreen() {
           && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
 
     if (hasEdits && editSnapshot.clips.length > 0) {
+      trackEvent("video_edited", {
+        clips_count: editSnapshot.clips.length,
+        has_speed_change: editSnapshot.clips.some(c => c.speed !== 1.0),
+        has_trim: editSnapshot.clips.length === 1 && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5),
+      });
       try {
         proc.setPhase("extracting_frames"); // reuse phase for "applying edits" visual
         const homeDir = await getHomeDir();
@@ -70,7 +85,8 @@ export function ProcessingScreen() {
         videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
         editSnapshot.setEditedVideoPath(videoPath);
       } catch (err: unknown) {
-        proc.setError(`Failed to apply video edits: ${typeof err === "string" ? err : (err as Error)?.message || "Unknown error"}`);
+        trackError("apply_video_edits", err);
+        proc.setError(toUserMessage(err));
         proc.setPhase("error");
         return;
       }
@@ -90,9 +106,19 @@ export function ProcessingScreen() {
     try {
       const script = await startGeneration(params, ch);
       setScript(config.primaryLanguage, script); proc.setPhase("done");
-      trackEvent("processing_completed", { segments: script.segments.length, provider: config.aiProvider, style: config.style });
+      trackEvent("processing_completed", {
+        segments: script.segments.length,
+        provider: config.aiProvider,
+        model: config.model,
+        style: config.style,
+        language: config.primaryLanguage,
+        duration_s: Math.round(script.total_duration_seconds),
+        has_edits: editSnapshot.clips.length > 1 || editSnapshot.clips.some((c) => c.speed !== 1.0),
+        frame_density: config.frameDensity,
+      });
     } catch (err: unknown) {
-      proc.setError(typeof err === "string" ? err : (err as Error)?.message || "Unknown error");
+      trackError("generate_narration", err, { provider: config.aiProvider, model: config.model, style: config.style });
+      proc.setError(toUserMessage(err));
       proc.setPhase("error");
     }
   }, [project, config, proc, setScript]);
@@ -106,7 +132,7 @@ export function ProcessingScreen() {
 
   const phases = ["extracting_frames", "processing_docs", "generating_narration"] as const;
   const pi = phases.indexOf(proc.phase as any);
-  const pct = showCompleted ? 100 : proc.phase === "done" ? 100 : (proc.phase === "extracting_frames" && proc.frames.length === 0) ? 5 : pi >= 0 ? ((pi + 0.5) / 3) * 100 : 5;
+  const pct = showCompleted ? 100 : proc.phase === "done" ? 100 : proc.phase === "generating_narration" && proc.progress > 0 ? 67 + (proc.progress / 100) * 33 : (proc.phase === "extracting_frames" && proc.frames.length === 0) ? 5 : pi >= 0 ? ((pi + 0.5) / 3) * 100 : 5;
   const elapsed = proc.frames.length > 0 ? `${proc.frames.length} frames extracted` : "";
   const segCount = proc.streamingSegments.length;
   const scriptSegCount = Object.values(useScriptStore.getState().scripts)[0]?.segments.length || 0;

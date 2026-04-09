@@ -25,7 +25,7 @@ import { ToastContainer, showToast } from "./components/ui/Toast";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
-import { initTelemetry, trackEvent } from "./features/telemetry/analytics";
+import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
@@ -98,6 +98,7 @@ function TelemetryNotice({ onClose }: { onClose: () => void }) {
 
 export default function App() {
   const currentStep = useWizardStore((s) => s.currentStep);
+  const sessionStart = useRef(Date.now());
   const [view, setView] = useState<AppView>("library");
   const [settingsState, setSettingsState] = useState<{ open: boolean; tab?: SettingsTab }>({ open: false });
   const openSettings = useCallback((tab?: SettingsTab) => {
@@ -123,7 +124,12 @@ export default function App() {
   // ── Init telemetry on mount ──
   useEffect(() => {
     initTelemetry().then(() => {
-      trackEvent("app_launched");
+      trackEvent("app_launched", {
+        os: navigator.platform,
+        locale: navigator.language,
+        screen_width: window.screen.width,
+        screen_height: window.screen.height,
+      });
     });
     // Show first-launch notice if telemetry_enabled has never been set
     getTelemetryEnabled()
@@ -132,6 +138,16 @@ export default function App() {
         // Notice popup is disabled — no user prompt needed.
       })
       .catch(() => {});
+  }, []);
+
+  // ── Track session duration on unload ──
+  useEffect(() => {
+    const handleUnload = () => {
+      const duration = Math.round((Date.now() - sessionStart.current) / 1000);
+      trackEvent("session_end", { duration_seconds: duration });
+    };
+    window.addEventListener("beforeunload", handleUnload);
+    return () => window.removeEventListener("beforeunload", handleUnload);
   }, []);
 
   const doNewProject = useCallback(() => {
@@ -144,7 +160,7 @@ export default function App() {
     useExportStore.getState().reset();
     useWizardStore.getState().reset();
     setView("editor");
-    trackEvent("project_created");
+    trackEvent("project_created", { source: "new" });
   }, []);
 
   const handleNewProject = useCallback(() => {
@@ -230,6 +246,7 @@ export default function App() {
         await saveProject(buildSavePayload());
       } catch (err: unknown) {
         console.error("Auto-save failed:", err);
+        trackError("auto_save", err);
       }
     }, 2000);
 
@@ -355,8 +372,13 @@ export default function App() {
       }
 
       setView("editor");
+      trackEvent("project_opened", {
+        has_scripts: hasScripts,
+        languages: Object.keys(loaded.scripts).length,
+      });
     } catch (err) {
       console.error("Failed to load project:", err);
+      trackError("load_project", err);
     } finally {
       isLoadingProject.current = false;
     }

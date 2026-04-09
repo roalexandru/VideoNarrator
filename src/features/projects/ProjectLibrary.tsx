@@ -3,6 +3,7 @@ import { listProjects, deleteProject, type ProjectSummary } from "../../lib/taur
 import { Button } from "../../components/ui/Button";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { trackEvent } from "../telemetry/analytics";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -38,7 +39,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
 
   const refresh = () => {
     setLoading(true);
-    listProjects().then(setProjects).catch(() => {}).finally(() => setLoading(false));
+    listProjects().then((p) => { setProjects(p); trackEvent("library_loaded", { project_count: p.length }); }).catch(() => {}).finally(() => setLoading(false));
   };
   useEffect(() => { refresh(); }, []);
 
@@ -155,6 +156,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
           danger
           onConfirm={async () => {
             await deleteProject(confirmDelete.id);
+            trackEvent("project_deleted");
             setConfirmDelete(null);
             refresh();
           }}

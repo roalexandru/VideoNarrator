@@ -179,6 +179,16 @@ export const saveAzureTtsConfig = (config: AzureTtsConfig) => invoke<void>("save
 export const listAzureTtsVoices = (apiKey: string, region: string) => invoke<AzureTtsVoice[]>("list_azure_tts_voices", { apiKey, region });
 export const validateAzureTtsKey = (apiKey: string, region: string) => invoke<boolean>("validate_azure_tts_key", { apiKey, region });
 
+// Built-in TTS
+export interface BuiltinVoice {
+  id: string;
+  name: string;
+  locale: string;
+}
+
+export const listBuiltinVoices = () =>
+  invoke<BuiltinVoice[]>("list_builtin_voices");
+
 // Export
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });

@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from "react";
+import { trackError } from "../features/telemetry/analytics";
 
 interface Props { children: ReactNode; fallback?: ReactNode; }
 interface State { hasError: boolean; error: string; }
@@ -12,6 +13,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error("ErrorBoundary caught:", error, info.componentStack);
+    trackError("react_render_crash", error);
   }
 
   render() {

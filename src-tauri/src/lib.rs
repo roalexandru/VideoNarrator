@@ -2,6 +2,7 @@
 
 mod ai_client;
 mod azure_tts_client;
+mod builtin_tts;
 mod commands;
 mod doc_processor;
 mod elevenlabs_client;
@@ -117,6 +118,7 @@ pub fn run() {
             commands::get_telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::track_event,
+            commands::list_builtin_voices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

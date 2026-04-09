@@ -111,6 +111,11 @@ export const TTS_PROVIDERS: {
     label: "Azure TTS",
     description: "Microsoft neural voices with narration styles",
   },
+  {
+    id: "builtin",
+    label: "Built-in (Free)",
+    description: "Uses your OS speech engine. No API key needed.",
+  },
 ];
 
 export const EXPORT_FORMATS: { id: ExportFormat; label: string; ext: string }[] = [
