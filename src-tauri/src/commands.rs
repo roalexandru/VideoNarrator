@@ -92,9 +92,18 @@ fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
 
 // ── Secure API key helpers ──
 
-fn save_api_key_secure(provider: &str, key: &str) -> Result<(), NarratorError> {
+/// Try to save an API key to OS keychain. Returns true if successful.
+fn save_api_key_secure(provider: &str, key: &str) -> bool {
     let keychain_key = format!("api_key_{provider}");
-    secure_store::set_secret(&keychain_key, key)
+    match secure_store::set_secret(&keychain_key, key) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                "Keychain write failed for {provider}, will use config.json fallback: {e}"
+            );
+            false
+        }
+    }
 }
 
 fn load_api_key_secure(provider: &str) -> Option<String> {
@@ -170,33 +179,29 @@ impl AppState {
 
         // Migrate ElevenLabs API key from config to keychain
         if let Some(ref el) = config.elevenlabs {
-            if !el.api_key.is_empty() {
-                if let Ok(()) = save_api_key_secure("elevenlabs", &el.api_key) {
-                    let mut clean_config = load_config();
-                    if let Some(ref mut el_cfg) = clean_config.elevenlabs {
-                        el_cfg.api_key = String::new();
-                    }
-                    if let Err(e) = save_config(&clean_config) {
-                        tracing::warn!("Failed to clean ElevenLabs key from config.json: {e}");
-                    }
-                    tracing::info!("Migrated ElevenLabs API key to OS keychain");
+            if !el.api_key.is_empty() && save_api_key_secure("elevenlabs", &el.api_key) {
+                let mut clean_config = load_config();
+                if let Some(ref mut el_cfg) = clean_config.elevenlabs {
+                    el_cfg.api_key = String::new();
                 }
+                if let Err(e) = save_config(&clean_config) {
+                    tracing::warn!("Failed to clean ElevenLabs key from config.json: {e}");
+                }
+                tracing::info!("Migrated ElevenLabs API key to OS keychain");
             }
         }
 
         // Migrate Azure TTS API key from config to keychain
         if let Some(ref az) = config.azure_tts {
-            if !az.api_key.is_empty() {
-                if let Ok(()) = save_api_key_secure("azure_tts", &az.api_key) {
-                    let mut clean_config = load_config();
-                    if let Some(ref mut az_cfg) = clean_config.azure_tts {
-                        az_cfg.api_key = String::new();
-                    }
-                    if let Err(e) = save_config(&clean_config) {
-                        tracing::warn!("Failed to clean Azure TTS key from config.json: {e}");
-                    }
-                    tracing::info!("Migrated Azure TTS API key to OS keychain");
+            if !az.api_key.is_empty() && save_api_key_secure("azure_tts", &az.api_key) {
+                let mut clean_config = load_config();
+                if let Some(ref mut az_cfg) = clean_config.azure_tts {
+                    az_cfg.api_key = String::new();
                 }
+                if let Err(e) = save_config(&clean_config) {
+                    tracing::warn!("Failed to clean Azure TTS key from config.json: {e}");
+                }
+                tracing::info!("Migrated Azure TTS API key to OS keychain");
             }
         }
 
@@ -224,7 +229,7 @@ impl AppState {
 
 #[tauri::command]
 pub fn get_telemetry_enabled() -> bool {
-    load_config().telemetry_enabled.unwrap_or(false)
+    load_config().telemetry_enabled.unwrap_or(true)
 }
 
 #[tauri::command]
@@ -288,8 +293,14 @@ pub async fn set_api_key(
     keys.insert(provider.clone(), key.clone());
     drop(keys);
 
-    // Persist to OS keychain
-    save_api_key_secure(&provider.to_string(), &key)?;
+    // Persist: try OS keychain first, fall back to config.json
+    let provider_str = provider.to_string();
+    if !save_api_key_secure(&provider_str, &key) {
+        // Keychain unavailable — persist to config.json
+        let mut config = load_config();
+        config.api_keys.insert(provider_str, key);
+        save_config(&config)?;
+    }
 
     Ok(())
 }
@@ -630,13 +641,16 @@ pub async fn get_elevenlabs_config(
 pub async fn save_elevenlabs_config(
     config: elevenlabs_client::ElevenLabsConfig,
 ) -> Result<(), NarratorError> {
-    // Store API key in OS keychain
-    save_api_key_secure("elevenlabs", &config.api_key)?;
+    // Try OS keychain; if it fails, keep key in JSON
+    let keychain_ok = save_api_key_secure("elevenlabs", &config.api_key);
 
-    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.elevenlabs = Some(ElevenLabsPersisted {
-        api_key: String::new(),
+        api_key: if keychain_ok {
+            String::new()
+        } else {
+            config.api_key
+        },
         voice_id: config.voice_id,
         model_id: config.model_id,
         stability: config.stability,
@@ -682,13 +696,16 @@ pub async fn get_azure_tts_config(
 pub async fn save_azure_tts_config(
     config: azure_tts_client::AzureTtsConfig,
 ) -> Result<(), NarratorError> {
-    // Store API key in OS keychain
-    save_api_key_secure("azure_tts", &config.api_key)?;
+    // Try OS keychain; if it fails, keep key in JSON
+    let keychain_ok = save_api_key_secure("azure_tts", &config.api_key);
 
-    // Save non-secret settings to JSON (api_key field is empty)
     let mut persistent = load_config();
     persistent.azure_tts = Some(AzureTtsPersisted {
-        api_key: String::new(),
+        api_key: if keychain_ok {
+            String::new()
+        } else {
+            config.api_key
+        },
         region: config.region,
         voice_name: config.voice_name,
         speaking_style: config.speaking_style,

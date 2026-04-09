@@ -128,14 +128,8 @@ export default function App() {
     // Show first-launch notice if telemetry_enabled has never been set
     getTelemetryEnabled()
       .then(() => {
-        // Check if this might be first launch by seeing if config exists
-        // The backend returns true by default, so we show notice once
-        const noticeKey = "narrator_telemetry_notice_shown";
-        if (!localStorage.getItem(noticeKey)) {
-          setShowTelemetryNotice(true);
-          localStorage.setItem(noticeKey, "1");
-          setTimeout(() => setShowTelemetryNotice(false), 8000);
-        }
+        // Telemetry is enabled by default; can be disabled in Settings.
+        // Notice popup is disabled — no user prompt needed.
       })
       .catch(() => {});
   }, []);
