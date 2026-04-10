@@ -16,6 +16,7 @@ pub const SAVE_PROJECT: &str = "save_project";
 pub const OPEN_SETTINGS: &str = "open_settings";
 pub const NARRATOR_HELP: &str = "narrator_help";
 pub const SEND_FEEDBACK: &str = "send_feedback";
+pub const ABOUT_NARRATOR: &str = "about_narrator";
 pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
 /// Prefix for dynamic "Open Recent" items — full ID is "recent:<project_id>"
 pub const RECENT_PREFIX: &str = "recent:";
@@ -109,10 +110,12 @@ pub fn set_native_help_menu() {
 fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
     // ── Narrator ──
     let app_menu = Submenu::new(app, "Narrator", true)?;
-    app_menu.append(&PredefinedMenuItem::about(
+    app_menu.append(&MenuItem::with_id(
         app,
-        Some("About Narrator"),
-        None,
+        ABOUT_NARRATOR,
+        "About Narrator",
+        true,
+        None::<&str>,
     )?)?;
     app_menu.append(&MenuItem::with_id(
         app,
@@ -292,10 +295,12 @@ fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
 
     // ── &Help ──
     let help_menu = Submenu::new(app, "&Help", true)?;
-    help_menu.append(&PredefinedMenuItem::about(
+    help_menu.append(&MenuItem::with_id(
         app,
-        Some("&About Narrator"),
-        None,
+        ABOUT_NARRATOR,
+        "&About Narrator",
+        true,
+        None::<&str>,
     )?)?;
     help_menu.append(&MenuItem::with_id(
         app,

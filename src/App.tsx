@@ -29,6 +29,7 @@ import { initTelemetry, trackEvent, trackError } from "./features/telemetry/anal
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import { AppMenuBar } from "./components/layout/AppMenuBar";
 import { FeedbackPanel } from "./features/help/FeedbackPanel";
+import { AboutDialog } from "./features/help/AboutDialog";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
@@ -113,6 +114,7 @@ export default function App() {
   }, []);
   const [showHelp, setShowHelp] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
@@ -305,6 +307,9 @@ export default function App() {
         case "send_feedback":
           setShowFeedback(true);
           break;
+        case "about_narrator":
+          setShowAbout(true);
+          break;
         case "toggle_fullscreen": {
           const win = getCurrentWindow();
           const isFs = await win.isFullscreen();
@@ -438,6 +443,7 @@ export default function App() {
       case "open_settings": openSettings(); break;
       case "narrator_help": setShowHelp(true); break;
       case "send_feedback": setShowFeedback(true); break;
+      case "about_narrator": setShowAbout(true); break;
       case "check_for_updates": { const { check } = await import("@tauri-apps/plugin-updater"); check().catch(() => {}); break; }
       case "toggle_fullscreen": {
         const win = getCurrentWindow();
@@ -504,6 +510,7 @@ export default function App() {
         </>
       )}
       {showFeedback && <FeedbackPanel onClose={() => setShowFeedback(false)} />}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}

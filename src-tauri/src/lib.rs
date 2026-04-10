@@ -82,6 +82,7 @@ pub fn run() {
                     | menu::OPEN_SETTINGS
                     | menu::NARRATOR_HELP
                     | menu::SEND_FEEDBACK
+                    | menu::ABOUT_NARRATOR
                     | menu::CHECK_FOR_UPDATES
                     | "toggle_fullscreen" => {
                         let _ = app.emit("menu-event", id);
