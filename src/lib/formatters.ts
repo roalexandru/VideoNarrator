@@ -18,3 +18,13 @@ export function formatDuration(seconds: number): string {
   if (m === 0) return `${s}s`;
   return `${m}m ${s}s`;
 }
+
+/** Strip Windows \\?\ extended-length path prefix and extract filename. */
+export function cleanPath(path: string): string {
+  return path.replace(/^\\\\\?\\/, "");
+}
+
+export function fileNameFromPath(path: string): string {
+  const clean = cleanPath(path);
+  return clean.split(/[/\\]/).pop() || "video";
+}
