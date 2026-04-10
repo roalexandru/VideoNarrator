@@ -191,22 +191,34 @@ pub fn load_project_full(id: &str) -> Result<LoadedProject, NarratorError> {
 
     if scripts_dir.exists() {
         if let Ok(entries) = std::fs::read_dir(&scripts_dir) {
-            // For each language, load the latest version
-            let mut files: Vec<_> = entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .collect();
-            files.sort_by_key(|e| e.file_name());
+            // First pass: find the latest filename per language (avoids reading old versions)
+            let mut latest_per_lang: std::collections::HashMap<String, (String, PathBuf)> =
+                std::collections::HashMap::new();
 
-            for entry in files {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if let Some(stem) = name.strip_suffix(".json") {
-                    if let Some(lang) = stem.split('_').next_back() {
-                        if let Ok(json) = std::fs::read_to_string(entry.path()) {
-                            if let Ok(script) = serde_json::from_str::<NarrationScript>(&json) {
-                                scripts.insert(lang.to_string(), script);
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|x| x == "json") {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if let Some(stem) = name.strip_suffix(".json") {
+                        if let Some(lang) = stem.split('_').next_back() {
+                            let lang = lang.to_string();
+                            let should_replace = match latest_per_lang.get(&lang) {
+                                Some((existing_name, _)) => name > *existing_name,
+                                None => true,
+                            };
+                            if should_replace {
+                                latest_per_lang.insert(lang, (name, path));
                             }
                         }
+                    }
+                }
+            }
+
+            // Second pass: only read the latest file per language
+            for (lang, (_name, path)) in latest_per_lang {
+                if let Ok(json) = std::fs::read_to_string(&path) {
+                    if let Ok(script) = serde_json::from_str::<NarrationScript>(&json) {
+                        scripts.insert(lang, script);
                     }
                 }
             }
@@ -477,6 +489,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
             edit_clips: None,
+            video_metadata: None,
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();

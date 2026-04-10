@@ -1,6 +1,7 @@
 //! Screen recording: macOS native screencapture, Windows ffmpeg gdigrab with overlay.
 
 use crate::error::NarratorError;
+use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use std::path::PathBuf;
 
@@ -120,35 +121,28 @@ pub async fn start_segment(
     let fps_str = fps.to_string();
 
     let mut cmd = tokio::process::Command::new(ffmpeg.as_os_str());
-    cmd.args([
-        "-y",
-        "-f",
-        "gdigrab",
-        "-framerate",
-        &fps_str,
-        "-i",
-        "desktop",
-        "-vcodec",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-pix_fmt",
-        "yuv420p",
-        "-g",
-        &gop_size,
-        &segment_path,
-    ])
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null());
-
-    // Hide the console window on Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    cmd.no_window()
+        .args([
+            "-y",
+            "-f",
+            "gdigrab",
+            "-framerate",
+            &fps_str,
+            "-i",
+            "desktop",
+            "-vcodec",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            &gop_size,
+            &segment_path,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
 
     let child = cmd
         .spawn()
@@ -235,6 +229,7 @@ pub async fn concatenate_segments(
     );
 
     let output = tokio::process::Command::new(ffmpeg.as_os_str())
+        .no_window()
         .args([
             "-y",
             "-f",

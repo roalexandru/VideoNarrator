@@ -43,6 +43,39 @@ pub fn delete_secret(key: &str) -> Result<(), NarratorError> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore] // Requires system keychain (D-Bus secret service) — not available in CI
+    fn test_keyring_roundtrip() {
+        // Verify the keyring can write and read back a value on this platform
+        let test_key = "test_roundtrip_key";
+        let test_value = "test_value_12345";
+
+        // Write
+        let write_result = set_secret(test_key, test_value);
+        assert!(
+            write_result.is_ok(),
+            "Keyring write failed: {:?}",
+            write_result.err()
+        );
+
+        // Read
+        let read_result = get_secret(test_key);
+        assert!(
+            read_result.is_ok(),
+            "Keyring read failed: {:?}",
+            read_result.err()
+        );
+        assert_eq!(read_result.unwrap(), Some(test_value.to_string()));
+
+        // Cleanup
+        let _ = delete_secret(test_key);
+    }
+}
+
 /// Migrate keys from a plaintext config HashMap to the keychain.
 /// Returns the number of keys migrated.
 pub fn migrate_from_plaintext(keys: &std::collections::HashMap<String, String>) -> usize {

@@ -2,6 +2,7 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
+use crate::process_utils::CommandNoWindow;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
@@ -26,6 +27,9 @@ struct PersistentConfig {
     elevenlabs: Option<ElevenLabsPersisted>,
     #[serde(default)]
     azure_tts: Option<AzureTtsPersisted>,
+    /// Persisted TTS provider preference ("elevenlabs" or "azure").
+    #[serde(default)]
+    tts_provider: Option<String>,
     /// Whether anonymous telemetry is enabled. Defaults to true when missing (first launch).
     #[serde(default)]
     telemetry_enabled: Option<bool>,
@@ -585,6 +589,7 @@ pub async fn generate_narration(
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         edit_clips: None,
+        video_metadata: None,
     };
     let _ = project_store::create_project(&project_config);
     let _ = project_store::save_script(&project_id, &params.primary_language, &script);
@@ -767,6 +772,29 @@ pub async fn validate_azure_tts_key(
 #[tauri::command]
 pub async fn list_builtin_voices() -> Result<Vec<builtin_tts::BuiltinVoice>, NarratorError> {
     builtin_tts::list_voices().await
+}
+
+// ── TTS provider preference ──
+
+#[tauri::command]
+pub async fn get_tts_provider() -> Result<Option<String>, NarratorError> {
+    let config = load_config();
+    // Return persisted preference, or auto-detect from which provider has a key
+    if let Some(provider) = config.tts_provider {
+        return Ok(Some(provider));
+    }
+    // Auto-detect: if azure_tts is configured but elevenlabs is not, default to azure
+    if config.azure_tts.is_some() && config.elevenlabs.is_none() {
+        return Ok(Some("azure".to_string()));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub async fn save_tts_provider(provider: String) -> Result<(), NarratorError> {
+    let mut config = load_config();
+    config.tts_provider = Some(provider);
+    save_config(&config)
 }
 
 // ── TTS generation command ──
@@ -993,6 +1021,7 @@ pub async fn generate_tts(
                     let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
                     let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                     let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                        .no_window()
                         .args(["-y", "-f", "lavfi", "-i"])
                         .arg(&anullsrc)
                         .args([
@@ -1030,6 +1059,7 @@ pub async fn generate_tts(
                 let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
                 let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
                 let _ = tokio::process::Command::new(ffmpeg.as_os_str())
+                    .no_window()
                     .args(["-y", "-f", "lavfi", "-i"])
                     .arg(&anullsrc)
                     .args([
@@ -1066,6 +1096,7 @@ pub async fn generate_tts(
 
             // Run concat
             let concat_output = tokio::process::Command::new(ffmpeg.as_os_str())
+                .no_window()
                 .args(["-y", "-f", "concat", "-safe", "0", "-i"])
                 .arg(concat_list_path.as_os_str())
                 .args(["-codec:a", "libmp3lame", "-q:a", "2"])
@@ -1200,16 +1231,7 @@ pub async fn start_screen_recording(
     *state.output_dir.lock().await = Some(out_dir.clone());
     *state.output_path.lock().await = Some(final_path);
 
-    // Start the first recording segment
-    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0, 30).await?;
-    *state.ffmpeg_child.lock().await = Some(child);
-    state.segments.lock().await.push(segment_path);
-    state
-        .segment_counter
-        .store(1, std::sync::atomic::Ordering::SeqCst);
-    *state.phase.lock().await = RecordingPhase::Recording;
-
-    // Create the overlay window
+    // Create the overlay window FIRST so users see immediate feedback
     #[cfg(target_os = "windows")]
     {
         use tauri::WebviewWindowBuilder;
@@ -1251,6 +1273,21 @@ pub async fn start_screen_recording(
     {
         let _ = &app;
         tracing::warn!("start_screen_recording called on non-Windows platform");
+    }
+
+    // Start the first recording segment (FFmpeg gdigrab init takes ~1-2s)
+    let (child, segment_path) = screen_recorder::start_segment(&out_dir, 0, 30).await?;
+    *state.ffmpeg_child.lock().await = Some(child);
+    state.segments.lock().await.push(segment_path);
+    state
+        .segment_counter
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    *state.phase.lock().await = RecordingPhase::Recording;
+
+    // Notify the overlay that recording has actually started
+    {
+        use tauri::Emitter;
+        let _ = app.emit("recording-started", ());
     }
 
     Ok(())

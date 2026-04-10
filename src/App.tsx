@@ -24,10 +24,14 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
-import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled } from "./lib/tauri/commands";
+import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsProvider } from "./lib/tauri/commands";
 import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
+import { AppMenuBar } from "./components/layout/AppMenuBar";
+import { FeedbackPanel } from "./features/help/FeedbackPanel";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
+
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
 type AppView = "library" | "editor";
 
@@ -108,6 +112,7 @@ export default function App() {
     setSettingsState({ open: false });
   }, []);
   const [showHelp, setShowHelp] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
@@ -121,7 +126,7 @@ export default function App() {
     invoke("set_menu_context", { hasProject: view === "editor" }).catch(() => {});
   }, [view]);
 
-  // ── Init telemetry on mount ──
+  // ── Init telemetry + TTS provider preference on mount ──
   useEffect(() => {
     initTelemetry().then(() => {
       trackEvent("app_launched", {
@@ -136,6 +141,14 @@ export default function App() {
       .then(() => {
         // Telemetry is enabled by default; can be disabled in Settings.
         // Notice popup is disabled — no user prompt needed.
+      })
+      .catch(() => {});
+    // Restore persisted TTS provider preference
+    getTtsProvider()
+      .then((provider) => {
+        if (provider === "azure" || provider === "elevenlabs") {
+          useConfigStore.getState().setTtsProvider(provider);
+        }
       })
       .catch(() => {});
   }, []);
@@ -206,6 +219,15 @@ export default function App() {
       created_at: ps.createdAt || now,
       updated_at: now,
       edit_clips: editClips,
+      video_metadata: ps.videoFile ? {
+        path: ps.videoFile.path,
+        duration_seconds: ps.videoFile.duration,
+        width: ps.videoFile.resolution.width,
+        height: ps.videoFile.resolution.height,
+        codec: ps.videoFile.codec,
+        fps: ps.videoFile.fps,
+        file_size: ps.videoFile.size,
+      } : null,
     };
   }, []);
 
@@ -280,6 +302,9 @@ export default function App() {
         case "narrator_help":
           setShowHelp(true);
           break;
+        case "send_feedback":
+          setShowFeedback(true);
+          break;
         case "toggle_fullscreen": {
           const win = getCurrentWindow();
           const isFs = await win.isFullscreen();
@@ -311,19 +336,36 @@ export default function App() {
       ps.setDescription(cfg.description);
       ps.setCreatedAt(cfg.created_at);
 
-      try {
-        const meta = await probeVideo(cfg.video_path);
+      // Use cached video metadata if available; only probe as a fallback
+      const cachedMeta = cfg.video_metadata;
+      if (cachedMeta) {
         ps.setVideoFile({
-          path: meta.path, name: meta.path.split("/").pop() || "video",
-          size: meta.file_size, duration: meta.duration_seconds,
-          resolution: { width: meta.width, height: meta.height },
-          codec: meta.codec, fps: meta.fps,
+          path: cachedMeta.path, name: cachedMeta.path.split("/").pop() || "video",
+          size: cachedMeta.file_size, duration: cachedMeta.duration_seconds,
+          resolution: { width: cachedMeta.width, height: cachedMeta.height },
+          codec: cachedMeta.codec, fps: cachedMeta.fps,
         });
-      } catch {
-        ps.setVideoFile({
-          path: cfg.video_path, name: cfg.video_path.split("/").pop() || "video",
-          size: 0, duration: 0, resolution: { width: 0, height: 0 }, codec: "unknown", fps: 0,
-        });
+      } else {
+        try {
+          const meta = await probeVideo(cfg.video_path);
+          ps.setVideoFile({
+            path: meta.path, name: meta.path.split("/").pop() || "video",
+            size: meta.file_size, duration: meta.duration_seconds,
+            resolution: { width: meta.width, height: meta.height },
+            codec: meta.codec, fps: meta.fps,
+          });
+          // Cache the probed metadata so subsequent loads are fast
+          try {
+            await saveProject({ ...cfg, video_metadata: meta });
+          } catch {
+            // Non-critical: metadata will be probed again next load
+          }
+        } catch {
+          ps.setVideoFile({
+            path: cfg.video_path, name: cfg.video_path.split("/").pop() || "video",
+            size: 0, duration: 0, resolution: { width: 0, height: 0 }, codec: "unknown", fps: 0,
+          });
+        }
       }
 
       const cs = useConfigStore.getState();
@@ -384,6 +426,33 @@ export default function App() {
     }
   };
 
+  // Handler for the custom Windows menu bar — mirrors the native menu event handler
+  const handleMenuAction = useCallback(async (id: string) => {
+    switch (id) {
+      case "new_project": handleNewProject(); break;
+      case "open_project":
+        if (view === "editor") { pendingAction.current = "open"; setShowNewConfirm(true); }
+        else setView("library");
+        break;
+      case "save_project": await handleSaveProject(); break;
+      case "open_settings": openSettings(); break;
+      case "narrator_help": setShowHelp(true); break;
+      case "send_feedback": setShowFeedback(true); break;
+      case "check_for_updates": { const { check } = await import("@tauri-apps/plugin-updater"); check().catch(() => {}); break; }
+      case "toggle_fullscreen": {
+        const win = getCurrentWindow();
+        const isFs = await win.isFullscreen();
+        await win.setFullscreen(!isFs);
+        break;
+      }
+      default:
+        if (id.startsWith("recent:")) {
+          const pid = id.slice(7);
+          if (pid) handleOpenProject(pid);
+        }
+    }
+  }, [view, handleNewProject, handleSaveProject, openSettings, handleOpenProject]);
+
   const settingsEl = settingsState.open && (
     <SettingsPanel
       onClose={closeSettings}
@@ -395,6 +464,7 @@ export default function App() {
 
   return (
     <SettingsProvider value={openSettings}>
+      {IS_WINDOWS && <AppMenuBar onMenuAction={handleMenuAction} hasProject={view === "editor" && !!videoFile} />}
       {view === "library" ? (
         <>
           <ProjectLibrary onNewProject={handleNewProject} onOpenProject={handleOpenProject} onOpenSettings={() => openSettings()} />
@@ -433,6 +503,7 @@ export default function App() {
           )}
         </>
       )}
+      {showFeedback && <FeedbackPanel onClose={() => setShowFeedback(false)} />}
       {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}

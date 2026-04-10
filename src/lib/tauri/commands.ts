@@ -91,6 +91,7 @@ export interface LoadedProject {
     created_at: string;
     updated_at: string;
     edit_clips?: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null }[];
+    video_metadata?: VideoMetadata;
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
 }
@@ -188,6 +189,10 @@ export interface BuiltinVoice {
 
 export const listBuiltinVoices = () =>
   invoke<BuiltinVoice[]>("list_builtin_voices");
+
+// TTS provider preference
+export const getTtsProvider = () => invoke<string | null>("get_tts_provider");
+export const saveTtsProvider = (provider: string) => invoke<void>("save_tts_provider", { provider });
 
 // Export
 export const exportScript = (options: ExportOptions) =>

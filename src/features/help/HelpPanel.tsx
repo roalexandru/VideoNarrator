@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback } from "react";
 import { colors, typography } from "../../lib/theme";
 import { Button } from "../../components/ui/Button";
 import { checkFfmpeg } from "../../lib/tauri/commands";
-import { trackEvent } from "../telemetry/analytics";
 
 const isMac = navigator.platform.toUpperCase().includes("MAC");
 
@@ -93,9 +92,6 @@ const sections = [
 export function HelpPanel({ onClose, onShowPrivacyPolicy, onShowTerms }: { onClose: () => void; onShowPrivacyPolicy?: () => void; onShowTerms?: () => void }) {
   const [expanded, setExpanded] = useState<string | null>(sections[0].items[0].q);
   const [ffmpegStatus, setFfmpegStatus] = useState<string | null>(null);
-  const [feedbackText, setFeedbackText] = useState("");
-  const [feedbackType, setFeedbackType] = useState<"bug" | "feature" | "general">("general");
-  const [feedbackSent, setFeedbackSent] = useState(false);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") onClose();
@@ -208,65 +204,6 @@ export function HelpPanel({ onClose, onShowPrivacyPolicy, onShowTerms }: { onClo
               </div>
             </div>
           ))}
-        </div>
-
-        {/* Send Feedback */}
-        <div style={{ marginTop: 8, flexShrink: 0 }}>
-          <h3 style={{ ...typography.sectionLabel, color: colors.accent.primary, marginBottom: 10 }}>Send Feedback</h3>
-          {feedbackSent ? (
-            <div style={{ padding: "14px 16px", borderRadius: 8, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", fontSize: 13, color: "#22c55e", fontWeight: 600 }}>
-              Thanks for your feedback!
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", gap: 6 }}>
-                {(["bug", "feature", "general"] as const).map((t) => (
-                  <button key={t} onClick={() => setFeedbackType(t)} style={{
-                    padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
-                    border: feedbackType === t ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${colors.border.default}`,
-                    background: feedbackType === t ? "rgba(99,102,241,0.1)" : colors.bg.input,
-                    color: feedbackType === t ? colors.accent.primary : colors.text.muted,
-                    textTransform: "capitalize",
-                  }}>{t === "bug" ? "Bug Report" : t === "feature" ? "Feature Request" : "General"}</button>
-                ))}
-              </div>
-              <textarea
-                value={feedbackText}
-                onChange={(e) => setFeedbackText(e.target.value)}
-                placeholder="Describe your feedback, issue, or idea..."
-                rows={3}
-                style={{
-                  width: "100%", padding: "10px 12px", borderRadius: 8, fontSize: 13,
-                  background: colors.bg.input, border: `1px solid ${colors.border.default}`,
-                  color: colors.text.primary, outline: "none", fontFamily: "inherit",
-                  resize: "none", lineHeight: 1.5,
-                }}
-                onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"}
-                onBlur={(e) => e.target.style.borderColor = colors.border.default}
-                maxLength={4000}
-              />
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: colors.text.muted }}>{feedbackText.length}/4000</span>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={!feedbackText.trim()}
-                  onClick={() => {
-                    trackEvent("feedback", {
-                      type: feedbackType,
-                      message: feedbackText.trim().slice(0, 4000),
-                      os: navigator.platform,
-                      screen_width: window.screen.width,
-                      screen_height: window.screen.height,
-                    });
-                    setFeedbackText("");
-                    setFeedbackSent(true);
-                    setTimeout(() => setFeedbackSent(false), 5000);
-                  }}
-                >Send Feedback</Button>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Legal */}

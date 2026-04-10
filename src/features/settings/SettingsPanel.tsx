@@ -11,6 +11,7 @@ import {
   saveAzureTtsConfig,
   listAzureTtsVoices,
   validateAzureTtsKey,
+  saveTtsProvider,
   getTelemetryEnabled,
   setTelemetryEnabled as setTelemetrySetting,
   listBuiltinVoices,
@@ -326,6 +327,9 @@ export function SettingsPanel({
       setElHasKey(true);
       setElKeyInput("");
       setSaved("elevenlabs");
+      // Auto-switch to ElevenLabs provider when saving ElevenLabs key
+      setTtsProvider("elevenlabs");
+      saveTtsProvider("elevenlabs").catch(() => {});
       setTimeout(() => setSaved(null), 2000);
       trackEvent("api_key_saved", { provider: "elevenlabs" });
     } catch (err: unknown) {
@@ -366,6 +370,9 @@ export function SettingsPanel({
       setAzHasKey(true);
       setAzKeyInput("");
       setSaved("azure");
+      // Auto-switch to Azure provider when saving Azure key
+      setTtsProvider("azure");
+      saveTtsProvider("azure").catch(() => {});
       setTimeout(() => setSaved(null), 2000);
       trackEvent("api_key_saved", { provider: "azure_tts", region: azRegionInput });
     } catch (err: unknown) {
@@ -1050,6 +1057,7 @@ export function SettingsPanel({
 
     const handleTtsSwitch = (id: "elevenlabs" | "azure" | "builtin") => {
       setTtsProvider(id);
+      saveTtsProvider(id).catch(() => {});
       if (id === "elevenlabs" && elVoices.length === 0 && elHasKey)
         loadElVoices();
       if (id === "azure" && azVoices.length === 0 && azHasKey) loadAzVoices();

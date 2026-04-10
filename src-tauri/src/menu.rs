@@ -1,5 +1,8 @@
 //! Native application menu builder for Narrator.
 //! Uses `#[cfg]` for strict platform separation.
+//! On Windows/Linux, the native menu is replaced by a custom webview menu bar,
+//! so these functions are only called on macOS.
+#![allow(dead_code)]
 
 use tauri::{
     menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu},
@@ -12,6 +15,7 @@ pub const OPEN_PROJECT: &str = "open_project";
 pub const SAVE_PROJECT: &str = "save_project";
 pub const OPEN_SETTINGS: &str = "open_settings";
 pub const NARRATOR_HELP: &str = "narrator_help";
+pub const SEND_FEEDBACK: &str = "send_feedback";
 pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
 /// Prefix for dynamic "Open Recent" items — full ID is "recent:<project_id>"
 pub const RECENT_PREFIX: &str = "recent:";
@@ -20,6 +24,7 @@ pub const RECENT_PREFIX: &str = "recent:";
 const PROJECT_ITEMS: &[&str] = &[SAVE_PROJECT];
 
 /// Build the native application menu for the current platform.
+#[allow(dead_code)]
 pub fn build(app: &App) -> tauri::Result<Menu<Wry>> {
     let menu = Menu::new(app)?;
 
@@ -200,6 +205,13 @@ fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?)?;
+    help_menu.append(&MenuItem::with_id(
+        app,
+        SEND_FEEDBACK,
+        "Send Feedback…",
+        true,
+        None::<&str>,
+    )?)?;
     menu.append(&help_menu)?;
 
     Ok(())
@@ -208,6 +220,7 @@ fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
 // ─── Windows / Linux ─────────────────────────────────────────────────────────
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
     // ── &File ──  (& prefix = Windows mnemonic/access key)
     let file_menu = Submenu::new(app, "&File", true)?;
@@ -298,6 +311,13 @@ fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         "Narrator &Help",
         true,
         Some("F1"),
+    )?)?;
+    help_menu.append(&MenuItem::with_id(
+        app,
+        SEND_FEEDBACK,
+        "Send &Feedback…",
+        true,
+        None::<&str>,
     )?)?;
     menu.append(&help_menu)?;
 
