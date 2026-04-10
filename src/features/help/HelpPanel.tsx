@@ -36,7 +36,23 @@ const sections = [
       },
       {
         q: "Multi-language narration",
-        a: "Select multiple languages in Configuration before generating. The primary language is generated first from video frames; additional languages are translated from it. You can switch between languages in the Review step to edit each independently.",
+        a: "Select multiple languages in Configuration before generating. The primary language is generated first from video frames; additional languages are translated from it. You can switch between languages in the Review step to edit each independently.\n\nYou can also translate a script after generation: click \"+ Translate\" in the Review step, select a target language, and the AI will translate the entire script.",
+      },
+      {
+        q: "Drag-and-drop import",
+        a: "Drag video files (MP4, MOV, AVI, MKV, WebM) or context documents (Markdown, TXT, PDF) directly onto the Project Setup screen to import them. A drop zone indicator appears when dragging files over the app.",
+      },
+      {
+        q: "Undo and redo",
+        a: `Use ${isMac ? "⌘Z" : "Ctrl+Z"} to undo and ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"} to redo script edits in the Review step. This covers text changes, timing adjustments, segment deletions, splits, and merges.`,
+      },
+      {
+        q: "Subtitle customization",
+        a: "When exporting video with burned subtitles, you can customize the appearance: font size, text color, outline color and width, and position (top or bottom). These controls appear when you enable \"Burn subtitles into video\" in the Export step.",
+      },
+      {
+        q: "Segment timing",
+        a: "Click the timestamp on any segment in the Review step to fine-tune its start and end times. The editor validates that times don't overlap with adjacent segments.",
       },
       {
         q: "Auto-updates",

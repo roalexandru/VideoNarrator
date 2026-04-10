@@ -1561,7 +1561,10 @@ pub async fn burn_subtitles(
     srt_content: String,
     output_path: String,
     channel: Channel<ProgressEvent>,
+    style: Option<video_edit::SubtitleStyle>,
 ) -> Result<String, NarratorError> {
+    let style = style.unwrap_or_default();
+
     // Write SRT to temp file, then burn
     let out_dir = std::path::Path::new(&output_path)
         .parent()
@@ -1574,6 +1577,7 @@ pub async fn burn_subtitles(
         &video_path,
         &srt_path.to_string_lossy(),
         &output_path,
+        &style,
         |pct| {
             channel.send(ProgressEvent::Progress { percent: pct }).ok();
         },

@@ -198,8 +198,16 @@ export const saveTtsProvider = (provider: string) => invoke<void>("save_tts_prov
 export const exportScript = (options: ExportOptions) =>
   invoke<ExportResult[]>("export_script", { options });
 
-export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string, channel: Channel<import("../../types/processing").ProgressEvent>) =>
-  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath, channel });
+export interface SubtitleStyle {
+  font_size: number;
+  color: string;
+  outline_color: string;
+  outline: number;
+  position: string;
+}
+
+export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string, channel: Channel<import("../../types/processing").ProgressEvent>, style?: SubtitleStyle) =>
+  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath, channel, style });
 
 // Styles
 export const listStyles = () =>

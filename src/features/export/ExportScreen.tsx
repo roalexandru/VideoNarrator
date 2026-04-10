@@ -259,7 +259,13 @@ export function ExportScreen() {
         burnChannel.onmessage = (e: ProgressEvent) => {
           if (e.kind === "progress") setVideoProgress(85 + e.percent * 0.15); // 85-100%
         };
-        await burnSubtitles(mergedPath, srtContent, finalPath, burnChannel);
+        await burnSubtitles(mergedPath, srtContent, finalPath, burnChannel, {
+          font_size: exp.subtitleFontSize,
+          color: exp.subtitleColor,
+          outline_color: exp.subtitleOutlineColor,
+          outline: exp.subtitleOutline,
+          position: exp.subtitlePosition,
+        });
       } else {
         // Merge directly to final path
         const mergeChannel = new Channel<ProgressEvent>();
@@ -438,6 +444,103 @@ export function ExportScreen() {
 
             {/* Subtitles */}
             <Toggle checked={exp.burnSubtitles} onChange={exp.setBurnSubtitles} label="Burn subtitles into video" />
+
+            {/* Subtitle style options (visible when burn is on) */}
+            {exp.burnSubtitles && (
+              <div style={{
+                display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px",
+                borderRadius: 8, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`,
+              }}>
+                {/* Font size slider */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Font size</span>
+                  <input
+                    type="range" min={12} max={48} value={exp.subtitleFontSize}
+                    onChange={(e) => exp.setSubtitleFontSize(Number(e.target.value))}
+                    style={{ flex: 1, accentColor: C.accent }}
+                  />
+                  <span style={{ fontSize: 11, color: C.dim, minWidth: 24, textAlign: "right" }}>{exp.subtitleFontSize}</span>
+                </div>
+
+                {/* Text color presets */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Color</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {([
+                      { value: "#ffffff", label: "White" },
+                      { value: "#ffff00", label: "Yellow" },
+                      { value: "#00ffff", label: "Cyan" },
+                      { value: "#00ff00", label: "Green" },
+                    ] as const).map((c) => (
+                      <button
+                        key={c.value}
+                        onClick={() => exp.setSubtitleColor(c.value)}
+                        title={c.label}
+                        style={{
+                          width: 22, height: 22, borderRadius: 6, border: exp.subtitleColor === c.value
+                            ? `2px solid ${C.accent}` : `1px solid ${C.border}`,
+                          background: c.value, cursor: "pointer", padding: 0,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {/* Outline color presets */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Outline</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {([
+                      { value: "#000000", label: "Black" },
+                      { value: "#333333", label: "Dark gray" },
+                      { value: "#00000000", label: "None" },
+                    ] as const).map((c) => (
+                      <button
+                        key={c.value}
+                        onClick={() => exp.setSubtitleOutlineColor(c.value)}
+                        title={c.label}
+                        style={{
+                          width: 22, height: 22, borderRadius: 6, border: exp.subtitleOutlineColor === c.value
+                            ? `2px solid ${C.accent}` : `1px solid ${C.border}`,
+                          background: c.value === "#00000000"
+                            ? "repeating-conic-gradient(#555 0% 25%, #888 0% 50%) 50% / 8px 8px"
+                            : c.value,
+                          cursor: "pointer", padding: 0,
+                        }}
+                      />
+                    ))}
+                  </div>
+                  {/* Outline width slider */}
+                  <input
+                    type="range" min={0} max={5} value={exp.subtitleOutline}
+                    onChange={(e) => exp.setSubtitleOutline(Number(e.target.value))}
+                    style={{ flex: 1, accentColor: C.accent }}
+                  />
+                  <span style={{ fontSize: 11, color: C.dim, minWidth: 16, textAlign: "right" }}>{exp.subtitleOutline}</span>
+                </div>
+
+                {/* Position toggle */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Position</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {(["bottom", "top"] as const).map((pos) => (
+                      <button
+                        key={pos}
+                        onClick={() => exp.setSubtitlePosition(pos)}
+                        style={{
+                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                          border: exp.subtitlePosition === pos
+                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                          background: exp.subtitlePosition === pos ? C.accentDim : "transparent",
+                          color: exp.subtitlePosition === pos ? C.accent : C.muted,
+                          cursor: "pointer",
+                        }}
+                      >{pos.charAt(0).toUpperCase() + pos.slice(1)}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Voice summary */}
             <div style={{
