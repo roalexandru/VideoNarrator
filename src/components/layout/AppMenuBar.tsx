@@ -111,6 +111,7 @@ export function AppMenuBar({ onMenuAction, hasProject = false }: Props) {
         { id: "check_for_updates", label: "Check for Updates..." },
         { id: "_sep1", label: "", separator: true },
         { id: "narrator_help", label: "Narrator Help", shortcut: "F1" },
+        { id: "send_feedback", label: "Send Feedback..." },
       ],
     },
   ];

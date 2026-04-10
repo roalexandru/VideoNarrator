@@ -431,7 +431,7 @@ export default function App() {
         break;
       case "save_project": await handleSaveProject(); break;
       case "open_settings": openSettings(); break;
-      case "narrator_help": setShowHelp(true); break;
+      case "narrator_help": case "send_feedback": setShowHelp(true); break;
       case "check_for_updates": { const { check } = await import("@tauri-apps/plugin-updater"); check().catch(() => {}); break; }
       case "toggle_fullscreen": {
         const win = getCurrentWindow();
