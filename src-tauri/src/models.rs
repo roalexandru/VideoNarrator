@@ -355,6 +355,7 @@ mod tests {
                 pace: Pace::Slow,
                 pause_after_ms: 200,
                 frame_refs: vec![0, 1],
+                voice_override: None,
             }],
             metadata: ScriptMetadata {
                 style: "technical".to_string(),

@@ -189,6 +189,7 @@ mod tests {
                     pace: Pace::Slow,
                     pause_after_ms: 500,
                     frame_refs: vec![0],
+                    voice_override: None,
                 },
                 Segment {
                     index: 1,
@@ -200,6 +201,7 @@ mod tests {
                     pace: Pace::Medium,
                     pause_after_ms: 300,
                     frame_refs: vec![1, 2],
+                    voice_override: None,
                 },
                 Segment {
                     index: 2,
@@ -211,6 +213,7 @@ mod tests {
                     pace: Pace::Slow,
                     pause_after_ms: 0,
                     frame_refs: vec![3],
+                    voice_override: None,
                 },
             ],
             metadata: ScriptMetadata {
@@ -314,6 +317,7 @@ mod tests {
                     pace: Pace::Medium,
                     pause_after_ms: 500,
                     frame_refs: vec![0],
+                    voice_override: None,
                 },
                 Segment {
                     index: 1,
@@ -325,6 +329,7 @@ mod tests {
                     pace: Pace::Fast,
                     pause_after_ms: 0,
                     frame_refs: vec![1],
+                    voice_override: None,
                 },
             ],
             metadata: ScriptMetadata {
