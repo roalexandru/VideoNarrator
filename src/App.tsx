@@ -29,6 +29,7 @@ import { initTelemetry, trackEvent, trackError } from "./features/telemetry/anal
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import { AppMenuBar } from "./components/layout/AppMenuBar";
 import { FeedbackPanel } from "./features/help/FeedbackPanel";
+import { AboutDialog } from "./features/help/AboutDialog";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
@@ -113,6 +114,7 @@ export default function App() {
   }, []);
   const [showHelp, setShowHelp] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
@@ -305,6 +307,9 @@ export default function App() {
         case "send_feedback":
           setShowFeedback(true);
           break;
+        case "about_narrator":
+          setShowAbout(true);
+          break;
         case "toggle_fullscreen": {
           const win = getCurrentWindow();
           const isFs = await win.isFullscreen();
@@ -339,8 +344,10 @@ export default function App() {
       // Use cached video metadata if available; only probe as a fallback
       const cachedMeta = cfg.video_metadata;
       if (cachedMeta) {
+        const { cleanPath, fileNameFromPath } = await import("./lib/formatters");
+        const cleanedPath = cleanPath(cachedMeta.path);
         ps.setVideoFile({
-          path: cachedMeta.path, name: cachedMeta.path.split("/").pop() || "video",
+          path: cleanedPath, name: fileNameFromPath(cachedMeta.path),
           size: cachedMeta.file_size, duration: cachedMeta.duration_seconds,
           resolution: { width: cachedMeta.width, height: cachedMeta.height },
           codec: cachedMeta.codec, fps: cachedMeta.fps,
@@ -348,8 +355,9 @@ export default function App() {
       } else {
         try {
           const meta = await probeVideo(cfg.video_path);
+          const { fileNameFromPath: fname } = await import("./lib/formatters");
           ps.setVideoFile({
-            path: meta.path, name: meta.path.split("/").pop() || "video",
+            path: meta.path, name: fname(meta.path),
             size: meta.file_size, duration: meta.duration_seconds,
             resolution: { width: meta.width, height: meta.height },
             codec: meta.codec, fps: meta.fps,
@@ -361,8 +369,9 @@ export default function App() {
             // Non-critical: metadata will be probed again next load
           }
         } catch {
+          const { fileNameFromPath: fn2 } = await import("./lib/formatters");
           ps.setVideoFile({
-            path: cfg.video_path, name: cfg.video_path.split("/").pop() || "video",
+            path: cfg.video_path, name: fn2(cfg.video_path),
             size: 0, duration: 0, resolution: { width: 0, height: 0 }, codec: "unknown", fps: 0,
           });
         }
@@ -438,6 +447,7 @@ export default function App() {
       case "open_settings": openSettings(); break;
       case "narrator_help": setShowHelp(true); break;
       case "send_feedback": setShowFeedback(true); break;
+      case "about_narrator": setShowAbout(true); break;
       case "check_for_updates": { const { check } = await import("@tauri-apps/plugin-updater"); check().catch(() => {}); break; }
       case "toggle_fullscreen": {
         const win = getCurrentWindow();
@@ -504,6 +514,7 @@ export default function App() {
         </>
       )}
       {showFeedback && <FeedbackPanel onClose={() => setShowFeedback(false)} />}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}

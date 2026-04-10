@@ -2,6 +2,7 @@ import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../../stores/projectStore";
 import { probeVideo, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
+import { fileNameFromPath } from "../../lib/formatters";
 import { trackEvent, trackError } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
@@ -80,7 +81,7 @@ export function ProjectSetupScreen() {
     setProbing(true);
     try {
       const m = await probeVideo(file as string);
-      setVideoFile({ path: m.path, name: m.path.split("/").pop() || "video", size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+      setVideoFile({ path: m.path, name: fileNameFromPath(m.path), size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
       trackEvent("video_imported", { source: "file", duration_s: Math.round(m.duration_seconds), codec: m.codec, width: m.width, height: m.height, fps: Math.round(m.fps), size_mb: Math.round(m.file_size / 1048576) });
     } catch (err) {
       console.error("Probe failed:", err);
