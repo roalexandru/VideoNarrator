@@ -3,7 +3,7 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir, translateScript } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { showToast } from "../../components/ui/Toast";
@@ -73,6 +73,45 @@ export function ReviewScreen() {
 
   // Segment timing editing
   const [editingTiming, setEditingTiming] = useState<number | null>(null);
+
+  // Per-segment AI refinement
+  const [refiningIdx, setRefiningIdx] = useState<number | null>(null);
+  const [refineLoading, setRefineLoading] = useState(false);
+  const [customInstruction, setCustomInstruction] = useState("");
+  const REFINE_PRESETS = [
+    { label: "Make shorter", instruction: "Make this narration segment more concise. Keep the key message but use fewer words." },
+    { label: "Make more detailed", instruction: "Expand this narration segment with more detail and explanation." },
+    { label: "Simplify language", instruction: "Simplify the language to be more accessible. Use shorter sentences and simpler words." },
+    { label: "More professional", instruction: "Make this narration sound more professional and polished." },
+    { label: "More conversational", instruction: "Rewrite in a more casual, conversational tone." },
+  ];
+
+  const handleRefine = useCallback(async (segmentIdx: number, instruction: string) => {
+    if (refineLoading || !segments[segmentIdx]) return;
+    setRefineLoading(true);
+    try {
+      // Build context from surrounding segments
+      const prev = segmentIdx > 0 ? segments[segmentIdx - 1].text : "";
+      const next = segmentIdx < segments.length - 1 ? segments[segmentIdx + 1].text : "";
+      const context = [prev && `Previous: "${prev}"`, next && `Next: "${next}"`].filter(Boolean).join("\n");
+
+      const refined = await refineSegment(
+        segments[segmentIdx].text,
+        instruction,
+        context,
+        { provider: aiProvider, model: aiModel, temperature: aiTemperature },
+      );
+      updateSegmentText(activeLanguage, segmentIdx, refined);
+      setRefiningIdx(null);
+      setCustomInstruction("");
+      trackEvent("segment_refined", { instruction_type: instruction.length > 60 ? "custom" : "preset" });
+      showToast("Segment refined", "success");
+    } catch (err) {
+      showToast(`Refinement failed: ${String(err)}`, "error");
+    } finally {
+      setRefineLoading(false);
+    }
+  }, [refineLoading, segments, aiProvider, aiModel, aiTemperature, activeLanguage, updateSegmentText]);
 
   // Undo/redo keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z / Cmd+Z / Cmd+Shift+Z)
   useEffect(() => {
@@ -482,6 +521,48 @@ export function ReviewScreen() {
                     >
                       {previewingIdx === i ? "\u25A0 Stop" : "\u25B6 Play"}
                     </button>
+                    <div style={{ position: "relative" }}>
+                      <button onClick={(e) => { e.stopPropagation(); setRefiningIdx(refiningIdx === i ? null : i); }} style={{
+                        fontSize: 11, fontWeight: 500,
+                        color: refiningIdx === i ? "#a78bfa" : "#8b8ba0",
+                        background: refiningIdx === i ? "rgba(167,139,250,0.12)" : "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.06)",
+                        cursor: "pointer", fontFamily: "inherit", padding: "4px 8px", borderRadius: 5,
+                      }}>
+                        {refineLoading && refiningIdx === i ? "..." : "AI"}
+                      </button>
+                      {refiningIdx === i && (
+                        <div onClick={(e) => e.stopPropagation()} style={{
+                          position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
+                          background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
+                          padding: 10, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                        }}>
+                          <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Refine with AI</div>
+                          {REFINE_PRESETS.map((p) => (
+                            <button key={p.label} disabled={refineLoading} onClick={() => handleRefine(i, p.instruction)} style={{
+                              display: "block", width: "100%", textAlign: "left", padding: "5px 8px", borderRadius: 5,
+                              border: "none", background: "transparent", color: C.dim, fontSize: 11,
+                              cursor: refineLoading ? "wait" : "pointer", fontFamily: "inherit",
+                            }}
+                              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                            >{p.label}</button>
+                          ))}
+                          <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 6, paddingTop: 6, display: "flex", gap: 4 }}>
+                            <input value={customInstruction} onChange={(e) => setCustomInstruction(e.target.value)}
+                              placeholder="Custom instruction..."
+                              onKeyDown={(e) => { if (e.key === "Enter" && customInstruction.trim()) handleRefine(i, customInstruction.trim()); }}
+                              style={{ flex: 1, fontSize: 11, padding: "4px 6px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.06)", color: C.text, fontFamily: "inherit", outline: "none" }}
+                            />
+                            <button disabled={refineLoading || !customInstruction.trim()} onClick={() => handleRefine(i, customInstruction.trim())} style={{
+                              fontSize: 10, padding: "4px 8px", borderRadius: 4, border: "none",
+                              background: customInstruction.trim() ? "linear-gradient(135deg,#6366f1,#8b5cf6)" : "rgba(255,255,255,0.05)",
+                              color: "#fff", cursor: customInstruction.trim() ? "pointer" : "default", fontFamily: "inherit",
+                            }}>Go</button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                     <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{
                       fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
                       padding: "4px 8px", borderRadius: 5,

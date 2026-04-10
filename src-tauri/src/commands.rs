@@ -631,6 +631,24 @@ pub async fn translate_script(
 }
 
 #[tauri::command]
+pub async fn refine_segment(
+    state: tauri::State<'_, AppState>,
+    segment_text: String,
+    instruction: String,
+    context: String,
+    ai_config: AiConfig,
+) -> Result<String, NarratorError> {
+    let keys = state.api_keys.lock().await;
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
+    drop(keys);
+    let provider = ai_client::create_provider(&ai_config, api_key);
+    ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await
+}
+
+#[tauri::command]
 pub async fn cancel_generation(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);
     Ok(())
@@ -667,6 +685,16 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
             .map_err(|e| NarratorError::ProjectError(format!("Failed to delete project: {e}")))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn export_project(id: String, output_path: String) -> Result<(), NarratorError> {
+    project_store::export_project(&id, std::path::Path::new(&output_path))
+}
+
+#[tauri::command]
+pub async fn import_project(archive_path: String) -> Result<String, NarratorError> {
+    project_store::import_project(std::path::Path::new(&archive_path))
 }
 
 // ── ElevenLabs commands ──

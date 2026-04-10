@@ -269,4 +269,37 @@ describe("ReviewScreen", () => {
     const stopButtons = screen.queryAllByText(/Stop/);
     expect(stopButtons.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("renders AI refine button per segment", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    const aiButtons = screen.getAllByText("AI");
+    expect(aiButtons).toHaveLength(2);
+  });
+
+  it("AI refine dropdown shows presets when clicked", async () => {
+    seedStores();
+    const user = userEvent.setup();
+    render(<ReviewScreen />);
+
+    const aiButtons = screen.getAllByText("AI");
+    await user.click(aiButtons[0]);
+
+    expect(screen.getByText("Refine with AI")).toBeInTheDocument();
+    expect(screen.getByText("Make shorter")).toBeInTheDocument();
+    expect(screen.getByText("Make more detailed")).toBeInTheDocument();
+    expect(screen.getByText("Simplify language")).toBeInTheDocument();
+    expect(screen.getByText("More professional")).toBeInTheDocument();
+    expect(screen.getByText("More conversational")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Custom instruction...")).toBeInTheDocument();
+  });
+
+  it("renders segment numbers", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    expect(screen.getByText("#1")).toBeInTheDocument();
+    expect(screen.getByText("#2")).toBeInTheDocument();
+  });
 });

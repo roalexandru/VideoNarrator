@@ -627,6 +627,46 @@ pub async fn translate_script(
     Ok(translated)
 }
 
+/// Refine a single narration segment using AI.
+/// Takes the segment text, a user instruction, and surrounding context,
+/// returns the refined text only (not a full script).
+pub async fn refine_segment(
+    provider: &dyn AiProvider,
+    segment_text: &str,
+    instruction: &str,
+    context: &str,
+) -> Result<String, NarratorError> {
+    let system_prompt =
+        "You are a professional narration script editor. You will receive a single narration \
+        segment and an editing instruction. Apply the instruction to the segment text and return \
+        ONLY the refined text. No JSON, no markdown, no explanation — just the new narration text. \
+        Preserve any [pause] markers unless the instruction says to remove them.";
+
+    let user_message = json!(format!(
+        "Context (surrounding segments for reference, do NOT include them in your output):\n{context}\n\n\
+        Segment to refine:\n\"{segment_text}\"\n\n\
+        Instruction: {instruction}"
+    ));
+
+    let response = provider.generate(system_prompt, user_message).await?;
+
+    // Clean up: remove any accidental quotes, markdown, or explanations
+    let refined = response
+        .trim()
+        .trim_matches('"')
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if refined.is_empty() {
+        return Err(NarratorError::ApiError(
+            "AI returned empty refinement".to_string(),
+        ));
+    }
+
+    Ok(refined.to_string())
+}
+
 pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bool, NarratorError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))

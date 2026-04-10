@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { listProjects, deleteProject, type ProjectSummary } from "../../lib/tauri/commands";
+import { listProjects, deleteProject, exportProject, importProject, type ProjectSummary } from "../../lib/tauri/commands";
 import { Button } from "../../components/ui/Button";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { save, open } from "@tauri-apps/plugin-dialog";
 import { trackEvent } from "../telemetry/analytics";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
@@ -52,6 +53,37 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
   const handleDelete = (e: React.MouseEvent, id: string, title: string) => {
     e.stopPropagation();
     setConfirmDelete({ id, title });
+  };
+
+  const handleExport = async (e: React.MouseEvent, id: string, title: string) => {
+    e.stopPropagation();
+    const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 50);
+    const outputPath = await save({
+      defaultPath: `${safeName}.narrator`,
+      filters: [{ name: "Narrator Project", extensions: ["narrator"] }],
+    });
+    if (!outputPath) return;
+    try {
+      await exportProject(id, outputPath);
+      trackEvent("project_exported");
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
+  };
+
+  const handleImport = async () => {
+    const filePath = await open({
+      filters: [{ name: "Narrator Project", extensions: ["narrator"] }],
+      multiple: false,
+    });
+    if (!filePath) return;
+    try {
+      await importProject(filePath as string);
+      trackEvent("project_imported");
+      refresh();
+    } catch (err) {
+      console.error("Import failed:", err);
+    }
   };
 
   return (
@@ -112,6 +144,13 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
             >
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2" strokeLinecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               <span style={{ color: C.accent, fontSize: 14, fontWeight: 600, marginTop: 10 }}>New Project</span>
+              <button onClick={(e) => { e.stopPropagation(); handleImport(); }} style={{
+                marginTop: 8, fontSize: 11, color: C.muted, background: "none", border: `1px solid ${C.border}`,
+                borderRadius: 5, padding: "3px 10px", cursor: "pointer", fontFamily: "inherit",
+              }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = C.accent; e.currentTarget.style.borderColor = "rgba(99,102,241,0.3)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.borderColor = C.border; }}
+              >Import .narrator</button>
             </button>
 
             {filteredProjects.map((p) => (
@@ -161,14 +200,22 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontSize: 11, color: C.muted }}>{formatDate(p.updated_at)}</span>
-                    <button onClick={(e) => handleDelete(e, p.id, p.title)} className="delete-btn" style={{
-                      background: "none", border: "none", color: C.muted, cursor: "pointer",
-                      fontSize: 11, padding: "3px 6px", borderRadius: 4, fontFamily: "inherit",
-                      opacity: 0, transition: "opacity 0.15s",
-                    }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
-                    >Delete</button>
+                    <div className="delete-btn" style={{ display: "flex", gap: 4, opacity: 0, transition: "opacity 0.15s" }}>
+                      <button onClick={(e) => handleExport(e, p.id, p.title)} style={{
+                        background: "none", border: "none", color: C.muted, cursor: "pointer",
+                        fontSize: 11, padding: "3px 6px", borderRadius: 4, fontFamily: "inherit",
+                      }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = C.accent; e.currentTarget.style.background = "rgba(99,102,241,0.08)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
+                      >Export</button>
+                      <button onClick={(e) => handleDelete(e, p.id, p.title)} style={{
+                        background: "none", border: "none", color: C.muted, cursor: "pointer",
+                        fontSize: 11, padding: "3px 6px", borderRadius: 4, fontFamily: "inherit",
+                      }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
+                      >Delete</button>
+                    </div>
                   </div>
                 </div>
               </div>

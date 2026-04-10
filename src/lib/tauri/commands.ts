@@ -54,6 +54,19 @@ export const translateScript = (
     aiConfig,
   });
 
+export const refineSegment = (
+  segmentText: string,
+  instruction: string,
+  context: string,
+  aiConfig: AiConfig
+) =>
+  invoke<string>("refine_segment", {
+    segmentText,
+    instruction,
+    context,
+    aiConfig,
+  });
+
 // Projects
 export const saveProject = (config: unknown) =>
   invoke<string>("save_project", { config });
@@ -75,6 +88,10 @@ export interface ProjectSummary {
 
 export const listProjects = () => invoke<ProjectSummary[]>("list_projects");
 export const deleteProject = (id: string) => invoke<void>("delete_project", { id });
+export const exportProject = (id: string, outputPath: string) =>
+  invoke<void>("export_project", { id, outputPath });
+export const importProject = (archivePath: string) =>
+  invoke<string>("import_project", { archivePath });
 
 export interface LoadedProject {
   config: {
