@@ -3,19 +3,25 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { trackEvent } from "../telemetry/analytics";
 import type { ProgressEvent } from "../../types/processing";
+
+const AVAILABLE_LANGUAGES = [
+  { code: "en", label: "English" }, { code: "ja", label: "Japanese" }, { code: "de", label: "German" },
+  { code: "fr", label: "French" }, { code: "pt-BR", label: "Portuguese (BR)" }, { code: "es", label: "Spanish" },
+  { code: "it", label: "Italian" }, { code: "ko", label: "Korean" }, { code: "zh", label: "Chinese" },
+];
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
 export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
-  const languages = useConfigStore((s) => s.languages);
-  const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, deleteSegment } = useScriptStore();
+  const configLanguages = useConfigStore((s) => s.languages);
+  const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, updateSegmentTiming, deleteSegment, setScript } = useScriptStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -37,6 +43,34 @@ export function ReviewScreen() {
 
   const script = scripts[activeLanguage];
   const segments = script?.segments || [];
+
+  // Translation state
+  const [showTranslate, setShowTranslate] = useState(false);
+  const [translateLang, setTranslateLang] = useState("");
+  const [translating, setTranslating] = useState(false);
+  const aiProvider = useConfigStore((s) => s.aiProvider);
+  const aiModel = useConfigStore((s) => s.model);
+  const aiTemperature = useConfigStore((s) => s.temperature);
+
+  const handleTranslate = useCallback(async () => {
+    if (!translateLang || !script || translating) return;
+    setTranslating(true);
+    try {
+      const result = await translateScript(script, translateLang, { provider: aiProvider, model: aiModel, temperature: aiTemperature });
+      setScript(translateLang, result);
+      setActiveLanguage(translateLang);
+      setShowTranslate(false);
+      setTranslateLang("");
+      trackEvent("script_translated", { from: activeLanguage, to: translateLang });
+    } catch (err) {
+      console.error("Translation failed:", err);
+    } finally {
+      setTranslating(false);
+    }
+  }, [translateLang, script, translating, aiProvider, aiModel, aiTemperature, activeLanguage, setScript, setActiveLanguage]);
+
+  // Segment timing editing
+  const [editingTiming, setEditingTiming] = useState<number | null>(null);
   const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
   const currentSegment = currentSegmentIdx >= 0 ? segments[currentSegmentIdx] : null;
@@ -207,17 +241,52 @@ export function ReviewScreen() {
             </select>
           </div>
         </div>
-        {languages.length > 1 && (
-          <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 3 }}>
-            {languages.map((l) => (
-              <button key={l} onClick={() => setActiveLanguage(l)} style={{
-                padding: "4px 12px", borderRadius: 6, border: "none", fontFamily: "inherit",
-                background: activeLanguage === l ? "rgba(99,102,241,0.15)" : "transparent",
-                color: activeLanguage === l ? C.accent : C.muted, fontSize: 12, fontWeight: 600, cursor: "pointer",
-              }}>{l.toUpperCase()}</button>
-            ))}
-          </div>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {(() => { const allLangs = [...new Set([...configLanguages, ...Object.keys(scripts)])]; return allLangs.length > 1; })() && (
+            <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 3 }}>
+              {[...new Set([...configLanguages, ...Object.keys(scripts)])].map((l) => (
+                <button key={l} onClick={() => setActiveLanguage(l)} style={{
+                  padding: "4px 12px", borderRadius: 6, border: "none", fontFamily: "inherit",
+                  background: activeLanguage === l ? "rgba(99,102,241,0.15)" : "transparent",
+                  color: activeLanguage === l ? C.accent : C.muted, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}>{l.toUpperCase()}</button>
+              ))}
+            </div>
+          )}
+          {script && (
+            <div style={{ position: "relative" }}>
+              <button onClick={() => setShowTranslate(!showTranslate)} style={{
+                padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`, fontFamily: "inherit",
+                background: showTranslate ? "rgba(99,102,241,0.1)" : "transparent",
+                color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer",
+              }}>+ Translate</button>
+              {showTranslate && (
+                <div style={{
+                  position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
+                  background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
+                  padding: 12, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Translate to:</div>
+                  <select value={translateLang} onChange={(e) => setTranslateLang(e.target.value)} style={{
+                    width: "100%", padding: "6px 8px", borderRadius: 6, fontSize: 12, fontFamily: "inherit",
+                    background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`, color: C.text, outline: "none", marginBottom: 8,
+                  }}>
+                    <option value="">Select language...</option>
+                    {AVAILABLE_LANGUAGES.filter((l) => !scripts[l.code]).map((l) => (
+                      <option key={l.code} value={l.code}>{l.label}</option>
+                    ))}
+                  </select>
+                  <button onClick={handleTranslate} disabled={!translateLang || translating} style={{
+                    width: "100%", padding: "6px 0", borderRadius: 6, border: "none", fontFamily: "inherit",
+                    background: translateLang ? "linear-gradient(135deg,#6366f1,#8b5cf6)" : "rgba(255,255,255,0.05)",
+                    color: translateLang ? "#fff" : C.muted, fontSize: 12, fontWeight: 600,
+                    cursor: translateLang && !translating ? "pointer" : "default", opacity: translating ? 0.6 : 1,
+                  }}>{translating ? "Translating..." : "Translate"}</button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* VIDEO PLAYER — controls hidden until hover */}
@@ -335,9 +404,29 @@ export function ReviewScreen() {
                   background: isCurrent ? "rgba(99,102,241,0.06)" : "transparent",
                   borderLeft: isCurrent ? "3px solid #6366f1" : "3px solid transparent",
                 }}>
-                  <div style={{ fontFamily: "monospace", fontSize: 12, color: isCurrent ? C.accent : C.muted, fontWeight: 600, paddingTop: 2 }}>
-                    {secondsToTimestamp(seg.start_seconds)}
-                    <div style={{ fontSize: 10, opacity: 0.6 }}>{secondsToTimestamp(seg.end_seconds)}</div>
+                  <div style={{ fontFamily: "monospace", fontSize: 12, color: isCurrent ? C.accent : C.muted, fontWeight: 600, paddingTop: 2 }}
+                    onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
+                    title="Click to edit timing"
+                  >
+                    {editingTiming === i ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0 && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds); }}
+                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
+                        />
+                        <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > seg.start_seconds) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v); }}
+                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
+                        />
+                      </div>
+                    ) : (
+                      <>
+                        {secondsToTimestamp(seg.start_seconds)}
+                        <div style={{ fontSize: 10, opacity: 0.6 }}>{secondsToTimestamp(seg.end_seconds)}</div>
+                      </>
+                    )}
                   </div>
                   <div>
                     <textarea value={seg.text}

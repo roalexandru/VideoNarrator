@@ -20,6 +20,46 @@ export function ProjectSetupScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [probing, setProbing] = useState(false);
   const [titleTouched, setTitleTouched] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  // Drag-and-drop file import (video + context documents)
+  useEffect(() => {
+    const VIDEO_EXTS = ["mp4", "mov", "avi", "mkv", "webm"];
+    const DOC_EXTS = ["md", "txt", "pdf"];
+
+    const unDrop = listen<{ paths: string[] }>("tauri://drag-drop", async (event) => {
+      setDragOver(false);
+      const paths = event.payload.paths;
+      if (!paths?.length) return;
+
+      const videos = paths.filter((p) => VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`)));
+      const docs = paths.filter((p) => DOC_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`)));
+
+      // Import the first video file
+      if (videos.length > 0 && !videoFile) {
+        setProbing(true);
+        try {
+          const m = await probeVideo(videos[0]);
+          setVideoFile({ path: m.path, name: fileNameFromPath(m.path), size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
+          trackEvent("video_imported", { source: "drag_drop" });
+        } catch (err) {
+          trackError("probe_video_drag_drop", err);
+          await message(`Failed to load video: ${String(err)}`, { title: "Video Error", kind: "error" });
+        } finally { setProbing(false); }
+      }
+
+      // Import document files
+      if (docs.length > 0) {
+        addDocuments(docs.map((p) => ({ id: crypto.randomUUID(), path: p, name: fileNameFromPath(p), size: 0, type: (p.split(".").pop() || "txt") as "md" | "txt" | "pdf" })));
+        trackEvent("context_docs_added", { count: docs.length, source: "drag_drop" });
+      }
+    });
+
+    const unOver = listen("tauri://drag-over", () => setDragOver(true));
+    const unLeave = listen("tauri://drag-leave", () => setDragOver(false));
+
+    return () => { unDrop.then((fn) => fn()); unOver.then((fn) => fn()); unLeave.then((fn) => fn()); };
+  }, [videoFile, setVideoFile, addDocuments]);
 
   // Listen for recording-stopped event (Windows: overlay sends stop, backend emits this)
   useEffect(() => {
@@ -100,7 +140,18 @@ export function ProjectSetupScreen() {
   }, [addDocuments]);
 
   return (
-    <div style={{ maxWidth: 640, margin: "0 auto" }}>
+    <div style={{ maxWidth: 640, margin: "0 auto", position: "relative" }}>
+      {/* Drag-and-drop overlay */}
+      {dragOver && (
+        <div style={{
+          position: "absolute", inset: -16, zIndex: 50, borderRadius: 16,
+          border: "2px dashed rgba(99,102,241,0.6)", background: "rgba(99,102,241,0.08)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          pointerEvents: "none",
+        }}>
+          <div style={{ fontSize: 16, fontWeight: 600, color: C.accent }}>Drop files here</div>
+        </div>
+      )}
       <div style={{ marginBottom: 32 }}>
         <h2 style={{ fontSize: 24, fontWeight: 700, color: C.text, letterSpacing: -0.3 }}>Project Setup</h2>
         <p style={{ color: C.textDim, marginTop: 4, fontSize: 14 }}>Add your video file and context documents.</p>
