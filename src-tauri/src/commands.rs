@@ -17,6 +17,16 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
+/// Strip the `\\?\` extended-length path prefix that Windows `canonicalize()` adds.
+fn strip_extended_path_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 // ── Persistent config file for API keys ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -340,6 +350,8 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     // Try to canonicalize (resolves symlinks, prevents traversal), but fall back
     // to the original path if canonicalization fails (e.g., sandboxed macOS apps)
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    // Strip \\?\ extended-length path prefix that Windows canonicalize adds
+    let resolved = strip_extended_path_prefix(&resolved);
     video_engine::probe_video(&resolved).await
 }
 

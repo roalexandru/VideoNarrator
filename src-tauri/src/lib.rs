@@ -43,6 +43,15 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // When a second instance tries to launch, focus the existing window
+            use tauri::Manager;
+            let windows = app.webview_windows();
+            if let Some(w) = windows.values().next() {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
