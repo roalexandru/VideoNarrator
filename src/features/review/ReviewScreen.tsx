@@ -6,6 +6,7 @@ import { secondsToTimestamp } from "../../lib/formatters";
 import { listProjectFrames, generateTts, getHomeDir, translateScript } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
+import { showToast } from "../../components/ui/Toast";
 import { trackEvent } from "../telemetry/analytics";
 import type { ProgressEvent } from "../../types/processing";
 
@@ -21,7 +22,7 @@ export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
   const configLanguages = useConfigStore((s) => s.languages);
-  const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, updateSegmentTiming, deleteSegment, setScript } = useScriptStore();
+  const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, updateSegmentTiming, deleteSegment, setScript, canUndo, canRedo, undo, redo } = useScriptStore();
   const videoRef = useRef<HTMLVideoElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -64,6 +65,7 @@ export function ReviewScreen() {
       trackEvent("script_translated", { from: activeLanguage, to: translateLang });
     } catch (err) {
       console.error("Translation failed:", err);
+      showToast(`Translation failed: ${String(err)}`, "error");
     } finally {
       setTranslating(false);
     }
@@ -71,6 +73,19 @@ export function ReviewScreen() {
 
   // Segment timing editing
   const [editingTiming, setEditingTiming] = useState<number | null>(null);
+
+  // Undo/redo keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z / Cmd+Z / Cmd+Shift+Z)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+        if (e.shiftKey) { if (canRedo()) { e.preventDefault(); redo(); } }
+        else { if (canUndo()) { e.preventDefault(); undo(); } }
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [canUndo, canRedo, undo, redo]);
+
   const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
   const currentSegment = currentSegmentIdx >= 0 ? segments[currentSegmentIdx] : null;
@@ -412,12 +427,20 @@ export function ReviewScreen() {
                       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                         <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
                           onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= 0 && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds); }}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            const prevEnd = i > 0 ? segments[i - 1].end_seconds : 0;
+                            if (!isNaN(v) && v >= prevEnd && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds);
+                          }}
                           style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
                         />
                         <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
                           onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > seg.start_seconds) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v); }}
+                          onChange={(e) => {
+                            const v = parseFloat(e.target.value);
+                            const nextStart = i < segments.length - 1 ? segments[i + 1].start_seconds : Infinity;
+                            if (!isNaN(v) && v > seg.start_seconds && v <= nextStart) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v);
+                          }}
                           style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
                         />
                       </div>

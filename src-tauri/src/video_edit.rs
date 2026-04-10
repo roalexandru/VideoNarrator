@@ -514,9 +514,13 @@ pub async fn burn_subtitles(
         .to_string_lossy()
         .replace('\\', "/")
         .replace(':', "\\:");
+    // Sanitize numeric parameters to prevent unexpected ffmpeg filter behavior
+    let font_size = style.font_size.clamp(8, 72);
+    let outline = style.outline.clamp(0, 10);
+
     let subtitle_filter = format!(
         "subtitles='{}':force_style='FontSize={},PrimaryColour={},OutlineColour={},Outline={},BackColour=&H80000000,Shadow=1,{}'",
-        srt_path_str, style.font_size, primary_colour, outline_colour, style.outline, position_style
+        srt_path_str, font_size, primary_colour, outline_colour, outline, position_style
     );
 
     let result = run_ffmpeg_with_progress(
