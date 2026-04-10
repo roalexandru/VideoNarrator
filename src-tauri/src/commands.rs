@@ -697,6 +697,23 @@ pub async fn import_project(archive_path: String) -> Result<String, NarratorErro
     project_store::import_project(std::path::Path::new(&archive_path))
 }
 
+// ── Template commands ──
+
+#[tauri::command]
+pub async fn save_template(template: ProjectTemplate) -> Result<(), NarratorError> {
+    project_store::save_template(&template)
+}
+
+#[tauri::command]
+pub async fn list_templates() -> Result<Vec<ProjectTemplate>, NarratorError> {
+    project_store::list_templates()
+}
+
+#[tauri::command]
+pub async fn delete_template(id: String) -> Result<(), NarratorError> {
+    project_store::delete_template(&id)
+}
+
 // ── ElevenLabs commands ──
 
 #[tauri::command]

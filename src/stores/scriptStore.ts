@@ -32,6 +32,7 @@ interface ScriptStore {
     start: number,
     end: number
   ) => void;
+  updateSegmentVoice: (lang: string, index: number, voice: string | undefined) => void;
   deleteSegment: (lang: string, index: number) => void;
   splitSegment: (lang: string, index: number, splitAtSeconds: number) => void;
   mergeSegments: (lang: string, startIndex: number, endIndex: number) => void;
@@ -133,6 +134,22 @@ export const useScriptStore = create<ScriptStore>((set, get) => ({
         start_seconds: start,
         end_seconds: end,
       };
+      return {
+        ...undo,
+        scripts: {
+          ...state.scripts,
+          [lang]: { ...script, segments },
+        },
+      };
+    }),
+
+  updateSegmentVoice: (lang, index, voice) =>
+    set((state) => {
+      const script = state.scripts[lang];
+      if (!script) return state;
+      const undo = pushUndo(state);
+      const segments = [...script.segments];
+      segments[index] = { ...segments[index], voice_override: voice };
       return {
         ...undo,
         scripts: {

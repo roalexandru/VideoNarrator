@@ -15,6 +15,7 @@ export interface Segment {
   pace: "slow" | "medium" | "fast";
   pause_after_ms: number;
   frame_refs: number[];
+  voice_override?: string;
 }
 
 export interface ScriptMetadata {

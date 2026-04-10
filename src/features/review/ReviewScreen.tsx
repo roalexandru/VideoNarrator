@@ -3,7 +3,7 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { showToast } from "../../components/ui/Toast";
@@ -112,6 +112,101 @@ export function ReviewScreen() {
       setRefineLoading(false);
     }
   }, [refineLoading, segments, aiProvider, aiModel, aiTemperature, activeLanguage, updateSegmentText]);
+
+  // Voice picker state
+  const [voicePickerIdx, setVoicePickerIdx] = useState<number | null>(null);
+  const [availableVoices, setAvailableVoices] = useState<{id: string; name: string}[]>([]);
+  const { updateSegmentVoice } = useScriptStore();
+  useEffect(() => {
+    // Load voices for the current TTS provider
+    const loadVoices = async () => {
+      try {
+        if (previewVoice === "elevenlabs") {
+          const cfg = await getElevenLabsConfig();
+          if (cfg?.api_key) {
+            const voices = await listElevenLabsVoices(cfg.api_key);
+            setAvailableVoices(voices.map((v: { voice_id: string; name: string }) => ({ id: v.voice_id, name: v.name })));
+          }
+        } else if (previewVoice === "azure") {
+          const cfg = await getAzureTtsConfig();
+          if (cfg?.api_key) {
+            const voices = await listAzureTtsVoices(cfg.api_key, cfg.region || "eastus");
+            setAvailableVoices(voices.map((v: { short_name: string; display_name: string }) => ({ id: v.short_name, name: v.display_name })));
+          }
+        } else {
+          const voices = await listBuiltinVoices();
+          setAvailableVoices(voices.map((v: { id: string; name: string }) => ({ id: v.id, name: v.name })));
+        }
+      } catch { setAvailableVoices([]); }
+    };
+    loadVoices();
+  }, [previewVoice]);
+
+  // Narration preview state
+  const [previewMode, setPreviewMode] = useState(false);
+  const [previewSegIdx, setPreviewSegIdx] = useState(-1);
+  const fullPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewAbortRef = useRef(false);
+
+  const startFullPreview = useCallback(async () => {
+    if (!segments.length || !projectId) return;
+    setPreviewMode(true);
+    previewAbortRef.current = false;
+    trackEvent("preview_started", { segments: segments.length });
+
+    const cacheDir = `${await getHomeDir()}/.narrator/tts_cache`;
+    const providerStr = previewVoice === "builtin" ? "builtin:default:1.0" : previewVoice;
+
+    for (let i = 0; i < segments.length; i++) {
+      if (previewAbortRef.current) break;
+      setPreviewSegIdx(i);
+      const seg = segments[i];
+
+      // Seek video to segment start
+      if (videoRef.current) {
+        videoRef.current.currentTime = seg.start_seconds;
+        videoRef.current.play().catch(() => {});
+      }
+
+      // Generate TTS for this segment
+      try {
+        const ch = new Channel<ProgressEvent>();
+        const results = await generateTts([{ ...seg, index: 0 }], cacheDir, false, ch, providerStr);
+        if (previewAbortRef.current) break;
+        if (results[0]?.file_path) {
+          const audio = new Audio(convertFileSrc(results[0].file_path));
+          fullPreviewAudioRef.current = audio;
+          await new Promise<void>((resolve) => {
+            audio.onended = () => resolve();
+            audio.onerror = () => resolve();
+            audio.play().catch(() => resolve());
+          });
+        }
+      } catch {
+        // Skip failed segment, continue preview
+      }
+
+      // Pause for inter-segment gap
+      if (seg.pause_after_ms > 0 && !previewAbortRef.current) {
+        await new Promise((r) => setTimeout(r, seg.pause_after_ms));
+      }
+    }
+
+    if (videoRef.current) videoRef.current.pause();
+    setPreviewMode(false);
+    setPreviewSegIdx(-1);
+  }, [segments, projectId, previewVoice]);
+
+  const stopFullPreview = useCallback(() => {
+    previewAbortRef.current = true;
+    if (fullPreviewAudioRef.current) {
+      fullPreviewAudioRef.current.pause();
+      fullPreviewAudioRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.pause();
+    setPreviewMode(false);
+    setPreviewSegIdx(-1);
+  }, []);
 
   // Undo/redo keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z / Cmd+Z / Cmd+Shift+Z)
   useEffect(() => {
@@ -294,6 +389,16 @@ export function ReviewScreen() {
               <option value="azure">Azure TTS</option>
             </select>
           </div>
+          {segments.length > 0 && (
+            <button onClick={previewMode ? stopFullPreview : startFullPreview} style={{
+              padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
+              border: previewMode ? "1px solid rgba(239,68,68,0.4)" : "1px solid rgba(99,102,241,0.3)",
+              background: previewMode ? "rgba(239,68,68,0.1)" : "linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.15))",
+              color: previewMode ? "#f87171" : "#a5b4fc",
+            }}>
+              {previewMode ? `\u25A0 Stop Preview (${previewSegIdx + 1}/${segments.length})` : "\u25B6 Preview Narration"}
+            </button>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {(() => { const allLangs = [...new Set([...configLanguages, ...Object.keys(scripts)])]; return allLangs.length > 1; })() && (
@@ -506,6 +611,36 @@ export function ReviewScreen() {
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 4, alignItems: "flex-end" }}>
                     <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
+                    <div style={{ position: "relative" }}>
+                      <button onClick={(e) => { e.stopPropagation(); setVoicePickerIdx(voicePickerIdx === i ? null : i); }} style={{
+                        fontSize: 10, padding: "2px 6px", borderRadius: 4, border: "none", cursor: "pointer", fontFamily: "inherit",
+                        background: seg.voice_override ? "rgba(167,139,250,0.1)" : "rgba(255,255,255,0.05)",
+                        color: seg.voice_override ? "#a78bfa" : C.muted,
+                      }}>
+                        {seg.voice_override ? availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom" : "Voice"}
+                      </button>
+                      {voicePickerIdx === i && (
+                        <div onClick={(e) => e.stopPropagation()} style={{
+                          position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
+                          background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 8,
+                          padding: 6, minWidth: 160, maxHeight: 200, overflowY: "auto",
+                          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                        }}>
+                          <button onClick={() => { updateSegmentVoice(activeLanguage, i, undefined); setVoicePickerIdx(null); trackEvent("segment_voice_changed", { voice: "default" }); }} style={{
+                            display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                            border: "none", background: !seg.voice_override ? "rgba(99,102,241,0.1)" : "transparent",
+                            color: !seg.voice_override ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                          }}>Project default</button>
+                          {availableVoices.map((v) => (
+                            <button key={v.id} onClick={() => { updateSegmentVoice(activeLanguage, i, v.id); setVoicePickerIdx(null); trackEvent("segment_voice_changed", { voice: v.name }); }} style={{
+                              display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                              border: "none", background: seg.voice_override === v.id ? "rgba(99,102,241,0.1)" : "transparent",
+                              color: seg.voice_override === v.id ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                            }}>{v.name}</button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
                       style={{

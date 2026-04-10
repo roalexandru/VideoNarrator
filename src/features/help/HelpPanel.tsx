@@ -11,56 +11,112 @@ const sections = [
     items: [
       {
         q: "What is Narrator?",
-        a: "Narrator is an AI-powered video narration generator. Import a video or record your screen, and Narrator will analyze the visual content frame-by-frame to produce a professional narration script. You can then export the script in multiple formats or generate speech audio with ElevenLabs or Azure TTS.",
+        a: "Narrator is an AI-powered desktop app that generates narration scripts from videos. Import a video or record your screen, and the AI analyzes visual content frame-by-frame to produce a professional narration. Export as video with voice-over, audio-only, or subtitle files.",
       },
       {
         q: "Prerequisites",
-        a: "FFmpeg must be installed on your system for video processing. You will also need at least one AI provider API key (Anthropic Claude, OpenAI, or Google Gemini) configured in Settings. For text-to-speech, an ElevenLabs or Azure TTS API key is required.",
+        a: "• FFmpeg — required for video processing (brew install ffmpeg on macOS, choco install ffmpeg on Windows)\n• At least one AI provider API key: Anthropic Claude, OpenAI, or Google Gemini\n• For text-to-speech export: ElevenLabs or Azure TTS API key (or use the free Built-in voice)",
       },
       {
         q: "Quick start",
-        a: `1. Open Settings (${isMac ? "⌘," : "Ctrl+,"}) and add your API key.\n2. Click New Project and import a video file.\n3. Optionally trim or split the video in the Edit step.\n4. Choose a narration style, language, and AI provider.\n5. Click Generate to create the narration.\n6. Review and edit the script, then export.`,
+        a: `1. Open Settings (${isMac ? "⌘," : "Ctrl+,"}) and add your AI provider API key.\n2. Click New Project — import a video or record your screen.\n3. Optionally add context documents (PDF, Markdown, TXT) to improve narration quality.\n4. Choose a narration style, language, and detail level in Configuration.\n5. Click Start Generation in the Processing step.\n6. Review, edit, and refine segments — then export.`,
       },
     ],
   },
   {
-    title: "Tips",
+    title: "Project Setup",
     items: [
       {
-        q: "Better narration results",
-        a: "Attach context documents (Markdown, TXT, PDF) in the Setup step — they give the AI background about your content. For technical demos, the \"Technical Deep-Dive\" style produces more precise descriptions. Lower the temperature (0.3–0.5) for consistent output, raise it (0.8+) for creative variety.",
+        q: "Importing video",
+        a: "Click \"Select Video File\" to browse for MP4, MOV, AVI, MKV, or WebM files. You can also drag and drop video files directly onto the Setup screen.",
       },
       {
-        q: "Working with long videos",
-        a: "Use the Edit step to split long videos into focused clips. Increase frame density to \"Heavy\" in Configuration so the AI captures more visual detail. You can always cancel generation mid-way if you want to adjust settings.",
+        q: "Screen recording",
+        a: "Click \"Record Screen\" to capture your screen directly. On macOS, this uses the native screen capture. On Windows, a recording overlay with start/stop/pause controls appears.",
       },
       {
-        q: "Multi-language narration",
-        a: "Select multiple languages in Configuration before generating. The primary language is generated first from video frames; additional languages are translated from it. You can switch between languages in the Review step to edit each independently.\n\nYou can also translate a script after generation: click \"+ Translate\" in the Review step, select a target language, and the AI will translate the entire script.",
+        q: "Context documents",
+        a: "Attach Markdown, TXT, or PDF files to give the AI background about your content — brand guides, product docs, or glossaries. These improve narration accuracy. Drag and drop or click \"+ Add\".",
       },
       {
-        q: "Drag-and-drop import",
-        a: "Drag video files (MP4, MOV, AVI, MKV, WebM) or context documents (Markdown, TXT, PDF) directly onto the Project Setup screen to import them. A drop zone indicator appears when dragging files over the app.",
+        q: "Project sharing",
+        a: "Export a project as a portable .narrator file (hover a project card, click \"Export\"). This includes config, scripts, and frames. Import on any machine (Mac or Windows) via \"Import .narrator\" on the Projects screen. The video file is not bundled — re-link it after import.",
+      },
+    ],
+  },
+  {
+    title: "Edit Video",
+    items: [
+      {
+        q: "Trimming and splitting",
+        a: "Use the timeline to select portions of your video. Press S to split at the playhead. Delete unwanted clips. Adjust speed (0.25x–10x) or enable time-lapse mode for clean jump-cuts.",
       },
       {
-        q: "Undo and redo",
-        a: `Use ${isMac ? "⌘Z" : "Ctrl+Z"} to undo and ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"} to redo script edits in the Review step. This covers text changes, timing adjustments, segment deletions, splits, and merges.`,
+        q: "Controls",
+        a: `Play/Pause — Space bar\nSplit at playhead — S\nUndo — ${isMac ? "⌘Z" : "Ctrl+Z"}\nRedo — ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"}\nZoom timeline — ${isMac ? "⌘" : "Ctrl"}+Scroll`,
+      },
+    ],
+  },
+  {
+    title: "Configuration",
+    items: [
+      {
+        q: "Narration styles",
+        a: "Choose from 6 styles: Executive Overview, Product Demo, Technical Deep-Dive, Teaser/Trailer, Training Walkthrough, and Bug Review/Critique. Each style tunes the AI's tone, vocabulary, and focus.",
       },
       {
-        q: "Subtitle customization",
-        a: "When exporting video with burned subtitles, you can customize the appearance: font size, text color, outline color and width, and position (top or bottom). These controls appear when you enable \"Burn subtitles into video\" in the Export step.",
+        q: "Languages",
+        a: "Select one or more languages. The primary language is generated from video frames; additional languages are translated from it. You can also translate after generation via the \"+ Translate\" button in Review.",
       },
       {
-        q: "Segment timing",
-        a: "Click the timestamp on any segment in the Review step to fine-tune its start and end times. The editor validates that times don't overlap with adjacent segments.",
+        q: "Detail level",
+        a: "Light — key points only, fewer frames extracted. Medium — balanced coverage. Heavy — detailed commentary with more frames for better visual analysis.",
       },
       {
-        q: "Auto-updates",
-        a: "Narrator checks for updates automatically on launch. You can also check manually via the app menu (Help > Check for Updates). When an update is available, a bar appears at the bottom of the window with an option to install.",
+        q: "Templates",
+        a: "Save your current configuration as a reusable template in Settings > Templates. Apply a template to any project to instantly set style, language, AI provider, and density.",
+      },
+    ],
+  },
+  {
+    title: "Review & Edit",
+    items: [
+      {
+        q: "Editing segments",
+        a: `Each segment shows a timestamp, narration text (editable), pace, and action buttons. Click the timestamp to fine-tune start/end times. Use ${isMac ? "⌘Z" : "Ctrl+Z"} to undo and ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"} to redo any script edit.`,
       },
       {
-        q: "Export options",
-        a: "The Export step offers three outputs:\n• Video — burn subtitles directly onto the video, or merge with TTS audio\n• Audio Only — generate narration audio via ElevenLabs or Azure TTS\n• Scripts — export as SRT (subtitles), VTT (web video), JSON (programmatic), Markdown (readable), or SSML (speech synthesis)",
+        q: "AI refinement",
+        a: "Click the \"AI\" button on any segment to refine it with AI. Choose a preset (Make shorter, More detailed, Simplify, More professional, More conversational) or type a custom instruction. The AI rewrites that segment while considering surrounding context.",
+      },
+      {
+        q: "Preview narration",
+        a: "Click \"Preview Narration\" to hear the full narrated video — TTS audio plays synced with the video and subtitles appear live. Audio is cached per-segment for instant replays. Click Stop Preview to cancel at any time.",
+      },
+      {
+        q: "Per-segment voice",
+        a: "Click the \"Voice\" badge on any segment to assign a different TTS voice from your configured provider. \"Project default\" uses the global voice from Settings > Voice.",
+      },
+      {
+        q: "Multi-language",
+        a: "When multiple languages exist, tabs appear in the header. Switch between languages to edit each independently. Use \"+ Translate\" to generate a new language from the current script.",
+      },
+    ],
+  },
+  {
+    title: "Export",
+    items: [
+      {
+        q: "Video export",
+        a: "Generate a video with narration audio. Choose \"Narration only\" to replace original audio, or \"Mix with original\" to overlay. Enable \"Burn subtitles\" for embedded captions — customize font size, color, outline, and position.",
+      },
+      {
+        q: "Audio export",
+        a: "Generate narration audio without video. Uses the voice settings from Settings > Voice.",
+      },
+      {
+        q: "Script export",
+        a: "Export narration text as SRT (subtitles), VTT (web video), JSON (programmatic), Markdown (readable), or SSML (speech synthesis). Select formats and languages before exporting.",
       },
     ],
   },
@@ -74,10 +130,14 @@ const sections = [
           : "New Project — Ctrl+N\nSave Project — Ctrl+S\nSettings — Ctrl+,\nFull Screen — F11",
       },
       {
-        q: "Text editing",
+        q: "Review & Edit",
         a: isMac
-          ? "Undo — ⌘Z\nRedo — ⌘⇧Z\nCut — ⌘X\nCopy — ⌘C\nPaste — ⌘V\nSelect All — ⌘A"
-          : "Undo — Ctrl+Z\nRedo — Ctrl+Shift+Z\nCut — Ctrl+X\nCopy — Ctrl+C\nPaste — Ctrl+V\nSelect All — Ctrl+A",
+          ? "Undo — ⌘Z\nRedo — ⌘⇧Z\nPlay/Pause video — Space"
+          : "Undo — Ctrl+Z\nRedo — Ctrl+Shift+Z\nPlay/Pause video — Space",
+      },
+      {
+        q: "Edit Video",
+        a: `Split at playhead — S\nPlay/Pause — Space\nUndo — ${isMac ? "⌘Z" : "Ctrl+Z"}\nRedo — ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"}\nZoom — ${isMac ? "⌘" : "Ctrl"}+Scroll`,
       },
     ],
   },
@@ -91,15 +151,15 @@ const sections = [
       },
       {
         q: "API key errors",
-        a: `Open Settings (${isMac ? "⌘," : "Ctrl+,"}) and verify your API key is correct. Keys are validated when saved. Make sure you have billing enabled on your provider account and sufficient quota.`,
+        a: `Open Settings (${isMac ? "⌘," : "Ctrl+,"}) and verify your API key is correct. Keys are validated when saved. Ensure billing is enabled on your provider account with sufficient quota.`,
       },
       {
-        q: "Generation fails or produces poor results",
-        a: "Try a different narration style or lower the temperature for more consistent output. Adding context documents helps the AI understand domain-specific content. For long videos, a higher frame density captures more visual detail.",
+        q: "Generation fails or poor results",
+        a: "Try a different narration style or lower the temperature (0.3–0.5) for consistency. Adding context documents helps the AI understand domain-specific content. For long videos, use \"Heavy\" density to capture more visual detail.",
       },
       {
         q: "Audio/video merge issues",
-        a: "Ensure FFmpeg is up to date (version 5+ recommended). The merge operation requires the generated audio segments to match the video timeline. If segments are missing, regenerate TTS for the affected segments.",
+        a: "Ensure FFmpeg is up to date (version 5+ recommended). If segments are missing audio, regenerate TTS for the affected segments. Check that your TTS API key has sufficient quota.",
       },
     ],
   },

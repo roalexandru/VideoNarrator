@@ -302,4 +302,31 @@ describe("ReviewScreen", () => {
     expect(screen.getByText("#1")).toBeInTheDocument();
     expect(screen.getByText("#2")).toBeInTheDocument();
   });
+
+  it("renders Preview Narration button when segments exist", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    expect(screen.getByText(/Preview Narration/)).toBeInTheDocument();
+  });
+
+  it("renders voice picker button per segment", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    // Each segment has a "Voice" button (default = no override)
+    const voiceButtons = screen.getAllByText("Voice");
+    expect(voiceButtons.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("voice picker shows Project default option when clicked", async () => {
+    seedStores();
+    const user = userEvent.setup();
+    render(<ReviewScreen />);
+
+    const voiceButtons = screen.getAllByText("Voice");
+    await user.click(voiceButtons[0]);
+
+    expect(screen.getByText("Project default")).toBeInTheDocument();
+  });
 });

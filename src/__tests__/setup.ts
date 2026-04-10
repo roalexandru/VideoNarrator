@@ -310,6 +310,23 @@ export function setupDefaultMocks() {
       case "import_project":
         return "proj-imported-1";
 
+      case "save_template":
+        return null;
+
+      case "list_templates":
+        return [
+          {
+            id: "tmpl-1", name: "Demo Template", style: "product_demo",
+            languages: ["en"], primary_language: "en",
+            frame_config: { density: "medium", scene_threshold: 0.3, max_frames: 30 },
+            ai_config: { provider: "claude", model: "claude-sonnet-4-20250514", temperature: 0.7 },
+            custom_prompt: "", tts_provider: "builtin", created_at: "2026-04-01T12:00:00Z",
+          },
+        ];
+
+      case "delete_template":
+        return null;
+
       case "cancel_generation":
         return null;
 

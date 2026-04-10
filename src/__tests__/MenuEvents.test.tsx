@@ -237,7 +237,7 @@ describe("Menu events", () => {
     await waitFor(() => {
       expect(document.body.textContent).toContain("Narrator Help");
       expect(document.body.textContent).toContain("Getting Started");
-      expect(document.body.textContent).toContain("Tips");
+      expect(document.body.textContent).toContain("Review & Edit");
       expect(document.body.textContent).toContain("Troubleshooting");
     });
   });

@@ -93,6 +93,27 @@ export const exportProject = (id: string, outputPath: string) =>
 export const importProject = (archivePath: string) =>
   invoke<string>("import_project", { archivePath });
 
+// Templates
+export interface ProjectTemplate {
+  id: string;
+  name: string;
+  style: string;
+  languages: string[];
+  primary_language: string;
+  frame_config: { density: string; scene_threshold: number; max_frames: number };
+  ai_config: AiConfig;
+  custom_prompt: string;
+  tts_provider: string;
+  created_at: string;
+}
+
+export const saveTemplate = (template: ProjectTemplate) =>
+  invoke<void>("save_template", { template });
+export const listTemplates = () =>
+  invoke<ProjectTemplate[]>("list_templates");
+export const deleteTemplate = (id: string) =>
+  invoke<void>("delete_template", { id });
+
 export interface LoadedProject {
   config: {
     id: string;

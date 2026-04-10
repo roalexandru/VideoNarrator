@@ -278,6 +278,47 @@ pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
         .join("frames")
 }
 
+// ── Project templates ────────────────────────────────────────────────────────
+
+pub fn save_template(template: &ProjectTemplate) -> Result<(), NarratorError> {
+    let dir = get_narrator_dir().join("templates");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.json", template.id));
+    let json = serde_json::to_string_pretty(template)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn list_templates() -> Result<Vec<ProjectTemplate>, NarratorError> {
+    let dir = get_narrator_dir().join("templates");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut templates = Vec::new();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json") {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(t) = serde_json::from_str::<ProjectTemplate>(&json) {
+                    templates.push(t);
+                }
+            }
+        }
+    }
+    templates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(templates)
+}
+
+pub fn delete_template(id: &str) -> Result<(), NarratorError> {
+    let path = get_narrator_dir()
+        .join("templates")
+        .join(format!("{id}.json"));
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
 // ── Project export/import ───────────────────────────────────────────────────
 
 /// Export a project to a portable `.narrator` file (ZIP archive).
