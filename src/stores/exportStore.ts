@@ -8,6 +8,11 @@ interface ExportStore {
   basename: string;
   burnSubtitles: boolean;
   replaceAudio: boolean;
+  subtitleFontSize: number;
+  subtitleColor: string;
+  subtitleOutlineColor: string;
+  subtitleOutline: number;
+  subtitlePosition: "bottom" | "top";
 
   toggleFormat: (format: ExportFormat) => void;
   toggleLanguageExport: (lang: string) => void;
@@ -15,6 +20,11 @@ interface ExportStore {
   setBasename: (name: string) => void;
   setBurnSubtitles: (burn: boolean) => void;
   setReplaceAudio: (replace: boolean) => void;
+  setSubtitleFontSize: (size: number) => void;
+  setSubtitleColor: (color: string) => void;
+  setSubtitleOutlineColor: (color: string) => void;
+  setSubtitleOutline: (outline: number) => void;
+  setSubtitlePosition: (position: "bottom" | "top") => void;
   initLanguages: (languages: string[]) => void;
   initFromTitle: (title: string, homeDir: string) => void;
   reset: () => void;
@@ -38,6 +48,11 @@ export const useExportStore = create<ExportStore>((set) => ({
   basename: "untitled",
   burnSubtitles: false,
   replaceAudio: true,
+  subtitleFontSize: 22,
+  subtitleColor: "#ffffff",
+  subtitleOutlineColor: "#000000",
+  subtitleOutline: 2,
+  subtitlePosition: "bottom",
 
   toggleFormat: (format) =>
     set((state) => {
@@ -61,6 +76,11 @@ export const useExportStore = create<ExportStore>((set) => ({
   setBasename: (name) => set({ basename: name }),
   setBurnSubtitles: (burn) => set({ burnSubtitles: burn }),
   setReplaceAudio: (replace) => set({ replaceAudio: replace }),
+  setSubtitleFontSize: (size) => set({ subtitleFontSize: size }),
+  setSubtitleColor: (color) => set({ subtitleColor: color }),
+  setSubtitleOutlineColor: (color) => set({ subtitleOutlineColor: color }),
+  setSubtitleOutline: (outline) => set({ subtitleOutline: outline }),
+  setSubtitlePosition: (position) => set({ subtitlePosition: position }),
 
   initLanguages: (languages) =>
     set({
@@ -84,5 +104,10 @@ export const useExportStore = create<ExportStore>((set) => ({
       basename: "untitled",
       burnSubtitles: false,
       replaceAudio: true,
+      subtitleFontSize: 22,
+      subtitleColor: "#ffffff",
+      subtitleOutlineColor: "#000000",
+      subtitleOutline: 2,
+      subtitlePosition: "bottom",
     }),
 }));

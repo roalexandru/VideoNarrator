@@ -1,10 +1,26 @@
 import { create } from "zustand";
 import type { NarrationScript, Segment } from "../types/script";
 
+// Snapshot for undo/redo — only the data that changes
+interface ScriptSnapshot {
+  scripts: Record<string, NarrationScript>;
+  activeLanguage: string;
+}
+
+const MAX_UNDO = 30;
+
 interface ScriptStore {
   scripts: Record<string, NarrationScript>;
   activeLanguage: string;
   activeSegmentIndex: number | null;
+
+  // Undo/Redo
+  undoStack: ScriptSnapshot[];
+  redoStack: ScriptSnapshot[];
+  canUndo: () => boolean;
+  canRedo: () => boolean;
+  undo: () => void;
+  redo: () => void;
 
   setScript: (lang: string, script: NarrationScript) => void;
   setActiveLanguage: (lang: string) => void;
@@ -22,10 +38,65 @@ interface ScriptStore {
   reset: () => void;
 }
 
-export const useScriptStore = create<ScriptStore>((set) => ({
+// Helper: deep clone via JSON round-trip to avoid reference issues
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+// Helper: push current state to undo stack before mutation
+function pushUndo(state: ScriptStore): Partial<ScriptStore> {
+  const snapshot: ScriptSnapshot = {
+    scripts: deepClone(state.scripts),
+    activeLanguage: state.activeLanguage,
+  };
+  const stack = [...state.undoStack, snapshot];
+  if (stack.length > MAX_UNDO) stack.shift();
+  return { undoStack: stack, redoStack: [] }; // clear redo on new action
+}
+
+export const useScriptStore = create<ScriptStore>((set, get) => ({
   scripts: {},
   activeLanguage: "en",
   activeSegmentIndex: null,
+  undoStack: [],
+  redoStack: [],
+
+  canUndo: () => get().undoStack.length > 0,
+  canRedo: () => get().redoStack.length > 0,
+
+  undo: () =>
+    set((state) => {
+      if (state.undoStack.length === 0) return state;
+      const stack = [...state.undoStack];
+      const prev = stack.pop()!;
+      // Push current to redo
+      const redoSnapshot: ScriptSnapshot = {
+        scripts: deepClone(state.scripts),
+        activeLanguage: state.activeLanguage,
+      };
+      return {
+        ...prev,
+        undoStack: stack,
+        redoStack: [...state.redoStack, redoSnapshot],
+      };
+    }),
+
+  redo: () =>
+    set((state) => {
+      if (state.redoStack.length === 0) return state;
+      const stack = [...state.redoStack];
+      const next = stack.pop()!;
+      // Push current to undo
+      const undoSnapshot: ScriptSnapshot = {
+        scripts: deepClone(state.scripts),
+        activeLanguage: state.activeLanguage,
+      };
+      return {
+        ...next,
+        redoStack: stack,
+        undoStack: [...state.undoStack, undoSnapshot],
+      };
+    }),
 
   setScript: (lang, script) =>
     set((state) => ({
@@ -39,9 +110,11 @@ export const useScriptStore = create<ScriptStore>((set) => ({
     set((state) => {
       const script = state.scripts[lang];
       if (!script) return state;
+      const undo = pushUndo(state);
       const segments = [...script.segments];
       segments[index] = { ...segments[index], text };
       return {
+        ...undo,
         scripts: {
           ...state.scripts,
           [lang]: { ...script, segments },
@@ -53,6 +126,7 @@ export const useScriptStore = create<ScriptStore>((set) => ({
     set((state) => {
       const script = state.scripts[lang];
       if (!script) return state;
+      const undo = pushUndo(state);
       const segments = [...script.segments];
       segments[index] = {
         ...segments[index],
@@ -60,6 +134,7 @@ export const useScriptStore = create<ScriptStore>((set) => ({
         end_seconds: end,
       };
       return {
+        ...undo,
         scripts: {
           ...state.scripts,
           [lang]: { ...script, segments },
@@ -71,10 +146,12 @@ export const useScriptStore = create<ScriptStore>((set) => ({
     set((state) => {
       const script = state.scripts[lang];
       if (!script) return state;
+      const undo = pushUndo(state);
       const segments = script.segments
         .filter((_, i) => i !== index)
         .map((s, i) => ({ ...s, index: i }));
       return {
+        ...undo,
         scripts: {
           ...state.scripts,
           [lang]: { ...script, segments },
@@ -89,6 +166,8 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       const seg = script.segments[index];
       if (!seg || splitAtSeconds <= seg.start_seconds || splitAtSeconds >= seg.end_seconds)
         return state;
+
+      const undo = pushUndo(state);
 
       // Split text at nearest word boundary to midpoint
       const midpoint = Math.floor(seg.text.length / 2);
@@ -121,6 +200,7 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       ].map((s, i) => ({ ...s, index: i }));
 
       return {
+        ...undo,
         scripts: {
           ...state.scripts,
           [lang]: { ...script, segments },
@@ -134,6 +214,8 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       if (!script) return state;
       const toMerge = script.segments.slice(startIndex, endIndex + 1);
       if (toMerge.length < 2) return state;
+
+      const undo = pushUndo(state);
 
       const merged: Segment = {
         ...toMerge[0],
@@ -149,6 +231,7 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       ].map((s, i) => ({ ...s, index: i }));
 
       return {
+        ...undo,
         scripts: {
           ...state.scripts,
           [lang]: { ...script, segments },
@@ -161,5 +244,7 @@ export const useScriptStore = create<ScriptStore>((set) => ({
       scripts: {},
       activeLanguage: "en",
       activeSegmentIndex: null,
+      undoStack: [],
+      redoStack: [],
     }),
 }));

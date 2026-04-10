@@ -435,10 +435,55 @@ pub async fn merge_audio_video(
     Ok(output_path.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubtitleStyle {
+    pub font_size: u32,
+    pub color: String,
+    pub outline_color: String,
+    pub outline: u32,
+    pub position: String,
+}
+
+impl Default for SubtitleStyle {
+    fn default() -> Self {
+        Self {
+            font_size: 22,
+            color: "#ffffff".to_string(),
+            outline_color: "#000000".to_string(),
+            outline: 2,
+            position: "bottom".to_string(),
+        }
+    }
+}
+
+/// Convert a hex RGB color string (e.g. "#ffffff") to ffmpeg ASS BGR format (e.g. "&H00FFFFFF").
+/// ASS colour format is &HAABBGGRR where AA=alpha (00=opaque).
+fn hex_rgb_to_ass_bgr(hex: &str) -> String {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 8 {
+        // Has alpha channel (RRGGBBAA) — convert to ASS &HAABBGGRR
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+        let a = u8::from_str_radix(&hex[6..8], 16).unwrap_or(0);
+        // ASS alpha is inverted: 00 = opaque, FF = transparent
+        let ass_alpha = 255 - a;
+        format!("&H{:02X}{:02X}{:02X}{:02X}", ass_alpha, b, g, r)
+    } else if hex.len() >= 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
+        format!("&H00{:02X}{:02X}{:02X}", b, g, r)
+    } else {
+        "&H00FFFFFF".to_string()
+    }
+}
+
 pub async fn burn_subtitles(
     video_path: &str,
     srt_path: &str,
     output_path: &str,
+    style: &SubtitleStyle,
     on_progress: impl Fn(f64),
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
@@ -453,14 +498,25 @@ pub async fn burn_subtitles(
         std::env::temp_dir().join(format!("_narrator_burn_subs_{}.srt", uuid::Uuid::new_v4()));
     std::fs::copy(srt_path, &temp_srt)?;
 
+    // Convert hex colors to ASS BGR format
+    let primary_colour = hex_rgb_to_ass_bgr(&style.color);
+    let outline_colour = hex_rgb_to_ass_bgr(&style.outline_color);
+
+    // Position: bottom uses MarginV=30, top uses MarginV=10 + Alignment=6 (top-center)
+    let position_style = if style.position == "top" {
+        "MarginV=10,Alignment=6".to_string()
+    } else {
+        "MarginV=30".to_string()
+    };
+
     // Try subtitles filter first (requires libass), fall back to SRT input method
     let srt_path_str = temp_srt
         .to_string_lossy()
         .replace('\\', "/")
         .replace(':', "\\:");
     let subtitle_filter = format!(
-        "subtitles='{}':force_style='FontSize=22,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,BackColour=&H80000000,Shadow=1,MarginV=30'",
-        srt_path_str
+        "subtitles='{}':force_style='FontSize={},PrimaryColour={},OutlineColour={},Outline={},BackColour=&H80000000,Shadow=1,{}'",
+        srt_path_str, style.font_size, primary_colour, outline_colour, style.outline, position_style
     );
 
     let result = run_ffmpeg_with_progress(
