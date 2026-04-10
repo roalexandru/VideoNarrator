@@ -48,6 +48,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Requires system keychain (D-Bus secret service) — not available in CI
     fn test_keyring_roundtrip() {
         // Verify the keyring can write and read back a value on this platform
         let test_key = "test_roundtrip_key";
