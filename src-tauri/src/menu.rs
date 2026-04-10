@@ -15,6 +15,7 @@ pub const OPEN_PROJECT: &str = "open_project";
 pub const SAVE_PROJECT: &str = "save_project";
 pub const OPEN_SETTINGS: &str = "open_settings";
 pub const NARRATOR_HELP: &str = "narrator_help";
+pub const SEND_FEEDBACK: &str = "send_feedback";
 pub const CHECK_FOR_UPDATES: &str = "check_for_updates";
 /// Prefix for dynamic "Open Recent" items — full ID is "recent:<project_id>"
 pub const RECENT_PREFIX: &str = "recent:";
@@ -204,6 +205,13 @@ fn build_macos(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?)?;
+    help_menu.append(&MenuItem::with_id(
+        app,
+        SEND_FEEDBACK,
+        "Send Feedback…",
+        true,
+        None::<&str>,
+    )?)?;
     menu.append(&help_menu)?;
 
     Ok(())
@@ -303,6 +311,13 @@ fn build_windows_linux(app: &App, menu: &Menu<Wry>) -> tauri::Result<()> {
         "Narrator &Help",
         true,
         Some("F1"),
+    )?)?;
+    help_menu.append(&MenuItem::with_id(
+        app,
+        SEND_FEEDBACK,
+        "Send &Feedback…",
+        true,
+        None::<&str>,
     )?)?;
     menu.append(&help_menu)?;
 

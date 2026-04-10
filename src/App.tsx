@@ -28,6 +28,7 @@ import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsPr
 import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import { AppMenuBar } from "./components/layout/AppMenuBar";
+import { FeedbackPanel } from "./features/help/FeedbackPanel";
 import type { FrameDensity, AiProvider, ModelId, NarrationStyleId } from "./types/config";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
@@ -111,6 +112,7 @@ export default function App() {
     setSettingsState({ open: false });
   }, []);
   const [showHelp, setShowHelp] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTerms, setShowTerms] = useState(false);
   const [showNewConfirm, setShowNewConfirm] = useState(false);
@@ -300,6 +302,9 @@ export default function App() {
         case "narrator_help":
           setShowHelp(true);
           break;
+        case "send_feedback":
+          setShowFeedback(true);
+          break;
         case "toggle_fullscreen": {
           const win = getCurrentWindow();
           const isFs = await win.isFullscreen();
@@ -431,7 +436,8 @@ export default function App() {
         break;
       case "save_project": await handleSaveProject(); break;
       case "open_settings": openSettings(); break;
-      case "narrator_help": case "send_feedback": setShowHelp(true); break;
+      case "narrator_help": setShowHelp(true); break;
+      case "send_feedback": setShowFeedback(true); break;
       case "check_for_updates": { const { check } = await import("@tauri-apps/plugin-updater"); check().catch(() => {}); break; }
       case "toggle_fullscreen": {
         const win = getCurrentWindow();
@@ -497,6 +503,7 @@ export default function App() {
           )}
         </>
       )}
+      {showFeedback && <FeedbackPanel onClose={() => setShowFeedback(false)} />}
       {showPrivacyPolicy && <PrivacyPolicy onClose={() => setShowPrivacyPolicy(false)} />}
       {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
       {showTelemetryNotice && <TelemetryNotice onClose={() => setShowTelemetryNotice(false)} />}
