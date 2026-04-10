@@ -156,15 +156,14 @@ export function ExportScreen() {
   const primaryScript = Object.values(scripts)[0];
   const segCount = primaryScript?.segments.length || 0;
 
-  // Init output directory + basename from title
+  // Init output directory + basename from title (fallback to "untitled" if empty)
   useEffect(() => {
-    if (projectTitle) {
-      getHomeDir().then((home) => {
-        exp.initFromTitle(projectTitle, home);
-      }).catch(() => {
-        exp.initFromTitle(projectTitle, "/tmp");
-      });
-    }
+    const title = projectTitle || "untitled";
+    getHomeDir().then((home) => {
+      exp.initFromTitle(title, home);
+    }).catch(() => {
+      exp.initFromTitle(title, "/tmp");
+    });
   }, [projectTitle]);
 
   // Load TTS config

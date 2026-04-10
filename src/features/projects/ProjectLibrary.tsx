@@ -35,6 +35,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
 }) {
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingProjectId, setLoadingProjectId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{id:string,title:string}|null>(null);
 
   const refresh = () => {
@@ -94,9 +95,10 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
             </button>
 
             {projects.map((p) => (
-              <div key={p.id} onClick={() => onOpenProject(p.id)} style={{
-                borderRadius: 12, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.03)",
-                cursor: "pointer", transition: "all 0.15s", overflow: "hidden", display: "flex", flexDirection: "column",
+              <div key={p.id} onClick={() => { if (!loadingProjectId) { setLoadingProjectId(p.id); onOpenProject(p.id); } }} style={{
+                borderRadius: 12, border: `1px solid ${loadingProjectId === p.id ? "rgba(99,102,241,0.4)" : C.border}`, background: "rgba(255,255,255,0.03)",
+                cursor: loadingProjectId ? "wait" : "pointer", transition: "all 0.15s", overflow: "hidden", display: "flex", flexDirection: "column",
+                opacity: loadingProjectId && loadingProjectId !== p.id ? 0.5 : 1,
               }}
                 onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(99,102,241,0.3)"; e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
@@ -108,8 +110,14 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
                   ) : (
                     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#2a2a3a" strokeWidth="1.5" strokeLinecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                   )}
+                  {/* Loading overlay */}
+                  {loadingProjectId === p.id && (
+                    <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <div style={{ width: 24, height: 24, border: "2px solid rgba(99,102,241,0.3)", borderTopColor: "#818cf8", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+                    </div>
+                  )}
                   {/* Status badge */}
-                  {p.has_script && (
+                  {p.has_script && !loadingProjectId && (
                     <div style={{ position: "absolute", top: 8, right: 8, background: "rgba(34,197,94,0.9)", borderRadius: 5, padding: "2px 8px", fontSize: 10, fontWeight: 700, color: "#fff" }}>
                       READY
                     </div>
