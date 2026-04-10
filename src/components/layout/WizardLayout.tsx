@@ -91,11 +91,9 @@ export function WizardLayout({ children, onOpenSettings, onBackToLibrary }: { ch
                 </span>
                 <div>
                   {lbl}
-                  {active && (
-                    <div style={{ fontSize: 10, color: "#5a5a6e", fontWeight: 400, marginTop: 1 }}>
-                      {STEP_DESCRIPTIONS[i]}
-                    </div>
-                  )}
+                  <div style={{ fontSize: 10, color: active ? "#5a5a6e" : "#3a3a4a", fontWeight: 400, marginTop: 1 }}>
+                    {STEP_DESCRIPTIONS[i]}
+                  </div>
                 </div>
               </button>
             );

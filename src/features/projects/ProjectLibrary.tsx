@@ -37,6 +37,11 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
   const [loading, setLoading] = useState(true);
   const [loadingProjectId, setLoadingProjectId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{id:string,title:string}|null>(null);
+  const [search, setSearch] = useState("");
+
+  const filteredProjects = search.trim()
+    ? projects.filter((p) => p.title.toLowerCase().includes(search.toLowerCase()))
+    : projects;
 
   const refresh = () => {
     setLoading(true);
@@ -51,6 +56,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "#0c0c10" }}>
+      <style>{`.project-card:hover .delete-btn { opacity: 1 !important; }`}</style>
       {/* Top bar — settings only, title is in native title bar */}
       <div style={{ display: "flex", justifyContent: "flex-end", padding: "8px 24px", flexShrink: 0 }}>
         <button onClick={onOpenSettings} style={{ background: "rgba(255,255,255,0.05)", border: "none", borderRadius: 7, width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.muted }}>
@@ -64,7 +70,21 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
             <h1 style={{ fontSize: 28, fontWeight: 700, color: C.text, letterSpacing: -0.5 }}>Projects</h1>
             {projects.length === 0 && <p style={{ color: C.muted, fontSize: 13, marginTop: 4 }}>Create your first narration project</p>}
           </div>
-          <span style={{ fontSize: 11, color: C.muted }}>{projects.length} project{projects.length !== 1 ? "s" : ""}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {projects.length > 3 && (
+              <div style={{ position: "relative" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round" style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)" }}>
+                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
+                <input
+                  value={search} onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search projects..."
+                  style={{ fontSize: 12, padding: "6px 10px 6px 28px", borderRadius: 7, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "inherit", outline: "none", width: 180 }}
+                />
+              </div>
+            )}
+            <span style={{ fontSize: 11, color: C.muted }}>{filteredProjects.length} project{filteredProjects.length !== 1 ? "s" : ""}</span>
+          </div>
         </div>
 
         {loading ? (
@@ -94,8 +114,8 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
               <span style={{ color: C.accent, fontSize: 14, fontWeight: 600, marginTop: 10 }}>New Project</span>
             </button>
 
-            {projects.map((p) => (
-              <div key={p.id} onClick={() => { if (!loadingProjectId) { setLoadingProjectId(p.id); onOpenProject(p.id); } }} style={{
+            {filteredProjects.map((p) => (
+              <div key={p.id} className="project-card" onClick={() => { if (!loadingProjectId) { setLoadingProjectId(p.id); onOpenProject(p.id); } }} style={{
                 borderRadius: 12, border: `1px solid ${loadingProjectId === p.id ? "rgba(99,102,241,0.4)" : C.border}`, background: "rgba(255,255,255,0.03)",
                 cursor: loadingProjectId ? "wait" : "pointer", transition: "all 0.15s", overflow: "hidden", display: "flex", flexDirection: "column",
                 opacity: loadingProjectId && loadingProjectId !== p.id ? 0.5 : 1,
@@ -141,9 +161,10 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontSize: 11, color: C.muted }}>{formatDate(p.updated_at)}</span>
-                    <button onClick={(e) => handleDelete(e, p.id, p.title)} style={{
+                    <button onClick={(e) => handleDelete(e, p.id, p.title)} className="delete-btn" style={{
                       background: "none", border: "none", color: C.muted, cursor: "pointer",
                       fontSize: 11, padding: "3px 6px", borderRadius: 4, fontFamily: "inherit",
+                      opacity: 0, transition: "opacity 0.15s",
                     }}
                       onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}

@@ -150,17 +150,24 @@ export function ConfigurationScreen() {
       <section style={{ marginBottom: 28 }}>
         <div style={label}>Frame Extraction</div>
         <div style={{ display: "flex", gap: 6 }}>
-          {(["light", "medium", "heavy"] as const).map((d) => (
-            <button key={d} onClick={() => config.setFrameDensity(d)} style={{
-              flex: 1, padding: "9px", borderRadius: 8, fontSize: 13, fontFamily: "inherit",
-              border: config.frameDensity === d ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
-              background: config.frameDensity === d ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.02)",
-              color: config.frameDensity === d ? C.accent : C.dim,
-              fontWeight: config.frameDensity === d ? 600 : 400, cursor: "pointer", textTransform: "capitalize",
-            }}>{d}</button>
+          {([
+            { id: "light" as const, label: "Light", desc: "Key points only" },
+            { id: "medium" as const, label: "Medium", desc: "Balanced coverage" },
+            { id: "heavy" as const, label: "Heavy", desc: "Detailed commentary" },
+          ]).map((d) => (
+            <button key={d.id} onClick={() => config.setFrameDensity(d.id)} style={{
+              flex: 1, padding: "9px 9px 7px", borderRadius: 8, fontSize: 13, fontFamily: "inherit",
+              border: config.frameDensity === d.id ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+              background: config.frameDensity === d.id ? "rgba(99,102,241,0.1)" : "rgba(255,255,255,0.02)",
+              color: config.frameDensity === d.id ? C.accent : C.dim,
+              fontWeight: config.frameDensity === d.id ? 600 : 400, cursor: "pointer",
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+            }}>
+              <span>{d.label}</span>
+              <span style={{ fontSize: 10, opacity: 0.6, fontWeight: 400 }}>{d.desc}</span>
+            </button>
           ))}
         </div>
-        <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Light: fewer frames, faster processing. Heavy: more detail, better narration.</p>
       </section>
 
       {/* AI Summary Card */}

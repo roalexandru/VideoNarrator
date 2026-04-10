@@ -431,9 +431,14 @@ export function ExportScreen() {
         icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><rect x="2" y="2" width="20" height="20" rx="2.18" /><polygon points="10 8 16 12 10 16 10 8" /></svg>}
       >
         {!hasTtsKey ? (
-          <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
-            Add a TTS API key in Settings to enable video export.
-          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 8, background: "rgba(251,146,60,0.06)", border: "1px solid rgba(251,146,60,0.15)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fb923c" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <div style={{ flex: 1 }}>
+              <p style={{ fontSize: 13, color: "#fb923c", margin: 0 }}>Add an ElevenLabs or Azure TTS API key to enable video export.</p>
+              <p style={{ fontSize: 11, color: C.muted, margin: "4px 0 0" }}>Or use the free Built-in voice (configure in Settings &gt; Voice).</p>
+            </div>
+            <button onClick={() => openSettings("voice")} style={{ fontSize: 12, color: C.accent, background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.25)", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontFamily: "inherit", fontWeight: 500, whiteSpace: "nowrap" }}>Go to Settings</button>
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {/* Audio mode */}
@@ -611,9 +616,11 @@ export function ExportScreen() {
         icon={<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={C.accent} strokeWidth="2" strokeLinecap="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 010 14.14" /><path d="M15.54 8.46a5 5 0 010 7.07" /></svg>}
       >
         {!hasTtsKey ? (
-          <p style={{ fontSize: 13, color: C.muted, margin: 0 }}>
-            Add a TTS API key in Settings to generate audio.
-          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 8, background: "rgba(251,146,60,0.06)", border: "1px solid rgba(251,146,60,0.15)" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fb923c" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <p style={{ fontSize: 13, color: "#fb923c", margin: 0, flex: 1 }}>Add a TTS API key in Settings to generate audio.</p>
+            <button onClick={() => openSettings("voice")} style={{ fontSize: 12, color: C.accent, background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.25)", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontFamily: "inherit", fontWeight: 500, whiteSpace: "nowrap" }}>Go to Settings</button>
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <p style={{ fontSize: 12, color: C.dim, margin: 0, lineHeight: 1.5 }}>

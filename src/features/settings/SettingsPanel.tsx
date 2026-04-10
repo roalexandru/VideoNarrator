@@ -431,16 +431,21 @@ export function SettingsPanel({
   /* ================================================================ */
 
   const Dot = ({ on }: { on: boolean }) => (
-    <span
-      style={{
-        width: 6,
-        height: 6,
-        borderRadius: 3,
-        background: on ? C.success : C.dotOff,
-        display: "inline-block",
-        flexShrink: 0,
-      }}
-    />
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 4,
+          background: on ? C.success : C.dotOff,
+          display: "inline-block",
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 10, color: on ? C.success : "#5a5a6e", fontWeight: 500 }}>
+        {on ? "Ready" : ""}
+      </span>
+    </span>
   );
 
   /* ================================================================ */

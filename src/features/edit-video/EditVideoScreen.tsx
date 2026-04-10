@@ -253,7 +253,7 @@ export function EditVideoScreen() {
       </div>
 
       {/* TRANSPORT BAR */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.border}`, flexShrink: 0, opacity: src ? 1 : 0.3, pointerEvents: src ? "auto" : "none" }}>
         <button aria-label="Skip back" onClick={() => seekToOutput(Math.max(0, outputTime - 5))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 20L9 12l10-8v16zM7 19V5H5v14h2z"/></svg>
         </button>

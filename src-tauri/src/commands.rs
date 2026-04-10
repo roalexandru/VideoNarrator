@@ -177,6 +177,10 @@ impl AppState {
         let config = load_config();
         let mut keys = std::collections::HashMap::new();
 
+        // Migrate old per-key keychain entries into single bundled entry
+        // (reduces macOS keychain prompts from N to 1)
+        secure_store::migrate_old_keychain_entries();
+
         // Migrate plaintext keys to keychain if they exist
         if !config.api_keys.is_empty() {
             let migrated = secure_store::migrate_from_plaintext(&config.api_keys);

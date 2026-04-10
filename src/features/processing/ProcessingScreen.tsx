@@ -1,11 +1,11 @@
-import { useCallback } from "react";
+import { useCallback, useState, useEffect } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { useProcessingStore } from "../../stores/processingStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useEditStore } from "../../stores/editStore";
-import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir } from "../../lib/tauri/commands";
+import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProviderStatus } from "../../lib/tauri/commands";
 import { trackEvent, trackError } from "../telemetry/analytics";
 import { toUserMessage } from "../../lib/errorMessages";
 import { Button } from "../../components/ui/Button";
@@ -137,7 +137,19 @@ export function ProcessingScreen() {
   const segCount = proc.streamingSegments.length;
   const scriptSegCount = Object.values(useScriptStore.getState().scripts)[0]?.segments.length || 0;
 
+  const [hasApiKey, setHasApiKey] = useState(true);
+  useEffect(() => {
+    getProviderStatus().then((statuses) => {
+      const current = statuses.find((s) => s.provider === config.aiProvider);
+      setHasApiKey(current?.has_key ?? false);
+    }).catch(() => {});
+  }, [config.aiProvider]);
+
+  const noVideo = !project.videoFile?.path;
+  const noApiKey = !hasApiKey;
+
   if (showStart) {
+    const blocked = noVideo || noApiKey;
     return (
       <div style={{ maxWidth: 640, margin: "0 auto" }}>
         <div style={{ marginBottom: 32 }}>
@@ -150,7 +162,9 @@ export function ProcessingScreen() {
           </svg>
           <p style={{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 6 }}>Generate Narration</p>
           <p style={{ fontSize: 13, color: C.dim, marginBottom: 20 }}>This will extract frames, analyze the video, and generate a narration script using AI.</p>
-          <Button onClick={run}>Start Generation</Button>
+          {noVideo && <p style={{ fontSize: 12, color: "#fb923c", marginBottom: 12 }}>No video selected. Go to Project Setup to add one.</p>}
+          {noApiKey && <p style={{ fontSize: 12, color: "#fb923c", marginBottom: 12 }}>No API key for {config.aiProvider}. Go to Settings to add one.</p>}
+          <Button onClick={run} disabled={blocked}>Start Generation</Button>
         </div>
       </div>
     );

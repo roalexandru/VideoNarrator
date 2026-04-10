@@ -239,14 +239,14 @@ export function ReviewScreen() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review & Edit</h2>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: C.muted }}>Preview voice:</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", borderRadius: 7, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
             <select
               value={previewVoice}
               onChange={(e) => setPreviewVoice(e.target.value as "builtin" | "elevenlabs" | "azure")}
               style={{
-                fontSize: 11, padding: "3px 8px", borderRadius: 6,
-                background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`,
+                fontSize: 12, padding: "2px 4px", borderRadius: 4,
+                background: "transparent", border: "none",
                 color: C.dim, fontFamily: "inherit", cursor: "pointer", outline: "none",
               }}
             >
@@ -409,20 +409,22 @@ export function ReviewScreen() {
             <div style={{ fontSize: 13 }}>Go to Processing to generate narration for your video.</div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {segments.map((seg, i) => {
               const isCurrent = i === currentSegmentIdx;
               return (
                 <div key={i} onClick={() => handleSegmentClick(i)} style={{
-                  display: "grid", gridTemplateColumns: "80px 1fr auto", gap: 12, alignItems: "start",
-                  padding: "10px 14px", borderRadius: 6, cursor: "pointer",
-                  background: isCurrent ? "rgba(99,102,241,0.06)" : "transparent",
-                  borderLeft: isCurrent ? "3px solid #6366f1" : "3px solid transparent",
+                  display: "grid", gridTemplateColumns: "70px 1fr auto", gap: 14, alignItems: "start",
+                  padding: "14px 16px", borderRadius: 10, cursor: "pointer",
+                  background: isCurrent ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.02)",
+                  border: isCurrent ? "1px solid rgba(99,102,241,0.25)" : "1px solid rgba(255,255,255,0.05)",
+                  transition: "all 0.12s",
                 }}>
                   <div style={{ fontFamily: "monospace", fontSize: 12, color: isCurrent ? C.accent : C.muted, fontWeight: 600, paddingTop: 2 }}
                     onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
                     title="Click to edit timing"
                   >
+                    <div style={{ fontSize: 10, color: isCurrent ? "rgba(165,180,252,0.6)" : C.muted, marginBottom: 2 }}>#{i + 1}</div>
                     {editingTiming === i ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                         <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
@@ -447,7 +449,7 @@ export function ReviewScreen() {
                     ) : (
                       <>
                         {secondsToTimestamp(seg.start_seconds)}
-                        <div style={{ fontSize: 10, opacity: 0.6 }}>{secondsToTimestamp(seg.end_seconds)}</div>
+                        <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2 }}>{secondsToTimestamp(seg.end_seconds)}</div>
                       </>
                     )}
                   </div>
@@ -456,31 +458,37 @@ export function ReviewScreen() {
                       onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
                       onClick={(e) => e.stopPropagation()}
                       aria-label={`Narration text for segment ${i + 1}`}
-                      rows={2}
-                      style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : C.dim, background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 6, padding: "8px 10px", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
+                      rows={3}
+                      style={{ width: "100%", fontSize: 14, color: isCurrent ? C.text : "#b0b0c0", background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 8, padding: "10px 12px", outline: "none", resize: "vertical" as const, lineHeight: 1.6, fontFamily: "inherit" }}
                     />
                     {seg.visual_description && (
                       <p style={{ fontSize: 11, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{seg.visual_description}</p>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: 4, paddingTop: 2 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 4, alignItems: "flex-end" }}>
                     <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
                     <button
                       onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
                       style={{
-                        fontSize: 11,
+                        fontSize: 11, fontWeight: 500,
                         color: previewingIdx === i ? "#818cf8" : "#8b8ba0",
-                        background: previewingIdx === i ? "rgba(99,102,241,0.1)" : "none",
-                        border: "none",
+                        background: previewingIdx === i ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.06)",
                         cursor: "pointer",
                         fontFamily: "inherit",
-                        padding: "2px 6px",
-                        borderRadius: 4,
+                        padding: "4px 8px",
+                        borderRadius: 5,
                       }}
                     >
                       {previewingIdx === i ? "\u25A0 Stop" : "\u25B6 Play"}
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
+                    <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{
+                      fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+                      padding: "4px 8px", borderRadius: 5,
+                    }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
+                    >Del</button>
                   </div>
                 </div>
               );
