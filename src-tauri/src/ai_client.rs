@@ -1,6 +1,7 @@
 //! Multi-provider AI client supporting Claude and OpenAI for narration generation.
 
 use crate::error::NarratorError;
+use crate::http_client;
 use crate::models::*;
 use crate::video_engine;
 use async_trait::async_trait;
@@ -33,10 +34,7 @@ impl AiProvider for ClaudeProvider {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+        let client = http_client::shared();
 
         let body = json!({
             "model": self.model,
@@ -125,10 +123,7 @@ impl AiProvider for OpenAiProvider {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+        let client = http_client::shared();
 
         // Convert user_message to OpenAI format
         let user_content = if user_message.is_array() {
@@ -252,10 +247,7 @@ impl AiProvider for GeminiProvider {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+        let client = http_client::shared();
 
         // Convert user_message (Claude format) to Gemini parts
         let parts: Vec<serde_json::Value> = if user_message.is_array() {

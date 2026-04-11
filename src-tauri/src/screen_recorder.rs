@@ -62,7 +62,7 @@ pub async fn record_native(output_path: &str) -> Result<String, NarratorError> {
     }
 
     if let Some(parent) = PathBuf::from(output_path).parent() {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
 
     tracing::info!("Starting native macOS screen recording to {output_path}");
@@ -201,9 +201,11 @@ pub async fn concatenate_segments(
 
     if segments.len() == 1 {
         // Single segment — just move it
-        std::fs::rename(&segments[0], output_path).map_err(|e| {
-            NarratorError::FfmpegFailed(format!("Failed to move segment to output: {e}"))
-        })?;
+        tokio::fs::rename(&segments[0], output_path)
+            .await
+            .map_err(|e| {
+                NarratorError::FfmpegFailed(format!("Failed to move segment to output: {e}"))
+            })?;
         return Ok(output_path.to_string());
     }
 
@@ -221,7 +223,7 @@ pub async fn concatenate_segments(
         .map(|s| format!("file '{s}'"))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(&filelist_path, &filelist_content)?;
+    tokio::fs::write(&filelist_path, &filelist_content).await?;
 
     tracing::info!(
         "Concatenating {} segments into {output_path}",
@@ -254,9 +256,9 @@ pub async fn concatenate_segments(
     }
 
     // Clean up segment files and filelist
-    let _ = std::fs::remove_file(&filelist_path);
+    let _ = tokio::fs::remove_file(&filelist_path).await;
     for seg in segments {
-        let _ = std::fs::remove_file(seg);
+        let _ = tokio::fs::remove_file(seg).await;
     }
 
     Ok(output_path.to_string())

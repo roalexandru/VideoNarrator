@@ -131,7 +131,7 @@ pub async fn apply_edits(
         if covers_full {
             // No edits — just use the original file directly (symlink or copy)
             if input_path != output_path {
-                std::fs::copy(input_path, output_path)?;
+                tokio::fs::copy(input_path, output_path).await?;
             }
             on_progress(100.0);
             return Ok(output_path.to_string());
@@ -250,7 +250,7 @@ pub async fn apply_edits(
 
     // Concat all clips
     if clip_files.len() == 1 {
-        std::fs::rename(&clip_files[0], output_path)?;
+        tokio::fs::rename(&clip_files[0], output_path).await?;
     } else {
         let concat_list = out_dir.join("_edit_concat.txt");
         let list_content: String = clip_files
@@ -265,7 +265,7 @@ pub async fn apply_edits(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        std::fs::write(&concat_list, &list_content)?;
+        tokio::fs::write(&concat_list, &list_content).await?;
 
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
@@ -309,12 +309,12 @@ pub async fn apply_edits(
             }
         }
 
-        let _ = std::fs::remove_file(&concat_list);
+        let _ = tokio::fs::remove_file(&concat_list).await;
     }
 
     // Cleanup temp clips
     for p in &clip_files {
-        let _ = std::fs::remove_file(p);
+        let _ = tokio::fs::remove_file(p).await;
     }
 
     on_progress(100.0);
@@ -496,7 +496,7 @@ pub async fn burn_subtitles(
     // with ffmpeg's subtitles filter (chokes on colons, spaces, special chars)
     let temp_srt =
         std::env::temp_dir().join(format!("_narrator_burn_subs_{}.srt", uuid::Uuid::new_v4()));
-    std::fs::copy(srt_path, &temp_srt)?;
+    tokio::fs::copy(srt_path, &temp_srt).await?;
 
     // Convert hex colors to ASS BGR format
     let primary_colour = hex_rgb_to_ass_bgr(&style.color);
@@ -577,7 +577,7 @@ pub async fn burn_subtitles(
 
         if !fallback.status.success() {
             let stderr = String::from_utf8_lossy(&fallback.stderr);
-            let _ = std::fs::remove_file(&temp_srt);
+            let _ = tokio::fs::remove_file(&temp_srt).await;
             return Err(NarratorError::FfmpegFailed(format!(
                 "Subtitle burn failed: {}",
                 &stderr[..stderr.len().min(400)]
@@ -585,7 +585,7 @@ pub async fn burn_subtitles(
         }
     }
 
-    let _ = std::fs::remove_file(&temp_srt);
+    let _ = tokio::fs::remove_file(&temp_srt).await;
     on_progress(100.0);
 
     Ok(output_path.to_string())
@@ -600,7 +600,7 @@ pub async fn extract_edit_thumbnails(
     let meta = video_engine::probe_video(Path::new(video_path)).await?;
     let interval = meta.duration_seconds / count as f64;
 
-    std::fs::create_dir_all(output_dir)?;
+    tokio::fs::create_dir_all(output_dir).await?;
 
     let output = Command::new(ffmpeg.as_os_str())
         .no_window()
@@ -626,12 +626,18 @@ pub async fn extract_edit_thumbnails(
         return Err(NarratorError::FfmpegFailed(stderr.to_string()));
     }
 
-    let mut paths: Vec<String> = std::fs::read_dir(output_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
-        .map(|e| e.path().to_string_lossy().to_string())
-        .collect();
-    paths.sort();
+    let dir = output_dir.to_string();
+    let paths = tokio::task::spawn_blocking(move || {
+        let mut paths: Vec<String> = std::fs::read_dir(&dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+            .map(|e| e.path().to_string_lossy().to_string())
+            .collect();
+        paths.sort();
+        Ok::<_, std::io::Error>(paths)
+    })
+    .await
+    .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))??;
     Ok(paths)
 }
 

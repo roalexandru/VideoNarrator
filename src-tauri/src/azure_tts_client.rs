@@ -1,6 +1,7 @@
 //! Azure Cognitive Services text-to-speech client for audio narration generation.
 
 use crate::error::NarratorError;
+use crate::http_client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -34,10 +35,7 @@ pub struct AzureTtsVoice {
 }
 
 pub async fn list_voices(api_key: &str, region: &str) -> Result<Vec<AzureTtsVoice>, NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
 
     let url = format!(
         "https://{}.tts.speech.microsoft.com/cognitiveservices/voices/list",
@@ -186,10 +184,7 @@ pub async fn generate_speech(
     text: &str,
     output_path: &PathBuf,
 ) -> Result<(), NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
 
     let url = format!(
         "https://{}.tts.speech.microsoft.com/cognitiveservices/v1",
@@ -239,7 +234,7 @@ pub async fn generate_speech(
         let status = resp.status();
         if status.is_success() {
             let bytes = resp.bytes().await?;
-            std::fs::write(output_path, &bytes)?;
+            tokio::fs::write(output_path, &bytes).await?;
             return Ok(());
         } else if status.as_u16() == 429 {
             retries += 1;
@@ -322,10 +317,7 @@ mod tests {
 }
 
 pub async fn validate_key(api_key: &str, region: &str) -> Result<bool, NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
 
     let key = api_key.trim();
     let url = format!(

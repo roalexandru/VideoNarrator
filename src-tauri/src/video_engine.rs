@@ -216,7 +216,8 @@ pub async fn extract_frames(
     let ffmpeg = detect_ffmpeg()?;
 
     // Ensure output dir exists
-    std::fs::create_dir_all(output_dir)
+    tokio::fs::create_dir_all(output_dir)
+        .await
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let metadata = probe_video(video_path).await?;
@@ -256,53 +257,60 @@ pub async fn extract_frames(
         return Err(NarratorError::FfmpegFailed(stderr.to_string()));
     }
 
-    // Collect extracted frames
-    let mut frames = Vec::new();
-    let mut entries: Vec<_> = std::fs::read_dir(output_dir)
-        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "jpg" || ext == "jpeg")
-        })
-        .collect();
+    // Collect extracted frames — directory scan, image dimension reads, and blake3
+    // hashing are CPU/IO-intensive, so run on the blocking thread pool.
+    let output_dir_owned = output_dir.to_path_buf();
+    let max_frames = config.max_frames;
+    let duration = metadata.duration_seconds;
+    let frames = tokio::task::spawn_blocking(move || {
+        let mut entries: Vec<_> = std::fs::read_dir(&output_dir_owned)
+            .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext == "jpg" || ext == "jpeg")
+            })
+            .collect();
 
-    entries.sort_by_key(|e| e.file_name());
+        entries.sort_by_key(|e| e.file_name());
 
-    for (i, entry) in entries.iter().enumerate() {
-        if i >= config.max_frames {
-            break;
+        let mut frames = Vec::new();
+        for (i, entry) in entries.iter().enumerate() {
+            if i >= max_frames {
+                break;
+            }
+
+            let path = entry.path();
+            let timestamp = i as f64 * interval;
+
+            let Some((width, height)) = get_image_dimensions(&path) else {
+                tracing::warn!(
+                    "Skipping frame with unreadable dimensions: {}",
+                    path.display()
+                );
+                continue;
+            };
+
+            frames.push(Frame {
+                index: i,
+                timestamp_seconds: timestamp.min(duration),
+                path,
+                width,
+                height,
+            });
         }
 
-        let path = entry.path();
-        let timestamp = i as f64 * interval;
+        // Deduplicate similar frames using blake3 hashing
+        Ok::<_, NarratorError>(deduplicate_frames(frames))
+    })
+    .await
+    .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))??;
 
-        // Get image dimensions
-        let dims = get_image_dimensions(&path);
-        if dims.is_none() {
-            tracing::warn!(
-                "Skipping frame with unreadable dimensions: {}",
-                path.display()
-            );
-            continue;
-        }
-        let (width, height) = dims.unwrap();
-
-        let frame = Frame {
-            index: i,
-            timestamp_seconds: timestamp.min(metadata.duration_seconds),
-            path: path.clone(),
-            width,
-            height,
-        };
-
+    // Report progress for each frame back on the async task
+    for frame in &frames {
         on_progress(frame.clone());
-        frames.push(frame);
     }
-
-    // Deduplicate similar frames using blake3 hashing
-    let frames = deduplicate_frames(frames);
 
     Ok(frames)
 }
