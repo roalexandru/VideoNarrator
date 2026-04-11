@@ -213,6 +213,7 @@ export function ExportScreen() {
     setVideoProgress(0);
     setVideoError(null);
     setVideoOutputPath(null);
+    const exportStart = Date.now();
 
     try {
       // Ensure directory exists
@@ -278,7 +279,7 @@ export function ExportScreen() {
       setVideoProgress(100);
       setVideoOutputPath(finalPath);
       setVideoPhase("done");
-      trackEvent("export_completed", { type: "video", tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
+      trackEvent("export_completed", { type: "video", tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio, wall_time_s: Math.round((Date.now() - exportStart) / 1000) });
     } catch (e: any) {
       console.error("Export video:", e);
       trackError("export_video", e, { tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
@@ -304,6 +305,7 @@ export function ExportScreen() {
     setAudioProgress(0);
     setAudioError(null);
     setAudioOutputPath(null);
+    const audioExportStart = Date.now();
 
     try {
       const ch = new Channel<ProgressEvent>();
@@ -325,7 +327,7 @@ export function ExportScreen() {
 
       setAudioOutputPath(ttsOk[0].file_path);
       setAudioPhase("done");
-      trackEvent("export_completed", { type: "audio", tts_provider: ttsProvider });
+      trackEvent("export_completed", { type: "audio", tts_provider: ttsProvider, wall_time_s: Math.round((Date.now() - audioExportStart) / 1000) });
     } catch (e: any) {
       console.error("Export audio:", e);
       trackError("export_audio", e, { tts_provider: ttsProvider });

@@ -6,7 +6,7 @@ import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useEditStore } from "../../stores/editStore";
 import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProviderStatus } from "../../lib/tauri/commands";
-import { trackEvent, trackError } from "../telemetry/analytics";
+import { trackEvent, trackError, resetErrorCount } from "../telemetry/analytics";
 import { toUserMessage } from "../../lib/errorMessages";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
@@ -27,8 +27,17 @@ export function ProcessingScreen() {
   const project = useProjectStore();
   const config = useConfigStore();
   const setScript = useScriptStore((s) => s.setScript);
+  const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
+
+  // Rate limit cooldown timer
+  useEffect(() => {
+    if (rateLimitCooldown <= 0) return;
+    const timer = setInterval(() => setRateLimitCooldown((v) => Math.max(0, v - 1)), 1000);
+    return () => clearInterval(timer);
+  }, [rateLimitCooldown]);
 
   const run = useCallback(async () => {
+    const generationStart = Date.now();
     proc.reset(); proc.setPhase("extracting_frames");
     trackEvent("generation_started", {
       provider: config.aiProvider,
@@ -106,6 +115,8 @@ export function ProcessingScreen() {
     try {
       const script = await startGeneration(params, ch);
       setScript(config.primaryLanguage, script); proc.setPhase("done");
+      resetErrorCount("generate_narration");
+      const wallTime = Math.round((Date.now() - generationStart) / 1000);
       trackEvent("processing_completed", {
         segments: script.segments.length,
         provider: config.aiProvider,
@@ -113,13 +124,20 @@ export function ProcessingScreen() {
         style: config.style,
         language: config.primaryLanguage,
         duration_s: Math.round(script.total_duration_seconds),
+        wall_time_s: wallTime,
         has_edits: editSnapshot.clips.length > 1 || editSnapshot.clips.some((c) => c.speed !== 1.0),
         frame_density: config.frameDensity,
       });
     } catch (err: unknown) {
       trackError("generate_narration", err, { provider: config.aiProvider, model: config.model, style: config.style });
-      proc.setError(toUserMessage(err));
+      const errMsg = toUserMessage(err);
+      proc.setError(errMsg);
       proc.setPhase("error");
+      // Detect rate limit errors and enforce cooldown to prevent retry spam
+      const errStr = String(err).toLowerCase();
+      if (errStr.includes("rate limit") || errStr.includes("429") || errStr.includes("too many requests")) {
+        setRateLimitCooldown(30);
+      }
     }
   }, [project, config, proc, setScript]);
 
@@ -335,7 +353,9 @@ export function ProcessingScreen() {
           <Button variant="secondary" onClick={() => cancelGeneration().then(() => proc.setPhase("cancelled"))}>Cancel</Button>
         )}
         {(proc.phase === "error" || proc.phase === "cancelled") && (
-          <Button onClick={run}>Retry</Button>
+          <Button onClick={run} disabled={rateLimitCooldown > 0}>
+            {rateLimitCooldown > 0 ? `Wait ${rateLimitCooldown}s (rate limited)` : "Retry"}
+          </Button>
         )}
       </div>
 

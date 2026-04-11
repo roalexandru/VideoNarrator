@@ -10,6 +10,10 @@ import { showToast } from "../../components/ui/Toast";
 import { trackEvent } from "../telemetry/analytics";
 import type { ProgressEvent } from "../../types/processing";
 
+// Debounced flag to avoid firing script_edited on every keystroke
+let editDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingEditCount = 0;
+
 const AVAILABLE_LANGUAGES = [
   { code: "en", label: "English" }, { code: "ja", label: "Japanese" }, { code: "de", label: "German" },
   { code: "fr", label: "French" }, { code: "pt-BR", label: "Portuguese (BR)" }, { code: "es", label: "Spanish" },
@@ -296,6 +300,7 @@ export function ReviewScreen() {
     if (!seg) return;
 
     setPreviewingIdx(segmentIndex);
+    trackEvent("tts_preview", { voice: previewVoice, segment_index: segmentIndex });
 
     try {
       const ch = new Channel<ProgressEvent>();
@@ -643,7 +648,15 @@ export function ReviewScreen() {
                   {/* Center: text */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <textarea value={seg.text}
-                      onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
+                      onChange={(e) => {
+                        updateSegmentText(activeLanguage, i, e.target.value);
+                        pendingEditCount++;
+                        if (editDebounceTimer) clearTimeout(editDebounceTimer);
+                        editDebounceTimer = setTimeout(() => {
+                          trackEvent("script_edited", { action: "text_change", edit_count: pendingEditCount });
+                          pendingEditCount = 0;
+                        }, 2000);
+                      }}
                       onClick={(e) => e.stopPropagation()}
                       aria-label={`Narration text for segment ${i + 1}`}
                       rows={2}

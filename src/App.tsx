@@ -156,13 +156,25 @@ export default function App() {
   }, []);
 
   // ── Track session duration on unload ──
+  // beforeunload is unreliable for async IPC; visibilitychange fires more reliably on app close
   useEffect(() => {
-    const handleUnload = () => {
+    let sent = false;
+    const sendSessionEnd = () => {
+      if (sent) return;
+      sent = true;
       const duration = Math.round((Date.now() - sessionStart.current) / 1000);
       trackEvent("session_end", { duration_seconds: duration });
     };
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden") sendSessionEnd();
+    };
+    const handleUnload = () => sendSessionEnd();
+    document.addEventListener("visibilitychange", handleVisibility);
     window.addEventListener("beforeunload", handleUnload);
-    return () => window.removeEventListener("beforeunload", handleUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("beforeunload", handleUnload);
+    };
   }, []);
 
   const doNewProject = useCallback(() => {

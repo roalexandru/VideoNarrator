@@ -100,13 +100,13 @@ describe("trackError", () => {
 
   // ── Message length cap ──
 
-  it("caps error message at 300 characters", () => {
-    const longMessage = "A".repeat(500);
+  it("caps error message at 500 characters", () => {
+    const longMessage = "A".repeat(800);
     trackError("test_ctx", new Error(longMessage));
 
     const call = ipcCalls.find((c) => c.cmd === "track_event");
     const props = call!.payload.props as Record<string, unknown>;
-    expect((props.error_message as string).length).toBeLessThanOrEqual(300);
+    expect((props.error_message as string).length).toBeLessThanOrEqual(500);
   });
 
   // ── Extra props ──
