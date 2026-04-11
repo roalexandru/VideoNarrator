@@ -121,30 +121,60 @@ export function ReviewScreen() {
   const [voicePickerIdx, setVoicePickerIdx] = useState<number | null>(null);
   const [availableVoices, setAvailableVoices] = useState<{id: string; name: string}[]>([]);
   const { updateSegmentVoice } = useScriptStore();
+
+  // Close all popup menus on Escape
   useEffect(() => {
-    // Load voices for the current TTS provider
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && (menuIdx !== null || refiningIdx !== null || voicePickerIdx !== null)) {
+        e.preventDefault();
+        setMenuIdx(null);
+        setRefiningIdx(null);
+        setVoicePickerIdx(null);
+      }
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [menuIdx, refiningIdx, voicePickerIdx]);
+
+  // Language code → locale prefix mapping for voice filtering
+  const langPrefix = activeLanguage === "pt-BR" ? "pt" : activeLanguage.split("-")[0];
+
+  useEffect(() => {
+    // Filter voices by script language — works across all providers
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const filterByLang = (voices: any[], localeKey: string) => {
+      const matching = voices.filter((v) => {
+        const locale = String(v[localeKey] || "").toLowerCase();
+        return locale.startsWith(langPrefix);
+      });
+      return matching.length > 0 ? matching : voices.slice(0, 15);
+    };
+
     const loadVoices = async () => {
       try {
         if (previewVoice === "elevenlabs") {
           const cfg = await getElevenLabsConfig();
           if (cfg?.api_key) {
             const voices = await listElevenLabsVoices(cfg.api_key);
-            setAvailableVoices(voices.map((v: { voice_id: string; name: string }) => ({ id: v.voice_id, name: v.name })));
+            // ElevenLabs voices are multilingual — show all but cap at reasonable count
+            setAvailableVoices(voices.slice(0, 30).map((v: { voice_id: string; name: string }) => ({ id: v.voice_id, name: v.name })));
           }
         } else if (previewVoice === "azure") {
           const cfg = await getAzureTtsConfig();
           if (cfg?.api_key) {
             const voices = await listAzureTtsVoices(cfg.api_key, cfg.region || "eastus");
-            setAvailableVoices(voices.map((v: { short_name: string; display_name: string }) => ({ id: v.short_name, name: v.display_name })));
+            const filtered = filterByLang(voices, "locale");
+            setAvailableVoices(filtered.map((v: { short_name: string; display_name: string }) => ({ id: v.short_name, name: v.display_name })));
           }
         } else {
           const voices = await listBuiltinVoices();
-          setAvailableVoices(voices.map((v: { id: string; name: string }) => ({ id: v.id, name: v.name })));
+          const filtered = filterByLang(voices, "locale");
+          setAvailableVoices(filtered.map((v: { id: string; name: string }) => ({ id: v.id, name: v.name })));
         }
       } catch { setAvailableVoices([]); }
     };
     loadVoices();
-  }, [previewVoice]);
+  }, [previewVoice, langPrefix]);
 
   // Narration preview state
   const [previewMode, setPreviewMode] = useState(false);
@@ -638,7 +668,7 @@ export function ReviewScreen() {
                       <div onClick={(e) => e.stopPropagation()} style={{
                         position: "absolute", top: "100%", right: 0, marginTop: 2, zIndex: 30,
                         background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 8,
-                        padding: 4, minWidth: 180, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                        padding: 4, width: 220, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
                       }}>
                         {/* Refine with AI submenu */}
                         <button onClick={() => { setRefiningIdx(refiningIdx === i ? null : i); }} style={{
@@ -692,7 +722,7 @@ export function ReviewScreen() {
                           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
                         </button>
                         {voicePickerIdx === i && (
-                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4 }}>
+                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4, maxHeight: 180, overflowY: "auto" }}>
                             <button onClick={() => { updateSegmentVoice(activeLanguage, i, undefined); setVoicePickerIdx(null); setMenuIdx(null); trackEvent("segment_voice_changed", { voice: "default" }); }} style={{
                               display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
                               border: "none", background: !seg.voice_override ? "rgba(99,102,241,0.1)" : "transparent",
