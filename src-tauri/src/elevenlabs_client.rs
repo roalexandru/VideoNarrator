@@ -1,6 +1,7 @@
 //! ElevenLabs text-to-speech client for audio narration generation.
 
 use crate::error::NarratorError;
+use crate::http_client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -45,10 +46,7 @@ pub struct TtsResult {
 }
 
 pub async fn list_voices(api_key: &str) -> Result<Vec<ElevenLabsVoice>, NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
     let resp = client
         .get("https://api.elevenlabs.io/v2/voices?page_size=100")
         .header("xi-api-key", api_key)
@@ -197,10 +195,7 @@ pub async fn generate_speech(
     text: &str,
     output_path: &PathBuf,
 ) -> Result<(), NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
     let url = format!(
         "https://api.elevenlabs.io/v1/text-to-speech/{}?output_format=mp3_44100_128",
         config.voice_id
@@ -230,7 +225,7 @@ pub async fn generate_speech(
         let status = resp.status();
         if status.is_success() {
             let bytes = resp.bytes().await?;
-            std::fs::write(output_path, &bytes)?;
+            tokio::fs::write(output_path, &bytes).await?;
             return Ok(());
         } else if status.as_u16() == 429 {
             retries += 1;
@@ -248,10 +243,7 @@ pub async fn generate_speech(
 }
 
 pub async fn validate_key(api_key: &str) -> Result<bool, NarratorError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| NarratorError::ApiError(format!("HTTP client error: {e}")))?;
+    let client = http_client::shared();
     let key = api_key.trim();
 
     // Test with a minimal TTS request — this works even with restricted keys

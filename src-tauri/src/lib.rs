@@ -8,6 +8,7 @@ mod doc_processor;
 mod elevenlabs_client;
 mod error;
 mod export_engine;
+mod http_client;
 mod menu;
 mod models;
 mod process_utils;

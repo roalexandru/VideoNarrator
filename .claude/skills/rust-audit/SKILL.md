@@ -7,6 +7,8 @@ description: Comprehensive Rust performance, safety, and correctness audit for T
 
 Comprehensive performance, safety, and correctness audit of the Rust backend. Read the entire `src-tauri/src/` directory, identify issues, fix them, and verify all fixes compile and pass tests. This skill acts as a senior Rust architect and Tauri expert ensuring zero memory leaks, no blocking loops, no bugs, and optimal cross-platform performance.
 
+**Important:** This audit fixes bugs, safety issues, and performance problems. It does NOT restrict capabilities, remove features, or narrow dependency features unless the user explicitly asks. Changing default features of crates like `image`, `tokio`, etc. can introduce breaking changes.
+
 ## Phase 1: Automated Baseline
 
 Run all static analysis tools to establish a baseline:
@@ -30,16 +32,24 @@ Read every `.rs` file in `src-tauri/src/` to understand the current state of the
 
 This is the highest-severity category. Blocking the Tokio runtime freezes the entire UI.
 
-Read `references/rust-async-safety.md` for detailed patterns and fixes before auditing.
+**Key threshold:** No more than 10-100 microseconds between each `.await` point. Any operation that takes >1ms of CPU time should be offloaded. (Source: Alice Ryhl's async blocking guide)
 
-Audit every `async fn` and Tauri command handler:
+Audit every `async fn` and Tauri command handler — **including functions in ALL modules** (video_edit.rs, screen_recorder.rs, TTS clients, etc.), not just commands.rs:
 
 ### Blocking operations in async context
 - Search for `std::fs::` calls inside `async fn` — these block the Tokio runtime thread pool. Each one should either:
   - Be wrapped in `tokio::task::spawn_blocking(move || { ... })`, OR
   - Be replaced with `tokio::fs::` equivalents
-- Check for `std::process::Command` (synchronous) vs `tokio::process::Command` (async) — synchronous process spawning in async functions blocks the runtime
+- **Check ALL .rs files**, not just commands.rs — video editing, screen recording, TTS, and other modules often have async functions with blocking I/O that are easy to miss
+- Check for `std::process::Command` (synchronous) vs `tokio::process::Command` (async) — synchronous process spawning in async functions blocks the runtime. Watch for sync fallbacks hidden inside `.or_else()` chains
 - Check for `std::thread::sleep` in async contexts — should be `tokio::time::sleep`
+- Check for sync functions called from async context that do heavy work (e.g., reading files from disk and base64-encoding them) — wrap the call site in `spawn_blocking`
+
+### CPU-intensive work offloading
+- Use `spawn_blocking` for: blake3 hashing, base64 encoding of files, image dimension reads, directory scans with file processing, any sync I/O that reads/writes multiple files
+- Use `rayon` for: parallel iteration over independent items where the count is known upfront
+- Note: `spawn_blocking` tasks cannot be cancelled — use it for bounded work, not long-running loops
+- Batch multiple blocking calls into a single `spawn_blocking` instead of calling it per-iteration in a loop
 
 ### Mutex safety
 - Check for `std::sync::Mutex` being held across `.await` points — this can deadlock the Tokio runtime. `tokio::sync::Mutex` must be used when a lock spans an await
@@ -59,14 +69,14 @@ Audit every `async fn` and Tauri command handler:
 ### Unused dependencies
 Check `Cargo.toml` against actual usage in the source code:
 - For each dependency, grep for its usage. If unused, remove it
-- Check if `tokio` features can be narrowed from `"full"` to only what's actually used (e.g., `["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util"]`)
 - Run `cargo tree --manifest-path src-tauri/Cargo.toml --edges no-dev --depth 1` to see the dependency footprint
 
 ### Unbounded caches and resource leaks
-- Check for caches without size limits or eviction policies. If found, add a max size with oldest-entry eviction
+- Check for disk caches without size limits or eviction policies. Desktop apps run for hours/days — an unbounded TTS or frame cache can grow to gigabytes. If found, add a max size (e.g., 500MB) with oldest-entry eviction
 - Check for `Arc` reference cycles that prevent deallocation
 - Verify all temporary files are cleaned up — look for `_tmp_` patterns and ensure error paths also clean up partial files
 - Check that spawned child processes are always waited on or killed (zombie process prevention)
+- Check for WebView memory accumulation — JS bindings, window references, and event listeners can leak
 
 ### Unnecessary allocations and cloning
 - Search for `.clone()` calls and evaluate if borrows or `Arc` sharing would suffice
@@ -87,33 +97,37 @@ Check `Cargo.toml` against actual usage in the source code:
 
 ## Phase 4: Tauri-Specific Patterns
 
-Read `references/tauri-gotchas.md` for Tauri v2 specific patterns before auditing.
-
 ### Command handler correctness
 - Verify all `#[tauri::command]` functions return `Result<T, NarratorError>` (not raw types that swallow errors)
 - Check `State<'_>` access patterns — are locks held for the minimum duration? Call `drop(guard)` before any `.await`
 - Verify all Tauri commands in `invoke_handler![]` match actual function signatures
-- Check `Channel<ProgressEvent>` usage — sends should be non-blocking with `.send(...).ok()` pattern
+- Check `Channel<ProgressEvent>` usage — sends should be non-blocking with `.send(...).ok()` pattern. Throttle to ~10-20 events/sec for UI — more than 60/sec causes frontend lag
 
-### IPC serialization
-- Check for large data transfers over IPC (e.g., full base64 frame data). Consider the Tauri asset protocol for large binary payloads
+### IPC serialization and large payloads
+- Tauri IPC serializes everything as JSON, which is expensive for large data. Benchmarks show ~5ms on macOS but ~200ms on Windows for 10MB payloads
+- Check for large data transfers over IPC (e.g., full base64 frame data). For binary data >1MB, consider the Tauri asset protocol (`convertFileSrc`) instead of sending base64 over IPC
 - Verify all IPC types implement `Serialize` + `Deserialize` correctly
 - Check `NarratorError` serialization — does it preserve enough context for the frontend to show useful messages?
+- Batch IPC calls rather than frequent small calls (~1-5ms overhead per call)
 
 ### State management
-- Check for redundant wrapping — if Tauri `State` already provides shared access, inner `Arc` wrappers may be unnecessary
-- Verify state initialization order in `lib.rs` (state must be managed before commands access it)
+- Check for redundant `Arc` wrapping — Tauri `State<'_>` already wraps the value in `Arc` internally. Inner `Arc` is only needed if fields are cloned into detached `tokio::spawn` tasks that outlive the state access
+- Verify state initialization order in `lib.rs` (`.manage(state)` before plugins that access it)
+- Split large `Mutex<AllTheThings>` into independent locks for independent data — reduces contention
 
 ### Plugin and capability review
 - Review `capabilities/default.json` — does it follow least-privilege? Are there permissions that could be narrowed?
 - Check that plugins are initialized in the correct order in `lib.rs`
 - Verify single-instance and window management works correctly
 
+### Security hardening
+- Validate user-supplied paths before passing to OS commands (e.g., `open`, `xdg-open`) — check `is_dir()` / `is_file()` to prevent URL injection
+- Strip `canonicalize()` extended path prefix (`\\?\`) on Windows before passing paths to external tools
+- Never pass unsanitized frontend input to shell commands
+
 **Fix all issues found before proceeding.**
 
 ## Phase 5: Cross-Platform Correctness
-
-Read `references/tauri-gotchas.md` for cross-platform patterns if not already loaded.
 
 ### Platform conditional compilation
 - For every `#[cfg(target_os = "macos")]` block, verify there is a corresponding `#[cfg(target_os = "windows")]` handler (and vice versa)
@@ -121,20 +135,25 @@ Read `references/tauri-gotchas.md` for cross-platform patterns if not already lo
 - Verify `#[cfg(not(target_os = "macos"))]` blocks don't accidentally activate on Linux when only Windows behavior is intended
 - Check for `#[cfg(unix)]` usage — macOS AND Linux both match this
 
+### WebView differences
+- macOS uses WebKit (in-process), Windows uses WebView2 (out-of-process), Linux uses WebKitGTK (in-process)
+- CSS rendering and JavaScript engine behavior differ — test on all target platforms
+- Windows WebView2 performance can differ significantly from macOS WebKit for the same operations
+
 ### Path handling
 - Verify `PathBuf` is used consistently (no string concatenation with `/` or `\`)
-- Check that Windows extended path prefix (`\\?\`) from `canonicalize()` is stripped where needed
+- Check that Windows extended path prefix (`\\?\`) from `canonicalize()` is stripped where needed (or use `dunce::canonicalize()`)
 - Verify home directory resolution works on all platforms (`HOME` on Unix, `USERPROFILE` on Windows)
 - Check that file path display uses `display()` or `to_string_lossy()`, never `to_str().unwrap()`
 
 ### Process spawning
-- Verify Windows console suppression (`.creation_flags(CREATE_NO_WINDOW)` or equivalent) is applied on every `Command` that spawns on Windows (ffmpeg, ffprobe, powershell, etc.)
+- Verify Windows console suppression (`.creation_flags(CREATE_NO_WINDOW)` or the `CommandNoWindow` trait) is applied on **every** `Command` that spawns on Windows (ffmpeg, ffprobe, powershell, etc.) — missing this causes console window flashes
 - Check that binary detection covers platform-specific paths and names (e.g., `.exe` suffix on Windows)
 - Verify screen recording handles platform differences correctly
 
 ### Credential storage
 - Verify macOS debug-mode keychain access works (may use `security` CLI to avoid prompt)
-- Check Windows Credential Manager access via keyring crate
+- Check Windows Credential Manager access via keyring crate (2.5KB limit per credential — use JSON blob for multiple keys)
 - Verify error handling when keychain is locked, unavailable, or permission denied
 - Check that credential migration handles edge cases (empty values, corrupted data)
 
@@ -146,15 +165,16 @@ Read `references/tauri-gotchas.md` for cross-platform patterns if not already lo
 
 ## Phase 6: Performance Optimization
 
+### Connection pooling
+- Check if `reqwest::Client` is constructed per-request or shared. A shared client reuses TCP connections, TLS sessions, and DNS cache — massive performance win. `reqwest::Client` uses `Arc` internally so it's cheap to clone
+- If per-request construction is found, refactor to a shared `LazyLock<reqwest::Client>` or `OnceLock<reqwest::Client>`. Configure `pool_max_idle_per_host` and timeouts
+- Verify timeouts are set on the client (connect timeout, request timeout)
+
 ### Parallelism opportunities
 - Look for sequential loops that make independent API calls or I/O operations — these can often be parallelized with `futures::stream::buffer_unordered()` or `tokio::join!`
+- For cloud TTS/API calls, use bounded concurrency (e.g., 3 concurrent) to avoid rate limits
 - Check for sequential document processing where files are independent
 - Look for sequential hash computation or frame processing that could use `spawn_blocking` with parallel iteration
-
-### Connection pooling
-- Check if `reqwest::Client` is constructed per-request or shared. A shared client reuses TCP connections and TLS sessions — massive performance win
-- If per-request construction is found, refactor to store a shared client in `AppState` or use `once_cell::sync::Lazy`
-- Verify timeouts are set on the client (connect timeout, request timeout)
 
 ### Buffer and pre-allocation
 - Check `Vec::new()` where the final size is known — use `Vec::with_capacity()`
@@ -206,6 +226,7 @@ Present a structured report to the user:
 
 ### Async & Runtime Safety
 - Blocking I/O in async: <N issues found, N fixed>
+- CPU offloading (spawn_blocking): <N additions>
 - Mutex safety: <pass/issues found and fixed>
 - Tokio patterns: <pass/issues found and fixed>
 
@@ -218,17 +239,20 @@ Present a structured report to the user:
 ### Tauri Patterns
 - Command handlers: <pass/issues found and fixed>
 - IPC serialization: <pass/issues found and fixed>
+- State management (redundant Arc): <pass/issues found and fixed>
 - Capabilities ACL: <pass/issues found and fixed>
+- Security (path validation, input sanitization): <pass/issues found and fixed>
 
 ### Cross-Platform
 - Platform cfg coverage: <pass/N gaps found and fixed>
 - Path handling: <pass/issues found and fixed>
-- Process spawning: <pass/issues found and fixed>
+- Process spawning (.no_window): <pass/issues found and fixed>
 
 ### Performance
-- Parallelism: <N opportunities addressed>
 - Connection pooling: <pass/refactored>
+- Parallelism: <N opportunities addressed>
 - FFmpeg optimization: <pass/N spawns consolidated>
+- Cache eviction: <pass/issues found and fixed>
 
 ### Summary
 - Total issues found: N

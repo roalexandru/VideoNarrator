@@ -3,6 +3,7 @@
 //! No API key required — works offline.
 
 use crate::error::NarratorError;
+use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use std::path::Path;
 use tokio::process::Command;
@@ -36,6 +37,7 @@ pub async fn generate_speech(
         args.push(text.to_string());
 
         let output = Command::new("say")
+            .no_window()
             .args(&args)
             .output()
             .await
@@ -48,6 +50,7 @@ pub async fn generate_speech(
 
         // Convert AIFF to MP3 via ffmpeg — normalize to 44.1kHz mono for consistency
         let convert = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -66,7 +69,7 @@ pub async fn generate_speech(
             .await
             .map_err(|e| NarratorError::FfmpegFailed(format!("ffmpeg convert failed: {e}")))?;
 
-        let _ = std::fs::remove_file(&aiff_path);
+        let _ = tokio::fs::remove_file(&aiff_path).await;
 
         if !convert.status.success() {
             let stderr = String::from_utf8_lossy(&convert.stderr);
@@ -103,6 +106,7 @@ $synth.Dispose();"#,
         );
 
         let output = Command::new("powershell")
+            .no_window()
             .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
             .output()
             .await
@@ -117,6 +121,7 @@ $synth.Dispose();"#,
 
         // Convert WAV to MP3 via ffmpeg
         let convert = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -131,7 +136,7 @@ $synth.Dispose();"#,
             .await
             .map_err(|e| NarratorError::FfmpegFailed(format!("ffmpeg convert failed: {e}")))?;
 
-        let _ = std::fs::remove_file(&wav_path);
+        let _ = tokio::fs::remove_file(&wav_path).await;
 
         if !convert.status.success() {
             let stderr = String::from_utf8_lossy(&convert.stderr);
@@ -158,24 +163,33 @@ $synth.Dispose();"#,
 
         args.push(text.to_string());
 
-        let espeak_output = Command::new("espeak-ng")
+        let espeak_output = match Command::new("espeak-ng")
+            .no_window()
             .args(&args)
             .output()
             .await
-            .or_else(|_| {
+        {
+            Ok(out) => out,
+            Err(_) => {
                 // Fallback to espeak if espeak-ng not available
-                std::process::Command::new("espeak").args(&args).output()
-            })
-            .map_err(|e| NarratorError::FfmpegFailed(format!("espeak failed: {e}")))?;
+                Command::new("espeak")
+                    .no_window()
+                    .args(&args)
+                    .output()
+                    .await
+                    .map_err(|e| NarratorError::FfmpegFailed(format!("espeak failed: {e}")))?
+            }
+        };
 
         if !espeak_output.status.success() {
             return Err(NarratorError::FfmpegFailed("espeak TTS failed".into()));
         }
 
         // espeak --stdout outputs WAV to stdout, pipe to file
-        std::fs::write(&wav_path, &espeak_output.stdout)?;
+        tokio::fs::write(&wav_path, &espeak_output.stdout).await?;
 
         let convert = Command::new(ffmpeg.as_os_str())
+            .no_window()
             .args([
                 "-y",
                 "-i",
@@ -190,7 +204,7 @@ $synth.Dispose();"#,
             .await
             .map_err(|e| NarratorError::FfmpegFailed(format!("ffmpeg convert failed: {e}")))?;
 
-        let _ = std::fs::remove_file(&wav_path);
+        let _ = tokio::fs::remove_file(&wav_path).await;
 
         if !convert.status.success() {
             let stderr = String::from_utf8_lossy(&convert.stderr);
@@ -210,6 +224,7 @@ pub async fn list_voices() -> Result<Vec<BuiltinVoice>, NarratorError> {
     #[cfg(target_os = "macos")]
     {
         let output = Command::new("say")
+            .no_window()
             .args(["-v", "?"])
             .output()
             .await
@@ -267,6 +282,7 @@ pub async fn list_voices() -> Result<Vec<BuiltinVoice>, NarratorError> {
     #[cfg(target_os = "windows")]
     {
         let output = Command::new("powershell")
+            .no_window()
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -301,16 +317,20 @@ pub async fn list_voices() -> Result<Vec<BuiltinVoice>, NarratorError> {
 
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("espeak-ng")
+        let output = match Command::new("espeak-ng")
+            .no_window()
             .args(["--voices"])
             .output()
             .await
-            .or_else(|_| {
-                std::process::Command::new("espeak")
-                    .args(["--voices"])
-                    .output()
-            })
-            .ok();
+        {
+            Ok(out) => Some(out),
+            Err(_) => Command::new("espeak")
+                .no_window()
+                .args(["--voices"])
+                .output()
+                .await
+                .ok(),
+        };
 
         if let Some(output) = output {
             if output.status.success() {

@@ -120,7 +120,7 @@ fn write_keychain(map: &HashMap<String, String>) -> Result<(), NarratorError> {
 
 /// Read the full secrets map (from cache or keychain).
 fn read_all() -> HashMap<String, String> {
-    let mut cache = CACHE.lock().unwrap();
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref map) = *cache {
         return map.clone();
     }
@@ -133,7 +133,7 @@ fn read_all() -> HashMap<String, String> {
 /// Write the full secrets map to keychain and update cache.
 fn write_all(map: &HashMap<String, String>) -> Result<(), NarratorError> {
     write_keychain(map)?;
-    *CACHE.lock().unwrap() = Some(map.clone());
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
     Ok(())
 }
 

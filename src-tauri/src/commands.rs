@@ -141,23 +141,23 @@ pub enum RecordingPhase {
 }
 
 pub struct RecorderState {
-    pub ffmpeg_child: Arc<Mutex<Option<tokio::process::Child>>>,
-    pub segments: Arc<Mutex<Vec<String>>>,
-    pub phase: Arc<Mutex<RecordingPhase>>,
-    pub output_dir: Arc<Mutex<Option<String>>>,
-    pub output_path: Arc<Mutex<Option<String>>>,
-    pub segment_counter: Arc<std::sync::atomic::AtomicU32>,
+    pub ffmpeg_child: Mutex<Option<tokio::process::Child>>,
+    pub segments: Mutex<Vec<String>>,
+    pub phase: Mutex<RecordingPhase>,
+    pub output_dir: Mutex<Option<String>>,
+    pub output_path: Mutex<Option<String>>,
+    pub segment_counter: std::sync::atomic::AtomicU32,
 }
 
 impl RecorderState {
     pub fn new() -> Self {
         Self {
-            ffmpeg_child: Arc::new(Mutex::new(None)),
-            segments: Arc::new(Mutex::new(Vec::new())),
-            phase: Arc::new(Mutex::new(RecordingPhase::Idle)),
-            output_dir: Arc::new(Mutex::new(None)),
-            output_path: Arc::new(Mutex::new(None)),
-            segment_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            ffmpeg_child: Mutex::new(None),
+            segments: Mutex::new(Vec::new()),
+            phase: Mutex::new(RecordingPhase::Idle),
+            output_dir: Mutex::new(None),
+            output_path: Mutex::new(None),
+            segment_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -381,6 +381,7 @@ pub async fn process_documents(
             )));
         }
         let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let resolved = strip_extended_path_prefix(&resolved);
         let doc = doc_processor::process_document(&resolved)?;
         total_size += doc.content.len();
         if total_size > MAX_TOTAL_SIZE {
@@ -453,7 +454,8 @@ pub async fn generate_narration(
     }
 
     let frames_dir = project_store::get_project_frames_dir(&project_id);
-    std::fs::create_dir_all(&frames_dir)
+    tokio::fs::create_dir_all(&frames_dir)
+        .await
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let channel_clone = channel.clone();
@@ -474,13 +476,13 @@ pub async fn generate_narration(
     {
         Ok(f) => f,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&frames_dir_cleanup);
+            let _ = tokio::fs::remove_dir_all(&frames_dir_cleanup).await;
             return Err(e);
         }
     };
 
     if state.cancel_flag.load(Ordering::SeqCst) {
-        let _ = std::fs::remove_dir_all(&frames_dir);
+        let _ = tokio::fs::remove_dir_all(&frames_dir).await;
         return Err(NarratorError::Cancelled);
     }
 
@@ -524,13 +526,17 @@ pub async fn generate_narration(
 
     let video_metadata = video_engine::probe_video(Path::new(&params.video_path)).await?;
     let system_prompt = ai_client::build_system_prompt(&style, &docs, &params.custom_prompt);
-    let user_message = ai_client::build_user_message(
-        &frames,
-        &params.title,
-        &params.description,
-        &video_metadata,
-        &params.primary_language,
-    )?;
+    // build_user_message reads frame files from disk and base64-encodes them (CPU+IO bound)
+    let frames_clone = frames.clone();
+    let title = params.title.clone();
+    let description = params.description.clone();
+    let vm = video_metadata.clone();
+    let lang = params.primary_language.clone();
+    let user_message = tokio::task::spawn_blocking(move || {
+        ai_client::build_user_message(&frames_clone, &title, &description, &vm, &lang)
+    })
+    .await
+    .map_err(|e| NarratorError::ApiError(e.to_string()))??;
 
     // Start estimated progress reporter — gives the user a smooth progress bar
     // during the 30-60 second AI call instead of a frozen UI.
@@ -564,7 +570,9 @@ pub async fn generate_narration(
 
     // Stop estimated progress reporter
     cancel_progress.store(true, Ordering::SeqCst);
-    let _ = progress_task.await;
+    if let Err(e) = progress_task.await {
+        tracing::warn!("Progress reporter task failed: {e}");
+    }
 
     // Jump to 100% once the AI call completes
     channel
@@ -607,8 +615,12 @@ pub async fn generate_narration(
         edit_clips: None,
         video_metadata: None,
     };
-    let _ = project_store::create_project(&project_config);
-    let _ = project_store::save_script(&project_id, &params.primary_language, &script);
+    if let Err(e) = project_store::create_project(&project_config) {
+        tracing::warn!("Failed to auto-save project: {e}");
+    }
+    if let Err(e) = project_store::save_script(&project_id, &params.primary_language, &script) {
+        tracing::warn!("Failed to auto-save script: {e}");
+    }
 
     Ok(script)
 }
@@ -681,7 +693,8 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
     project_store::validate_project_id(&id)?;
     let dir = project_store::get_narrator_dir().join("projects").join(&id);
     if dir.exists() {
-        std::fs::remove_dir_all(&dir)
+        tokio::fs::remove_dir_all(&dir)
+            .await
             .map_err(|e| NarratorError::ProjectError(format!("Failed to delete project: {e}")))?;
     }
     Ok(())
@@ -902,6 +915,50 @@ fn tts_cache_dir() -> Result<PathBuf, NarratorError> {
     Ok(dir)
 }
 
+/// Evict oldest entries from the TTS cache if it exceeds the size limit.
+/// Runs opportunistically — errors are silently ignored.
+fn evict_tts_cache(cache_dir: &Path) {
+    const MAX_CACHE_SIZE: u64 = 500 * 1024 * 1024; // 500 MB
+
+    let entries: Vec<_> = match std::fs::read_dir(cache_dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = entries
+        .iter()
+        .filter_map(|e| {
+            let meta = e.metadata().ok()?;
+            if meta.is_file() {
+                let modified = meta.modified().ok()?;
+                Some((e.path(), meta.len(), modified))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let total_size: u64 = files.iter().map(|(_, s, _)| s).sum();
+    if total_size <= MAX_CACHE_SIZE {
+        return;
+    }
+
+    // Sort oldest first
+    files.sort_by_key(|(_, _, t)| *t);
+
+    let mut freed = 0u64;
+    let target = total_size - MAX_CACHE_SIZE;
+    for (path, size, _) in &files {
+        if freed >= target {
+            break;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            freed += size;
+        }
+    }
+    tracing::info!("TTS cache eviction: freed {} MB", freed / (1024 * 1024));
+}
+
 /// Apply a per-segment voice override to a TTS provider.
 /// Returns a modified provider with the overridden voice, or clones the original.
 fn apply_voice_override(base: &TtsProvider, voice_override: &Option<String>) -> TtsProvider {
@@ -941,7 +998,7 @@ async fn generate_speech_for_provider(
     if let Ok(cache_dir) = tts_cache_dir() {
         let cached = cache_dir.join(format!("{cache_key}.mp3"));
         if cached.exists() {
-            match std::fs::copy(&cached, filepath) {
+            match tokio::fs::copy(&cached, filepath).await {
                 Ok(_) => {
                     tracing::info!("TTS cache hit: {cache_key}");
                     return Ok(());
@@ -967,10 +1024,14 @@ async fn generate_speech_for_provider(
         }
     }
 
-    // Store in cache
+    // Store in cache and evict old entries if over size limit
     if let Ok(cache_dir) = tts_cache_dir() {
         let cached = cache_dir.join(format!("{cache_key}.mp3"));
-        let _ = std::fs::copy(filepath, &cached);
+        let _ = tokio::fs::copy(filepath, &cached).await;
+        let cd = cache_dir.clone();
+        tokio::task::spawn_blocking(move || evict_tts_cache(&cd))
+            .await
+            .ok();
     }
 
     Ok(())
@@ -1042,7 +1103,7 @@ pub async fn generate_tts(
     };
 
     let out = PathBuf::from(&output_dir);
-    std::fs::create_dir_all(&out)?;
+    tokio::fs::create_dir_all(&out).await?;
 
     let mut results = Vec::new();
 
@@ -1178,7 +1239,7 @@ pub async fn generate_tts(
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            std::fs::write(&concat_list_path, &concat_content)?;
+            tokio::fs::write(&concat_list_path, &concat_content).await?;
 
             channel.send(ProgressEvent::Progress { percent: 92.0 }).ok();
 
@@ -1227,14 +1288,14 @@ pub async fn generate_tts(
             }
 
             // Clean up temp files
-            let _ = std::fs::remove_file(&concat_list_path);
+            let _ = tokio::fs::remove_file(&concat_list_path).await;
             for part in &concat_parts {
                 if part.to_string_lossy().contains("_tmp_sil_") {
-                    let _ = std::fs::remove_file(part);
+                    let _ = tokio::fs::remove_file(part).await;
                 }
             }
             for (_, path, _, _) in &segment_files {
-                let _ = std::fs::remove_file(path);
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
     } else {
@@ -1536,6 +1597,13 @@ pub async fn merge_audio_video(
 
 #[tauri::command]
 pub async fn open_folder(path: String) -> Result<(), NarratorError> {
+    let p = Path::new(&path);
+    if !p.is_dir() {
+        return Err(NarratorError::IoError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Path is not a directory",
+        )));
+    }
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("open").arg(&path).spawn();
@@ -1560,24 +1628,30 @@ pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>
         return Ok(Vec::new());
     }
 
-    let mut entries: Vec<_> = std::fs::read_dir(&frames_dir)
-        .map_err(|e| NarratorError::ProjectError(e.to_string()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|x| x == "jpg" || x == "jpeg" || x == "png")
-        })
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
+    let frames = tokio::task::spawn_blocking(move || {
+        let mut entries: Vec<_> = std::fs::read_dir(&frames_dir)
+            .map_err(|e| NarratorError::ProjectError(e.to_string()))?
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x == "jpg" || x == "jpeg" || x == "png")
+            })
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
 
-    let mut frames = Vec::new();
-    for (i, entry) in entries.iter().enumerate() {
-        let path = entry.path().to_string_lossy().to_string();
-        // Parse timestamp from filename pattern frame_NNNN.jpg → index * interval
-        // We don't know the exact interval, but frames are sequential
-        frames.push(ProjectFrame { index: i, path });
-    }
+        let frames: Vec<ProjectFrame> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| ProjectFrame {
+                index: i,
+                path: entry.path().to_string_lossy().to_string(),
+            })
+            .collect();
+        Ok::<_, NarratorError>(frames)
+    })
+    .await
+    .map_err(|e| NarratorError::ProjectError(e.to_string()))??;
     Ok(frames)
 }
 
@@ -1587,7 +1661,8 @@ pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>
 pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, NarratorError> {
     let mut results = Vec::new();
     let output_dir = PathBuf::from(&options.output_directory);
-    std::fs::create_dir_all(&output_dir)
+    tokio::fs::create_dir_all(&output_dir)
+        .await
         .map_err(|e| NarratorError::ExportError(format!("Failed to create output dir: {e}")))?;
 
     for language in &options.languages {
@@ -1608,7 +1683,7 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                     format!("{basename}.{format}")
                 };
                 let filepath = output_dir.join(&filename);
-                match std::fs::write(&filepath, &content) {
+                match tokio::fs::write(&filepath, &content).await {
                     Ok(()) => results.push(ExportResult {
                         format: format.to_string(),
                         language: language.clone(),
@@ -1648,7 +1723,7 @@ pub async fn burn_subtitles(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(std::env::temp_dir);
     let srt_path = out_dir.join("_temp_subtitles.srt");
-    std::fs::write(&srt_path, &srt_content)?;
+    tokio::fs::write(&srt_path, &srt_content).await?;
 
     let result = video_edit::burn_subtitles(
         &video_path,
@@ -1661,7 +1736,7 @@ pub async fn burn_subtitles(
     )
     .await;
 
-    let _ = std::fs::remove_file(&srt_path);
+    let _ = tokio::fs::remove_file(&srt_path).await;
     result
 }
 
