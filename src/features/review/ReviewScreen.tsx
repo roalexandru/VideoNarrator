@@ -43,6 +43,13 @@ export function ReviewScreen() {
   const [framePaths, setFramePaths] = useState<string[]>([]);
   const [deleteTarget, setDeleteTarget] = useState<number | null>(null);
   const [previewingIdx, setPreviewingIdx] = useState<number | null>(null);
+
+  // Resizable split between video area and segment list
+  const [videoAreaHeight, setVideoAreaHeight] = useState(() => {
+    try { const v = localStorage.getItem("narrator_review_video_height"); return v ? Number(v) : 320; } catch { return 320; }
+  });
+  const [resizing, setResizing] = useState(false);
+  useEffect(() => { try { localStorage.setItem("narrator_review_video_height", String(videoAreaHeight)); } catch {} }, [videoAreaHeight]);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
 
   // Per-project preview voice — persisted in localStorage, defaults to "builtin"
@@ -401,12 +408,6 @@ export function ReviewScreen() {
   const seekTo = (s: number) => { if (videoRef.current) videoRef.current.currentTime = s; };
   const togglePlay = () => { if (!videoRef.current) return; isPlaying ? videoRef.current.pause() : videoRef.current.play(); };
 
-  const timelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!duration) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    seekTo(((e.clientX - rect.left) / rect.width) * duration);
-  };
-
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       {/* Header */}
@@ -488,10 +489,10 @@ export function ReviewScreen() {
         </div>
       </div>
 
-      {/* VIDEO PLAYER */}
-      <div
-        style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#0a0a0e", flexShrink: 0, maxHeight: "35vh", minHeight: 120 }}
-      >
+      {/* VIDEO PLAYER + TRANSPORT + THUMBNAILS (resizable section) */}
+      <div style={{ height: videoAreaHeight, minHeight: 160, flexShrink: 0, display: "flex", flexDirection: "column" }}>
+      {/* Video */}
+      <div style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#0a0a0e", flex: 1, minHeight: 80 }}>
         <video ref={videoRef} playsInline onClick={togglePlay}
           style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
         {!src && <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: C.muted }}>No video</div>}
@@ -499,53 +500,37 @@ export function ReviewScreen() {
         {/* Caption overlay */}
         {currentSegment && (
           <div style={{
-            position: "absolute", bottom: 56, left: "50%", transform: "translateX(-50%)",
+            position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)",
             maxWidth: "80%", padding: "10px 20px",
-            background: "rgba(0,0,0,0.75)", borderRadius: 8, transition: "bottom 0.2s",
+            background: "rgba(0,0,0,0.75)", borderRadius: 8,
           }}>
             <p style={{ color: "#fff", fontSize: 15, textAlign: "center", lineHeight: 1.5, margin: 0 }}>{currentSegment.text}</p>
           </div>
         )}
+      </div>
 
-        {/* Custom controls bar — always visible */}
-        <div style={{
-          position: "absolute", bottom: 0, left: 0, right: 0,
-          background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
-          padding: "20px 16px 10px",
-          opacity: 1,
-          display: "flex", alignItems: "center", gap: 12,
-        }}>
-          <button onClick={togglePlay} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, color: "#fff", display: "flex" }}>
-            {isPlaying
-              ? <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-              : <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
-          </button>
-          <span style={{ color: "#fff", fontSize: 12, fontFamily: "monospace", minWidth: 90 }}>
-            {secondsToTimestamp(currentTime)} / {secondsToTimestamp(duration)}
-          </span>
-          {/* Mini scrubber */}
-          <div onClick={timelineClick} style={{ flex: 1, height: 4, background: "rgba(255,255,255,0.2)", borderRadius: 2, cursor: "pointer", position: "relative" }}>
-            <div style={{ height: "100%", width: duration > 0 ? `${(currentTime / duration) * 100}%` : "0%", background: C.accent, borderRadius: 2 }} />
-          </div>
-        </div>
-
-        {/* Time badge — hidden since controls are always visible */}
+      {/* TRANSPORT BAR — matches Edit Video */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 4px", borderBottom: `1px solid ${C.border}`, flexShrink: 0, opacity: src ? 1 : 0.3, pointerEvents: src ? "auto" : "none" }}>
+        <button aria-label="Previous segment" onClick={() => { let prev = -1; for (let j = segments.length - 1; j >= 0; j--) { if (segments[j].start_seconds < currentTime - 0.5) { prev = j; break; } } if (prev >= 0) seekTo(segments[prev].start_seconds); else seekTo(0); }} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 20L9 12l10-8v16zM7 19V5H5v14h2z"/></svg>
+        </button>
+        <button aria-label={isPlaying ? "Pause" : "Play"} onClick={togglePlay} style={{ background: "rgba(255,255,255,0.06)", border: "none", color: "#fff", cursor: "pointer", padding: 6, borderRadius: 6, display: "flex" }}>
+          {isPlaying
+            ? <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+            : <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>}
+        </button>
+        <button aria-label="Next segment" onClick={() => { const next = segments.find((s) => s.start_seconds > currentTime + 0.5); if (next) seekTo(next.start_seconds); }} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", padding: 4, display: "flex" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M5 4l10 8-10 8V4zm12-1v14h2V5h-2z"/></svg>
+        </button>
+        <span style={{ fontFamily: "monospace", fontSize: 13, color: C.text, fontWeight: 600, minWidth: 110 }}>
+          {secondsToTimestamp(currentTime)} / {secondsToTimestamp(duration)}
+        </span>
+        <div style={{ flex: 1 }} />
+        {segments.length > 0 && <span style={{ fontSize: 11, color: C.muted }}>{segments.length} segment{segments.length !== 1 ? "s" : ""}</span>}
       </div>
 
       {/* THUMBNAIL TIMELINE */}
       <div style={{ flexShrink: 0, padding: "6px 0" }}>
-        {/* Scrubber track */}
-        <div onClick={timelineClick} style={{ height: 4, background: "rgba(255,255,255,0.06)", borderRadius: 2, cursor: "pointer", position: "relative", marginBottom: 6 }}>
-          <div style={{ height: "100%", width: duration > 0 ? `${(currentTime / duration) * 100}%` : "0%", background: C.accent, borderRadius: 2, transition: "width 0.1s" }} />
-          {duration > 0 && (
-            <div style={{
-              position: "absolute", top: -5, left: `${(currentTime / duration) * 100}%`, transform: "translateX(-50%)",
-              width: 14, height: 14, borderRadius: "50%", background: C.accent,
-              border: "2px solid #0f0f15", boxShadow: `0 0 6px ${C.accent}`,
-            }} />
-          )}
-        </div>
-
         {/* Segment blocks with thumbnails */}
         <div ref={timelineRef} style={{ display: "flex", gap: 2, overflowX: "auto", paddingBottom: 4 }}>
           {segments.map((seg, i) => {
@@ -580,6 +565,30 @@ export function ReviewScreen() {
             );
           })}
         </div>
+      </div>
+      </div>
+
+      {/* RESIZE HANDLE */}
+      <div
+        onMouseDown={(e) => {
+          e.preventDefault();
+          setResizing(true);
+          const startY = e.clientY;
+          const startH = videoAreaHeight;
+          const onMove = (me: MouseEvent) => setVideoAreaHeight(Math.max(160, Math.min(600, startH + (me.clientY - startY))));
+          const onUp = () => { setResizing(false); document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+          document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
+        }}
+        style={{
+          height: 6, cursor: "row-resize", flexShrink: 0,
+          background: resizing ? "rgba(99,102,241,0.3)" : "transparent",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          transition: resizing ? "none" : "background 0.15s",
+        }}
+        onMouseEnter={(e) => { if (!resizing) e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+        onMouseLeave={(e) => { if (!resizing) e.currentTarget.style.background = "transparent"; }}
+      >
+        <div style={{ width: 32, height: 2, borderRadius: 1, background: "rgba(255,255,255,0.15)" }} />
       </div>
 
       {/* SEGMENT LIST */}
