@@ -78,6 +78,8 @@ export function ReviewScreen() {
   const [refiningIdx, setRefiningIdx] = useState<number | null>(null);
   const [refineLoading, setRefineLoading] = useState(false);
   const [customInstruction, setCustomInstruction] = useState("");
+  // Kebab menu state (consolidates Voice, Refine, Delete)
+  const [menuIdx, setMenuIdx] = useState<number | null>(null);
   const REFINE_PRESETS = [
     { label: "Make shorter", instruction: "Make this narration segment more concise. Keep the key message but use fewer words." },
     { label: "Make more detailed", instruction: "Expand this narration segment with more detail and explanation." },
@@ -104,6 +106,8 @@ export function ReviewScreen() {
       updateSegmentText(activeLanguage, segmentIdx, refined);
       setRefiningIdx(null);
       setCustomInstruction("");
+      setRefiningIdx(null);
+      setMenuIdx(null);
       trackEvent("segment_refined", { instruction_type: instruction.length > 60 ? "custom" : "preset" });
       showToast("Segment refined", "success");
     } catch (err) {
@@ -448,9 +452,9 @@ export function ReviewScreen() {
         </div>
       </div>
 
-      {/* VIDEO PLAYER — controls hidden until hover */}
+      {/* VIDEO PLAYER */}
       <div
-        style={{ position: "relative", borderRadius: 10, overflow: "hidden", background: "#000", flexShrink: 0, aspectRatio: "16/9", maxHeight: "42vh" }}
+        style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#0a0a0e", flexShrink: 0, maxHeight: "35vh", minHeight: 120 }}
       >
         <video ref={videoRef} playsInline onClick={togglePlay}
           style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
@@ -542,8 +546,8 @@ export function ReviewScreen() {
         </div>
       </div>
 
-      {/* SEGMENT EDITOR */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+      {/* SEGMENT LIST */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 4 }}>
         {segments.length === 0 ? (
           <div style={{ textAlign: "center", padding: 48, color: C.muted }}>
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: "0 auto 12px", display: "block", opacity: 0.5 }}>
@@ -553,158 +557,169 @@ export function ReviewScreen() {
             <div style={{ fontSize: 13 }}>Go to Processing to generate narration for your video.</div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
             {segments.map((seg, i) => {
-              const isCurrent = i === currentSegmentIdx;
+              const isCurrent = i === currentSegmentIdx || previewSegIdx === i;
               return (
                 <div key={i} onClick={() => handleSegmentClick(i)} style={{
-                  display: "grid", gridTemplateColumns: "70px 1fr auto", gap: 14, alignItems: "start",
-                  padding: "14px 16px", borderRadius: 10, cursor: "pointer",
-                  background: isCurrent ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.02)",
-                  border: isCurrent ? "1px solid rgba(99,102,241,0.25)" : "1px solid rgba(255,255,255,0.05)",
-                  transition: "all 0.12s",
+                  display: "flex", gap: 10, alignItems: "flex-start",
+                  padding: "8px 10px", cursor: "pointer",
+                  background: isCurrent ? "rgba(99,102,241,0.06)" : "transparent",
+                  borderLeft: isCurrent ? "2px solid #6366f1" : "2px solid transparent",
+                  transition: "background 0.1s",
                 }}>
-                  <div style={{ fontFamily: "monospace", fontSize: 12, color: isCurrent ? C.accent : C.muted, fontWeight: 600, paddingTop: 2 }}
-                    onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
-                    title="Click to edit timing"
-                  >
-                    <div style={{ fontSize: 10, color: isCurrent ? "rgba(165,180,252,0.6)" : C.muted, marginBottom: 2 }}>#{i + 1}</div>
-                    {editingTiming === i ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                        <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            const prevEnd = i > 0 ? segments[i - 1].end_seconds : 0;
-                            if (!isNaN(v) && v >= prevEnd && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds);
-                          }}
-                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
-                        />
-                        <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            const nextStart = i < segments.length - 1 ? segments[i + 1].start_seconds : Infinity;
-                            if (!isNaN(v) && v > seg.start_seconds && v <= nextStart) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v);
-                          }}
-                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
-                        />
-                      </div>
-                    ) : (
-                      <>
-                        {secondsToTimestamp(seg.start_seconds)}
-                        <div style={{ fontSize: 10, opacity: 0.5, marginTop: 2 }}>{secondsToTimestamp(seg.end_seconds)}</div>
-                      </>
-                    )}
+                  {/* Left: # + play + time */}
+                  <div style={{ width: 56, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, paddingTop: 2 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: isCurrent ? C.accent : C.muted }}>#{i + 1}</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
+                        title="Preview segment"
+                        style={{
+                          width: 22, height: 22, borderRadius: "50%", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                          background: previewingIdx === i ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.06)",
+                          color: previewingIdx === i ? "#818cf8" : C.muted,
+                        }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">{previewingIdx === i ? <rect x="6" y="4" width="12" height="16" rx="2"/> : <polygon points="5 3 19 12 5 21 5 3"/>}</svg>
+                      </button>
+                    </div>
+                    <div style={{ fontFamily: "monospace", fontSize: 11, color: isCurrent ? C.accent : C.muted, fontWeight: 500, textAlign: "center", lineHeight: 1.3 }}
+                      onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
+                      title="Click to edit timing"
+                    >
+                      {editingTiming === i ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => { const v = parseFloat(e.target.value); const prevEnd = i > 0 ? segments[i - 1].end_seconds : 0; if (!isNaN(v) && v >= prevEnd && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds); }}
+                            style={{ width: 50, padding: "1px 3px", fontSize: 10, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, outline: "none" }}
+                          />
+                          <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => { const v = parseFloat(e.target.value); const nextStart = i < segments.length - 1 ? segments[i + 1].start_seconds : Infinity; if (!isNaN(v) && v > seg.start_seconds && v <= nextStart) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v); }}
+                            style={{ width: 50, padding: "1px 3px", fontSize: 10, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, outline: "none" }}
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          {secondsToTimestamp(seg.start_seconds)}
+                          <div style={{ fontSize: 9, opacity: 0.5 }}>{secondsToTimestamp(seg.end_seconds)}</div>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div>
+
+                  {/* Center: text */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <textarea value={seg.text}
                       onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
                       onClick={(e) => e.stopPropagation()}
                       aria-label={`Narration text for segment ${i + 1}`}
-                      rows={3}
-                      style={{ width: "100%", fontSize: 14, color: isCurrent ? C.text : "#b0b0c0", background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 8, padding: "10px 12px", outline: "none", resize: "vertical" as const, lineHeight: 1.6, fontFamily: "inherit" }}
+                      rows={2}
+                      style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : "#b0b0c0", background: "transparent", border: "none", borderBottom: `1px solid ${isCurrent ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.04)"}`, padding: "4px 0", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
                     />
                     {seg.visual_description && (
-                      <p style={{ fontSize: 11, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{seg.visual_description}</p>
+                      <p style={{ fontSize: 10, color: "#7a7a8e", margin: "2px 0 0", fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{seg.visual_description}</p>
                     )}
                   </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 4, alignItems: "flex-end" }}>
-                    <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
-                    <div style={{ position: "relative" }}>
-                      <button onClick={(e) => { e.stopPropagation(); setVoicePickerIdx(voicePickerIdx === i ? null : i); }} style={{
-                        fontSize: 10, padding: "2px 6px", borderRadius: 4, border: "none", cursor: "pointer", fontFamily: "inherit",
-                        background: seg.voice_override ? "rgba(167,139,250,0.1)" : "rgba(255,255,255,0.05)",
-                        color: seg.voice_override ? "#a78bfa" : C.muted,
-                      }}>
-                        {seg.voice_override ? availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom" : "Voice"}
-                      </button>
-                      {voicePickerIdx === i && (
-                        <div onClick={(e) => e.stopPropagation()} style={{
-                          position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
-                          background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 8,
-                          padding: 6, minWidth: 160, maxHeight: 200, overflowY: "auto",
-                          boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                        }}>
-                          <button onClick={() => { updateSegmentVoice(activeLanguage, i, undefined); setVoicePickerIdx(null); trackEvent("segment_voice_changed", { voice: "default" }); }} style={{
-                            display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
-                            border: "none", background: !seg.voice_override ? "rgba(99,102,241,0.1)" : "transparent",
-                            color: !seg.voice_override ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-                          }}>Project default</button>
-                          {availableVoices.map((v) => (
-                            <button key={v.id} onClick={() => { updateSegmentVoice(activeLanguage, i, v.id); setVoicePickerIdx(null); trackEvent("segment_voice_changed", { voice: v.name }); }} style={{
-                              display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
-                              border: "none", background: seg.voice_override === v.id ? "rgba(99,102,241,0.1)" : "transparent",
-                              color: seg.voice_override === v.id ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-                            }}>{v.name}</button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
-                      style={{
-                        fontSize: 11, fontWeight: 500,
-                        color: previewingIdx === i ? "#818cf8" : "#8b8ba0",
-                        background: previewingIdx === i ? "rgba(99,102,241,0.12)" : "rgba(255,255,255,0.04)",
-                        border: "1px solid rgba(255,255,255,0.06)",
-                        cursor: "pointer",
-                        fontFamily: "inherit",
-                        padding: "4px 8px",
-                        borderRadius: 5,
-                      }}
-                    >
-                      {previewingIdx === i ? "\u25A0 Stop" : "\u25B6 Play"}
+
+                  {/* Right: kebab menu */}
+                  <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 4, paddingTop: 4, position: "relative" }}>
+                    {seg.voice_override && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "rgba(167,139,250,0.1)", color: "#a78bfa" }}>{availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom"}</span>}
+                    <button onClick={(e) => { e.stopPropagation(); setMenuIdx(menuIdx === i ? null : i); setRefiningIdx(null); setVoicePickerIdx(null); }} style={{
+                      width: 24, height: 24, borderRadius: 5, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                      background: menuIdx === i ? "rgba(255,255,255,0.08)" : "transparent",
+                      color: C.muted,
+                    }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
                     </button>
-                    <div style={{ position: "relative" }}>
-                      <button onClick={(e) => { e.stopPropagation(); setRefiningIdx(refiningIdx === i ? null : i); }} style={{
-                        fontSize: 11, fontWeight: 500,
-                        color: refiningIdx === i ? "#a78bfa" : "#8b8ba0",
-                        background: refiningIdx === i ? "rgba(167,139,250,0.12)" : "rgba(255,255,255,0.04)",
-                        border: "1px solid rgba(255,255,255,0.06)",
-                        cursor: "pointer", fontFamily: "inherit", padding: "4px 8px", borderRadius: 5,
+                    {menuIdx === i && (
+                      <div onClick={(e) => e.stopPropagation()} style={{
+                        position: "absolute", top: "100%", right: 0, marginTop: 2, zIndex: 30,
+                        background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 8,
+                        padding: 4, minWidth: 180, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
                       }}>
-                        {refineLoading && refiningIdx === i ? "..." : "AI"}
-                      </button>
-                      {refiningIdx === i && (
-                        <div onClick={(e) => e.stopPropagation()} style={{
-                          position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
-                          background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
-                          padding: 10, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                        }}>
-                          <div style={{ fontSize: 10, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Refine with AI</div>
-                          {REFINE_PRESETS.map((p) => (
-                            <button key={p.label} disabled={refineLoading} onClick={() => handleRefine(i, p.instruction)} style={{
-                              display: "block", width: "100%", textAlign: "left", padding: "5px 8px", borderRadius: 5,
-                              border: "none", background: "transparent", color: C.dim, fontSize: 11,
-                              cursor: refineLoading ? "wait" : "pointer", fontFamily: "inherit",
-                            }}
-                              onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-                            >{p.label}</button>
-                          ))}
-                          <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 6, paddingTop: 6, display: "flex", gap: 4 }}>
-                            <input value={customInstruction} onChange={(e) => setCustomInstruction(e.target.value)}
-                              placeholder="Custom instruction..."
-                              onKeyDown={(e) => { if (e.key === "Enter" && customInstruction.trim()) handleRefine(i, customInstruction.trim()); }}
-                              style={{ flex: 1, fontSize: 11, padding: "4px 6px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.06)", color: C.text, fontFamily: "inherit", outline: "none" }}
-                            />
-                            <button disabled={refineLoading || !customInstruction.trim()} onClick={() => handleRefine(i, customInstruction.trim())} style={{
-                              fontSize: 10, padding: "4px 8px", borderRadius: 4, border: "none",
-                              background: customInstruction.trim() ? "linear-gradient(135deg,#6366f1,#8b5cf6)" : "rgba(255,255,255,0.05)",
-                              color: "#fff", cursor: customInstruction.trim() ? "pointer" : "default", fontFamily: "inherit",
-                            }}>Go</button>
+                        {/* Refine with AI submenu */}
+                        <button onClick={() => { setRefiningIdx(refiningIdx === i ? null : i); }} style={{
+                          display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: refiningIdx === i ? "rgba(99,102,241,0.08)" : "transparent",
+                          color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = refiningIdx === i ? "rgba(99,102,241,0.08)" : "transparent"; }}
+                        >
+                          <span>{refineLoading && refiningIdx === i ? "Refining..." : "Refine with AI"}</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                        {refiningIdx === i && (
+                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4 }}>
+                            {REFINE_PRESETS.map((p) => (
+                              <button key={p.label} disabled={refineLoading} onClick={() => handleRefine(i, p.instruction)} style={{
+                                display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                                border: "none", background: "transparent", color: C.dim, fontSize: 11,
+                                cursor: refineLoading ? "wait" : "pointer", fontFamily: "inherit",
+                              }}
+                                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                              >{p.label}</button>
+                            ))}
+                            <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+                              <input value={customInstruction} onChange={(e) => setCustomInstruction(e.target.value)}
+                                placeholder="Custom..."
+                                onKeyDown={(e) => { if (e.key === "Enter" && customInstruction.trim()) handleRefine(i, customInstruction.trim()); }}
+                                style={{ flex: 1, fontSize: 10, padding: "3px 5px", borderRadius: 3, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.06)", color: C.text, fontFamily: "inherit", outline: "none" }}
+                              />
+                              <button disabled={refineLoading || !customInstruction.trim()} onClick={() => handleRefine(i, customInstruction.trim())} style={{
+                                fontSize: 9, padding: "3px 6px", borderRadius: 3, border: "none",
+                                background: customInstruction.trim() ? "#6366f1" : "rgba(255,255,255,0.05)",
+                                color: "#fff", cursor: customInstruction.trim() ? "pointer" : "default", fontFamily: "inherit",
+                              }}>Go</button>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    </div>
-                    <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{
-                      fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-                      padding: "4px 8px", borderRadius: 5,
-                    }}
-                      onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
-                    >Del</button>
+                        )}
+
+                        {/* Voice */}
+                        <button onClick={() => { setVoicePickerIdx(voicePickerIdx === i ? null : i); setRefiningIdx(null); }} style={{
+                          display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: voicePickerIdx === i ? "rgba(99,102,241,0.08)" : "transparent",
+                          color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = voicePickerIdx === i ? "rgba(99,102,241,0.08)" : "transparent"; }}
+                        >
+                          <span>Voice{seg.voice_override ? ` · ${availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom"}` : ""}</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                        {voicePickerIdx === i && (
+                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4 }}>
+                            <button onClick={() => { updateSegmentVoice(activeLanguage, i, undefined); setVoicePickerIdx(null); setMenuIdx(null); trackEvent("segment_voice_changed", { voice: "default" }); }} style={{
+                              display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                              border: "none", background: !seg.voice_override ? "rgba(99,102,241,0.1)" : "transparent",
+                              color: !seg.voice_override ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                            }}>Project default</button>
+                            {availableVoices.map((v) => (
+                              <button key={v.id} onClick={() => { updateSegmentVoice(activeLanguage, i, v.id); setVoicePickerIdx(null); setMenuIdx(null); trackEvent("segment_voice_changed", { voice: v.name }); }} style={{
+                                display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                                border: "none", background: seg.voice_override === v.id ? "rgba(99,102,241,0.1)" : "transparent",
+                                color: seg.voice_override === v.id ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                              }}>{v.name}</button>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Divider + Delete */}
+                        <div style={{ height: 1, background: C.border, margin: "4px 0" }} />
+                        <button onClick={(e) => { e.stopPropagation(); setMenuIdx(null); setDeleteTarget(i); }} style={{
+                          display: "block", width: "100%", textAlign: "left", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: "transparent", color: "#f87171", fontSize: 12,
+                          cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                        >Delete segment</button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

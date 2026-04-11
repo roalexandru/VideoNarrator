@@ -252,10 +252,10 @@ describe("E2E Flow 2: Review and Edit Script", () => {
     expect(screen.getAllByText("Welcome to the demo.").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Here we see the main feature.").length).toBeGreaterThanOrEqual(1);
 
-    // Delete first segment — opens confirmation dialog
-    const delButtons = screen.getAllByText("Del");
-    expect(delButtons).toHaveLength(2);
-    await user.click(delButtons[0]);
+    // Delete first segment — open kebab menu, click "Delete segment"
+    const kebabButtons = screen.getAllByRole("button").filter(b => b.querySelector("svg circle"));
+    await user.click(kebabButtons[0]);
+    await user.click(screen.getByText("Delete segment"));
 
     // Confirm deletion
     const confirmBtn = screen.getByText("Delete");
