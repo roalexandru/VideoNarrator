@@ -109,4 +109,25 @@ describe("ProcessingScreen", () => {
 
     expect(screen.getByText("Processing")).toBeInTheDocument();
   });
+
+  it("shows Start Generation when no scripts exist", () => {
+    // Set up project with video but no scripts
+    useProjectStore.getState().setVideoFile({
+      path: "/tmp/test.mp4", name: "test.mp4", size: 50_000_000,
+      duration: 30, resolution: { width: 1920, height: 1080 }, codec: "h264", fps: 30,
+    });
+    useProjectStore.getState().setProjectId("proj-test");
+
+    render(<ProcessingScreen />);
+
+    expect(screen.getByText("Start Generation")).toBeInTheDocument();
+    expect(screen.getByText("Generate Narration")).toBeInTheDocument();
+  });
+
+  it("shows warning when no video is selected", () => {
+    // No video, no scripts — should show start with warning
+    render(<ProcessingScreen />);
+
+    expect(screen.getByText(/No video selected/)).toBeInTheDocument();
+  });
 });

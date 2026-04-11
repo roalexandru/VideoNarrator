@@ -143,6 +143,9 @@ pub struct Segment {
     pub pause_after_ms: u32,
     #[serde(default)]
     pub frame_refs: Vec<usize>,
+    /// Per-segment voice override. None = use project default voice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +244,24 @@ pub struct LoadedProject {
     pub scripts: std::collections::HashMap<String, NarrationScript>,
 }
 
+// ── Templates ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectTemplate {
+    pub id: String,
+    pub name: String,
+    pub style: String,
+    pub languages: Vec<String>,
+    pub primary_language: String,
+    pub frame_config: FrameConfig,
+    pub ai_config: AiConfig,
+    pub custom_prompt: String,
+    #[serde(default)]
+    pub tts_provider: String,
+    #[serde(default)]
+    pub created_at: String,
+}
+
 // ── Generation ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +355,7 @@ mod tests {
                 pace: Pace::Slow,
                 pause_after_ms: 200,
                 frame_refs: vec![0, 1],
+                voice_override: None,
             }],
             metadata: ScriptMetadata {
                 style: "technical".to_string(),

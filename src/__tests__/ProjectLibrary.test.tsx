@@ -200,4 +200,37 @@ describe("ProjectLibrary", () => {
     await user.click(screen.getByText("Demo Project"));
     expect(onOpenProject).toHaveBeenCalledWith("proj-1");
   });
+
+  it("renders Import button in the New Project card", async () => {
+    render(
+      <ProjectLibrary
+        onNewProject={onNewProject}
+        onOpenProject={onOpenProject}
+        onOpenSettings={onOpenSettings}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Demo Project")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Import .narrator")).toBeInTheDocument();
+  });
+
+  it("shows Export button on project card hover", async () => {
+    render(
+      <ProjectLibrary
+        onNewProject={onNewProject}
+        onOpenProject={onOpenProject}
+        onOpenSettings={onOpenSettings}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Demo Project")).toBeInTheDocument();
+    });
+
+    // Export button exists in DOM but is hidden (opacity: 0)
+    expect(screen.getByText("Share")).toBeInTheDocument();
+  });
 });

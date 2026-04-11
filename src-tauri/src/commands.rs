@@ -177,6 +177,10 @@ impl AppState {
         let config = load_config();
         let mut keys = std::collections::HashMap::new();
 
+        // Migrate old per-key keychain entries into single bundled entry
+        // (reduces macOS keychain prompts from N to 1)
+        secure_store::migrate_old_keychain_entries();
+
         // Migrate plaintext keys to keychain if they exist
         if !config.api_keys.is_empty() {
             let migrated = secure_store::migrate_from_plaintext(&config.api_keys);
@@ -627,6 +631,24 @@ pub async fn translate_script(
 }
 
 #[tauri::command]
+pub async fn refine_segment(
+    state: tauri::State<'_, AppState>,
+    segment_text: String,
+    instruction: String,
+    context: String,
+    ai_config: AiConfig,
+) -> Result<String, NarratorError> {
+    let keys = state.api_keys.lock().await;
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
+    drop(keys);
+    let provider = ai_client::create_provider(&ai_config, api_key);
+    ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await
+}
+
+#[tauri::command]
 pub async fn cancel_generation(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);
     Ok(())
@@ -663,6 +685,33 @@ pub async fn delete_project(id: String) -> Result<(), NarratorError> {
             .map_err(|e| NarratorError::ProjectError(format!("Failed to delete project: {e}")))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn export_project(id: String, output_path: String) -> Result<(), NarratorError> {
+    project_store::export_project(&id, std::path::Path::new(&output_path))
+}
+
+#[tauri::command]
+pub async fn import_project(archive_path: String) -> Result<String, NarratorError> {
+    project_store::import_project(std::path::Path::new(&archive_path))
+}
+
+// ── Template commands ──
+
+#[tauri::command]
+pub async fn save_template(template: ProjectTemplate) -> Result<(), NarratorError> {
+    project_store::save_template(&template)
+}
+
+#[tauri::command]
+pub async fn list_templates() -> Result<Vec<ProjectTemplate>, NarratorError> {
+    project_store::list_templates()
+}
+
+#[tauri::command]
+pub async fn delete_template(id: String) -> Result<(), NarratorError> {
+    project_store::delete_template(&id)
 }
 
 // ── ElevenLabs commands ──
@@ -811,6 +860,7 @@ pub async fn save_tts_provider(provider: String) -> Result<(), NarratorError> {
 
 // ── TTS generation command ──
 
+#[derive(Clone)]
 enum TtsProvider {
     ElevenLabs(elevenlabs_client::ElevenLabsConfig),
     Azure(azure_tts_client::AzureTtsConfig),
@@ -850,6 +900,31 @@ fn tts_cache_dir() -> Result<PathBuf, NarratorError> {
     let dir = project_store::get_narrator_dir().join("cache").join("tts");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Apply a per-segment voice override to a TTS provider.
+/// Returns a modified provider with the overridden voice, or clones the original.
+fn apply_voice_override(base: &TtsProvider, voice_override: &Option<String>) -> TtsProvider {
+    let voice_id = match voice_override {
+        Some(v) if !v.is_empty() => v,
+        _ => return base.clone(),
+    };
+    match base {
+        TtsProvider::ElevenLabs(cfg) => {
+            TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+                voice_id: voice_id.clone(),
+                ..cfg.clone()
+            })
+        }
+        TtsProvider::Azure(cfg) => TtsProvider::Azure(azure_tts_client::AzureTtsConfig {
+            voice_name: voice_id.clone(),
+            ..cfg.clone()
+        }),
+        TtsProvider::Builtin { speed, .. } => TtsProvider::Builtin {
+            voice: voice_id.clone(),
+            speed: *speed,
+        },
+    }
 }
 
 /// Generate speech for a single segment, using cache if available.
@@ -988,7 +1063,8 @@ pub async fn generate_tts(
             let filename = format!("_tmp_seg_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
+            let seg_tts = apply_voice_override(&tts, &seg.voice_override);
+            match generate_speech_for_provider(&seg_tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     segment_files.push((seg.index, filepath, seg.start_seconds, seg.end_seconds));
                 }
@@ -1174,7 +1250,8 @@ pub async fn generate_tts(
             let filename = format!("segment_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
+            let seg_tts = apply_voice_override(&tts, &seg.voice_override);
+            match generate_speech_for_provider(&seg_tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: seg.index,

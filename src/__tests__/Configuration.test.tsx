@@ -95,16 +95,24 @@ describe("ConfigurationScreen", () => {
   it("frame density buttons render and update store", () => {
     render(<ConfigurationScreen />);
 
-    expect(screen.getByText("light")).toBeInTheDocument();
-    expect(screen.getByText("medium")).toBeInTheDocument();
-    expect(screen.getByText("heavy")).toBeInTheDocument();
+    expect(screen.getByText("Light")).toBeInTheDocument();
+    expect(screen.getByText("Medium")).toBeInTheDocument();
+    expect(screen.getByText("Heavy")).toBeInTheDocument();
 
     expect(useConfigStore.getState().frameDensity).toBe("medium");
 
-    fireEvent.click(screen.getByText("heavy"));
+    fireEvent.click(screen.getByText("Heavy"));
     expect(useConfigStore.getState().frameDensity).toBe("heavy");
 
-    fireEvent.click(screen.getByText("light"));
+    fireEvent.click(screen.getByText("Light"));
     expect(useConfigStore.getState().frameDensity).toBe("light");
+  });
+
+  it("density buttons show descriptive subtitles", () => {
+    render(<ConfigurationScreen />);
+
+    expect(screen.getByText("Key points only")).toBeInTheDocument();
+    expect(screen.getByText("Balanced coverage")).toBeInTheDocument();
+    expect(screen.getByText("Detailed commentary")).toBeInTheDocument();
   });
 });

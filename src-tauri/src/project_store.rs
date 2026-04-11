@@ -278,6 +278,198 @@ pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
         .join("frames")
 }
 
+// ── Project templates ────────────────────────────────────────────────────────
+
+pub fn save_template(template: &ProjectTemplate) -> Result<(), NarratorError> {
+    let dir = get_narrator_dir().join("templates");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.json", template.id));
+    let json = serde_json::to_string_pretty(template)?;
+    std::fs::write(path, json)?;
+    Ok(())
+}
+
+pub fn list_templates() -> Result<Vec<ProjectTemplate>, NarratorError> {
+    let dir = get_narrator_dir().join("templates");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut templates = Vec::new();
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "json") {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(t) = serde_json::from_str::<ProjectTemplate>(&json) {
+                    templates.push(t);
+                }
+            }
+        }
+    }
+    templates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(templates)
+}
+
+pub fn delete_template(id: &str) -> Result<(), NarratorError> {
+    let path = get_narrator_dir()
+        .join("templates")
+        .join(format!("{id}.json"));
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+// ── Project export/import ───────────────────────────────────────────────────
+
+/// Export a project to a portable `.narrator` file (ZIP archive).
+/// Includes project.json, all scripts, and extracted frames.
+/// Video paths are stored as relative references (not bundled — too large).
+pub fn export_project(project_id: &str, output_path: &Path) -> Result<(), NarratorError> {
+    validate_project_id(project_id)?;
+    let base = get_narrator_dir();
+    let project_dir = base.join("projects").join(project_id);
+
+    if !project_dir.exists() {
+        return Err(NarratorError::ProjectError(format!(
+            "Project not found: {project_id}"
+        )));
+    }
+
+    let file = std::fs::File::create(output_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    // Add project.json
+    let config_path = project_dir.join("project.json");
+    if config_path.exists() {
+        zip.start_file("project.json", options)
+            .map_err(|e| NarratorError::ProjectError(format!("ZIP error: {e}")))?;
+        let data = std::fs::read(&config_path)?;
+        std::io::Write::write_all(&mut zip, &data)?;
+    }
+
+    // Add scripts
+    let scripts_dir = project_dir.join("scripts");
+    if scripts_dir.exists() {
+        for entry in std::fs::read_dir(&scripts_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let name = format!("scripts/{}", entry.file_name().to_string_lossy());
+                zip.start_file(&name, options)
+                    .map_err(|e| NarratorError::ProjectError(format!("ZIP error: {e}")))?;
+                let data = std::fs::read(&path)?;
+                std::io::Write::write_all(&mut zip, &data)?;
+            }
+        }
+    }
+
+    // Add frames
+    let frames_dir = project_dir.join("frames");
+    if frames_dir.exists() {
+        for entry in std::fs::read_dir(&frames_dir)?.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .is_some_and(|e| e == "jpg" || e == "jpeg" || e == "png")
+            {
+                let name = format!("frames/{}", entry.file_name().to_string_lossy());
+                zip.start_file(&name, options)
+                    .map_err(|e| NarratorError::ProjectError(format!("ZIP error: {e}")))?;
+                let data = std::fs::read(&path)?;
+                std::io::Write::write_all(&mut zip, &data)?;
+            }
+        }
+    }
+
+    zip.finish()
+        .map_err(|e| NarratorError::ProjectError(format!("Failed to finalize ZIP: {e}")))?;
+
+    Ok(())
+}
+
+/// Import a `.narrator` file (ZIP archive) as a new project.
+/// Assigns a new UUID to avoid ID collisions. Video path is cleared
+/// (user must re-link the video on the new machine).
+pub fn import_project(archive_path: &Path) -> Result<String, NarratorError> {
+    let file = std::fs::File::open(archive_path)?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| NarratorError::ProjectError(format!("Invalid .narrator file: {e}")))?;
+
+    // Read project.json to get metadata
+    let mut config: ProjectConfig = {
+        let mut entry = archive.by_name("project.json").map_err(|e| {
+            NarratorError::ProjectError(format!("Missing project.json in archive: {e}"))
+        })?;
+        let mut json = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut json)?;
+        serde_json::from_str(&json)
+            .map_err(|e| NarratorError::ProjectError(format!("Invalid project.json: {e}")))?
+    };
+
+    // Assign new UUID to avoid collisions
+    let new_id = uuid::Uuid::new_v4().to_string();
+    config.id = new_id.clone();
+
+    // Mark video path as needing re-link (not portable across machines)
+    config.video_path = String::new();
+    config.video_metadata = None;
+
+    // Update timestamps
+    let now = chrono::Utc::now().to_rfc3339();
+    config.updated_at = now.clone();
+    // Append "(imported)" to title so user knows it came from elsewhere
+    if !config.title.ends_with("(imported)") {
+        config.title = format!("{} (imported)", config.title);
+    }
+
+    // Create project directory structure
+    let base = get_narrator_dir();
+    let project_dir = base.join("projects").join(&new_id);
+    std::fs::create_dir_all(project_dir.join("frames"))?;
+    std::fs::create_dir_all(project_dir.join("scripts"))?;
+    std::fs::create_dir_all(project_dir.join("exports"))?;
+
+    // Write updated project.json
+    let json = serde_json::to_string_pretty(&config)?;
+    std::fs::write(project_dir.join("project.json"), json)?;
+
+    // Extract scripts and frames
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| NarratorError::ProjectError(format!("ZIP entry error: {e}")))?;
+
+        let name = entry.name().to_string();
+
+        // Skip project.json (already handled) and any directory entries
+        if name == "project.json" || entry.is_dir() {
+            continue;
+        }
+
+        // Only extract known paths (security: prevent path traversal)
+        let dest = if let Some(script_name) = name.strip_prefix("scripts/") {
+            if script_name.contains('/') || script_name.contains('\\') {
+                continue;
+            }
+            project_dir.join("scripts").join(script_name)
+        } else if let Some(frame_name) = name.strip_prefix("frames/") {
+            if frame_name.contains('/') || frame_name.contains('\\') {
+                continue;
+            }
+            project_dir.join("frames").join(frame_name)
+        } else {
+            continue; // Skip unknown entries
+        };
+
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data)?;
+        std::fs::write(&dest, &data)?;
+    }
+
+    Ok(new_id)
+}
+
 pub fn load_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
     let styles_dir = get_narrator_dir().join("styles");
 

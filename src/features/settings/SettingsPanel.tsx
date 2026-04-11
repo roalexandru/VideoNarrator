@@ -15,7 +15,11 @@ import {
   getTelemetryEnabled,
   setTelemetryEnabled as setTelemetrySetting,
   listBuiltinVoices,
+  saveTemplate,
+  listTemplates,
+  deleteTemplate,
 } from "../../lib/tauri/commands";
+import type { ProjectTemplate } from "../../lib/tauri/commands";
 import type {
   ElevenLabsConfig,
   ElevenLabsVoice,
@@ -81,19 +85,20 @@ const sectionLabel: React.CSSProperties = {
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-type TabId = "providers" | "ai" | "voice";
+type TabId = "providers" | "ai" | "voice" | "templates";
 
 interface SettingsPanelProps {
   onClose: () => void;
   onShowPrivacyPolicy?: () => void;
   onShowTerms?: () => void;
-  initialTab?: "providers" | "ai" | "voice" | string;
+  initialTab?: "providers" | "ai" | "voice" | "templates" | string;
 }
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "providers", label: "Providers" },
   { id: "ai", label: "AI" },
   { id: "voice", label: "Voice" },
+  { id: "templates", label: "Templates" },
 ];
 
 const AZURE_REGIONS = [
@@ -123,7 +128,7 @@ export function SettingsPanel({
 }: SettingsPanelProps) {
   // Gracefully handle legacy "general" tab
   const resolvedInitial: TabId =
-    initialTab === "providers" || initialTab === "ai" || initialTab === "voice"
+    initialTab === "providers" || initialTab === "ai" || initialTab === "voice" || initialTab === "templates"
       ? initialTab
       : "providers";
 
@@ -431,16 +436,21 @@ export function SettingsPanel({
   /* ================================================================ */
 
   const Dot = ({ on }: { on: boolean }) => (
-    <span
-      style={{
-        width: 6,
-        height: 6,
-        borderRadius: 3,
-        background: on ? C.success : C.dotOff,
-        display: "inline-block",
-        flexShrink: 0,
-      }}
-    />
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 4,
+          background: on ? C.success : C.dotOff,
+          display: "inline-block",
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 10, color: on ? C.success : "#5a5a6e", fontWeight: 500 }}>
+        {on ? "Ready" : ""}
+      </span>
+    </span>
   );
 
   /* ================================================================ */
@@ -1543,6 +1553,113 @@ export function SettingsPanel({
   };
 
   /* ================================================================ */
+  /*  Templates tab                                                    */
+  /* ================================================================ */
+
+  const [templates, setTemplates] = useState<ProjectTemplate[]>([]);
+  const [templateName, setTemplateName] = useState("");
+
+  useEffect(() => {
+    if (tab === "templates") listTemplates().then(setTemplates).catch(() => {});
+  }, [tab]);
+
+  const handleSaveTemplate = async () => {
+    if (!templateName.trim()) return;
+    const config = useConfigStore.getState();
+    const template: ProjectTemplate = {
+      id: crypto.randomUUID(),
+      name: templateName.trim(),
+      style: config.style,
+      languages: config.languages,
+      primary_language: config.primaryLanguage,
+      frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: config.maxFrames },
+      ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature },
+      custom_prompt: config.customPrompt,
+      tts_provider: config.ttsProvider || "",
+      created_at: new Date().toISOString(),
+    };
+    try {
+      await saveTemplate(template);
+      setTemplates((prev) => [template, ...prev]);
+      setTemplateName("");
+      trackEvent("template_saved", { style: template.style });
+    } catch (err) {
+      trackError("save_template", err);
+    }
+  };
+
+  const handleDeleteTemplate = async (id: string) => {
+    try {
+      await deleteTemplate(id);
+      setTemplates((prev) => prev.filter((t) => t.id !== id));
+      trackEvent("template_deleted");
+    } catch (err) {
+      trackError("delete_template", err);
+    }
+  };
+
+  const renderTemplates = () => (
+    <div>
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, letterSpacing: "0.05em", marginBottom: 12 }}>SAVE CURRENT CONFIG AS TEMPLATE</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        <input
+          value={templateName} onChange={(e) => setTemplateName(e.target.value)}
+          placeholder="Template name..."
+          onKeyDown={(e) => { if (e.key === "Enter") handleSaveTemplate(); }}
+          style={{ flex: 1, padding: "8px 12px", borderRadius: 8, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: C.text, fontSize: 13, fontFamily: "inherit", outline: "none" }}
+        />
+        <Button onClick={handleSaveTemplate} disabled={!templateName.trim()}>Save</Button>
+      </div>
+
+      <div style={{ fontSize: 10, fontWeight: 700, color: C.muted, letterSpacing: "0.05em", marginBottom: 12 }}>SAVED TEMPLATES</div>
+      {templates.length === 0 ? (
+        <p style={{ fontSize: 13, color: C.muted }}>No templates saved yet. Configure your project settings and save them as a reusable template.</p>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {templates.map((t) => (
+            <div key={t.id} style={{
+              padding: "12px 14px", borderRadius: 8, border: `1px solid ${C.border}`,
+              background: "rgba(255,255,255,0.02)", display: "flex", alignItems: "center", gap: 12,
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, color: C.text, fontSize: 13, marginBottom: 4 }}>{t.name}</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, background: "rgba(99,102,241,0.1)", color: C.accent }}>{t.style}</span>
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.05)", color: C.muted }}>{t.ai_config.provider}</span>
+                  <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 3, background: "rgba(255,255,255,0.05)", color: C.muted }}>{t.primary_language.toUpperCase()}</span>
+                </div>
+              </div>
+              <button onClick={() => {
+                const cs = useConfigStore.getState();
+                cs.setStyle(t.style as Parameters<typeof cs.setStyle>[0]);
+                cs.setPrimaryLanguage(t.primary_language);
+                cs.setFrameDensity(t.frame_config.density as Parameters<typeof cs.setFrameDensity>[0]);
+                cs.setSceneThreshold(t.frame_config.scene_threshold);
+                cs.setMaxFrames(t.frame_config.max_frames);
+                cs.setAiProvider(t.ai_config.provider as Parameters<typeof cs.setAiProvider>[0]);
+                cs.setModel(t.ai_config.model as Parameters<typeof cs.setModel>[0]);
+                cs.setTemperature(t.ai_config.temperature);
+                cs.setCustomPrompt(t.custom_prompt);
+                trackEvent("template_applied", { name: t.name });
+              }} style={{
+                fontSize: 11, padding: "5px 10px", borderRadius: 5, border: `1px solid ${C.border}`,
+                background: "rgba(99,102,241,0.08)", color: C.accent, cursor: "pointer", fontFamily: "inherit", fontWeight: 500,
+              }}>Apply</button>
+              <button onClick={() => handleDeleteTemplate(t.id)} style={{
+                fontSize: 11, padding: "5px 8px", borderRadius: 5, border: "none",
+                background: "none", color: C.muted, cursor: "pointer", fontFamily: "inherit",
+              }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "#f87171"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; }}
+              >Del</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  /* ================================================================ */
   /*  Render tab content                                               */
   /* ================================================================ */
 
@@ -1554,6 +1671,8 @@ export function SettingsPanel({
         return renderAi();
       case "voice":
         return renderVoice();
+      case "templates":
+        return renderTemplates();
     }
   };
 

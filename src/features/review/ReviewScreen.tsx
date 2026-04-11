@@ -3,7 +3,7 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir, translateScript } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { showToast } from "../../components/ui/Toast";
@@ -73,6 +73,174 @@ export function ReviewScreen() {
 
   // Segment timing editing
   const [editingTiming, setEditingTiming] = useState<number | null>(null);
+
+  // Per-segment AI refinement
+  const [refiningIdx, setRefiningIdx] = useState<number | null>(null);
+  const [refineLoading, setRefineLoading] = useState(false);
+  const [customInstruction, setCustomInstruction] = useState("");
+  // Kebab menu state (consolidates Voice, Refine, Delete)
+  const [menuIdx, setMenuIdx] = useState<number | null>(null);
+  const REFINE_PRESETS = [
+    { label: "Make shorter", instruction: "Make this narration segment more concise. Keep the key message but use fewer words." },
+    { label: "Make more detailed", instruction: "Expand this narration segment with more detail and explanation." },
+    { label: "Simplify language", instruction: "Simplify the language to be more accessible. Use shorter sentences and simpler words." },
+    { label: "More professional", instruction: "Make this narration sound more professional and polished." },
+    { label: "More conversational", instruction: "Rewrite in a more casual, conversational tone." },
+  ];
+
+  const handleRefine = useCallback(async (segmentIdx: number, instruction: string) => {
+    if (refineLoading || !segments[segmentIdx]) return;
+    setRefineLoading(true);
+    try {
+      // Build context from surrounding segments
+      const prev = segmentIdx > 0 ? segments[segmentIdx - 1].text : "";
+      const next = segmentIdx < segments.length - 1 ? segments[segmentIdx + 1].text : "";
+      const context = [prev && `Previous: "${prev}"`, next && `Next: "${next}"`].filter(Boolean).join("\n");
+
+      const refined = await refineSegment(
+        segments[segmentIdx].text,
+        instruction,
+        context,
+        { provider: aiProvider, model: aiModel, temperature: aiTemperature },
+      );
+      updateSegmentText(activeLanguage, segmentIdx, refined);
+      setRefiningIdx(null);
+      setCustomInstruction("");
+      setRefiningIdx(null);
+      setMenuIdx(null);
+      trackEvent("segment_refined", { instruction_type: instruction.length > 60 ? "custom" : "preset" });
+      showToast("Segment refined", "success");
+    } catch (err) {
+      showToast(`Refinement failed: ${String(err)}`, "error");
+    } finally {
+      setRefineLoading(false);
+    }
+  }, [refineLoading, segments, aiProvider, aiModel, aiTemperature, activeLanguage, updateSegmentText]);
+
+  // Voice picker state
+  const [voicePickerIdx, setVoicePickerIdx] = useState<number | null>(null);
+  const [availableVoices, setAvailableVoices] = useState<{id: string; name: string}[]>([]);
+  const { updateSegmentVoice } = useScriptStore();
+
+  // Close all popup menus on Escape
+  useEffect(() => {
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && (menuIdx !== null || refiningIdx !== null || voicePickerIdx !== null)) {
+        e.preventDefault();
+        setMenuIdx(null);
+        setRefiningIdx(null);
+        setVoicePickerIdx(null);
+      }
+    };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [menuIdx, refiningIdx, voicePickerIdx]);
+
+  // Language code → locale prefix mapping for voice filtering
+  const langPrefix = activeLanguage === "pt-BR" ? "pt" : activeLanguage.split("-")[0];
+
+  useEffect(() => {
+    // Filter voices by script language — works across all providers
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const filterByLang = (voices: any[], localeKey: string) => {
+      const matching = voices.filter((v) => {
+        const locale = String(v[localeKey] || "").toLowerCase();
+        return locale.startsWith(langPrefix);
+      });
+      return matching.length > 0 ? matching : voices.slice(0, 15);
+    };
+
+    const loadVoices = async () => {
+      try {
+        if (previewVoice === "elevenlabs") {
+          const cfg = await getElevenLabsConfig();
+          if (cfg?.api_key) {
+            const voices = await listElevenLabsVoices(cfg.api_key);
+            // ElevenLabs voices are multilingual — show all but cap at reasonable count
+            setAvailableVoices(voices.slice(0, 30).map((v: { voice_id: string; name: string }) => ({ id: v.voice_id, name: v.name })));
+          }
+        } else if (previewVoice === "azure") {
+          const cfg = await getAzureTtsConfig();
+          if (cfg?.api_key) {
+            const voices = await listAzureTtsVoices(cfg.api_key, cfg.region || "eastus");
+            const filtered = filterByLang(voices, "locale");
+            setAvailableVoices(filtered.map((v: { short_name: string; display_name: string }) => ({ id: v.short_name, name: v.display_name })));
+          }
+        } else {
+          const voices = await listBuiltinVoices();
+          const filtered = filterByLang(voices, "locale");
+          setAvailableVoices(filtered.map((v: { id: string; name: string }) => ({ id: v.id, name: v.name })));
+        }
+      } catch { setAvailableVoices([]); }
+    };
+    loadVoices();
+  }, [previewVoice, langPrefix]);
+
+  // Narration preview state
+  const [previewMode, setPreviewMode] = useState(false);
+  const [previewSegIdx, setPreviewSegIdx] = useState(-1);
+  const fullPreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const previewAbortRef = useRef(false);
+
+  const startFullPreview = useCallback(async () => {
+    if (!segments.length || !projectId) return;
+    setPreviewMode(true);
+    previewAbortRef.current = false;
+    trackEvent("preview_started", { segments: segments.length });
+
+    const cacheDir = `${await getHomeDir()}/.narrator/tts_cache`;
+    const providerStr = previewVoice === "builtin" ? "builtin:default:1.0" : previewVoice;
+
+    for (let i = 0; i < segments.length; i++) {
+      if (previewAbortRef.current) break;
+      setPreviewSegIdx(i);
+      const seg = segments[i];
+
+      // Seek video to segment start
+      if (videoRef.current) {
+        videoRef.current.currentTime = seg.start_seconds;
+        videoRef.current.play().catch(() => {});
+      }
+
+      // Generate TTS for this segment
+      try {
+        const ch = new Channel<ProgressEvent>();
+        const results = await generateTts([{ ...seg, index: 0 }], cacheDir, false, ch, providerStr);
+        if (previewAbortRef.current) break;
+        if (results[0]?.file_path) {
+          const audio = new Audio(convertFileSrc(results[0].file_path));
+          fullPreviewAudioRef.current = audio;
+          await new Promise<void>((resolve) => {
+            audio.onended = () => resolve();
+            audio.onerror = () => resolve();
+            audio.play().catch(() => resolve());
+          });
+        }
+      } catch {
+        // Skip failed segment, continue preview
+      }
+
+      // Pause for inter-segment gap
+      if (seg.pause_after_ms > 0 && !previewAbortRef.current) {
+        await new Promise((r) => setTimeout(r, seg.pause_after_ms));
+      }
+    }
+
+    if (videoRef.current) videoRef.current.pause();
+    setPreviewMode(false);
+    setPreviewSegIdx(-1);
+  }, [segments, projectId, previewVoice]);
+
+  const stopFullPreview = useCallback(() => {
+    previewAbortRef.current = true;
+    if (fullPreviewAudioRef.current) {
+      fullPreviewAudioRef.current.pause();
+      fullPreviewAudioRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.pause();
+    setPreviewMode(false);
+    setPreviewSegIdx(-1);
+  }, []);
 
   // Undo/redo keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z / Cmd+Z / Cmd+Shift+Z)
   useEffect(() => {
@@ -239,14 +407,14 @@ export function ReviewScreen() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review & Edit</h2>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 11, color: C.muted }}>Preview voice:</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", borderRadius: 7, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
             <select
               value={previewVoice}
               onChange={(e) => setPreviewVoice(e.target.value as "builtin" | "elevenlabs" | "azure")}
               style={{
-                fontSize: 11, padding: "3px 8px", borderRadius: 6,
-                background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`,
+                fontSize: 12, padding: "2px 4px", borderRadius: 4,
+                background: "transparent", border: "none",
                 color: C.dim, fontFamily: "inherit", cursor: "pointer", outline: "none",
               }}
             >
@@ -255,6 +423,16 @@ export function ReviewScreen() {
               <option value="azure">Azure TTS</option>
             </select>
           </div>
+          {segments.length > 0 && (
+            <button onClick={previewMode ? stopFullPreview : startFullPreview} style={{
+              padding: "4px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600, fontFamily: "inherit", cursor: "pointer",
+              border: previewMode ? "1px solid rgba(239,68,68,0.4)" : "1px solid rgba(99,102,241,0.3)",
+              background: previewMode ? "rgba(239,68,68,0.1)" : "linear-gradient(135deg,rgba(99,102,241,0.15),rgba(139,92,246,0.15))",
+              color: previewMode ? "#f87171" : "#a5b4fc",
+            }}>
+              {previewMode ? `\u25A0 Stop Preview (${previewSegIdx + 1}/${segments.length})` : "\u25B6 Preview Narration"}
+            </button>
+          )}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {(() => { const allLangs = [...new Set([...configLanguages, ...Object.keys(scripts)])]; return allLangs.length > 1; })() && (
@@ -304,9 +482,9 @@ export function ReviewScreen() {
         </div>
       </div>
 
-      {/* VIDEO PLAYER — controls hidden until hover */}
+      {/* VIDEO PLAYER */}
       <div
-        style={{ position: "relative", borderRadius: 10, overflow: "hidden", background: "#000", flexShrink: 0, aspectRatio: "16/9", maxHeight: "42vh" }}
+        style={{ position: "relative", borderRadius: 8, overflow: "hidden", background: "#0a0a0e", flexShrink: 0, maxHeight: "35vh", minHeight: 120 }}
       >
         <video ref={videoRef} playsInline onClick={togglePlay}
           style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
@@ -398,8 +576,8 @@ export function ReviewScreen() {
         </div>
       </div>
 
-      {/* SEGMENT EDITOR */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+      {/* SEGMENT LIST */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", paddingTop: 4 }}>
         {segments.length === 0 ? (
           <div style={{ textAlign: "center", padding: 48, color: C.muted }}>
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ margin: "0 auto 12px", display: "block", opacity: 0.5 }}>
@@ -409,78 +587,169 @@ export function ReviewScreen() {
             <div style={{ fontSize: 13 }}>Go to Processing to generate narration for your video.</div>
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
             {segments.map((seg, i) => {
-              const isCurrent = i === currentSegmentIdx;
+              const isCurrent = i === currentSegmentIdx || previewSegIdx === i;
               return (
                 <div key={i} onClick={() => handleSegmentClick(i)} style={{
-                  display: "grid", gridTemplateColumns: "80px 1fr auto", gap: 12, alignItems: "start",
-                  padding: "10px 14px", borderRadius: 6, cursor: "pointer",
+                  display: "flex", gap: 10, alignItems: "flex-start",
+                  padding: "8px 10px", cursor: "pointer",
                   background: isCurrent ? "rgba(99,102,241,0.06)" : "transparent",
-                  borderLeft: isCurrent ? "3px solid #6366f1" : "3px solid transparent",
+                  borderLeft: isCurrent ? "2px solid #6366f1" : "2px solid transparent",
+                  transition: "background 0.1s",
                 }}>
-                  <div style={{ fontFamily: "monospace", fontSize: 12, color: isCurrent ? C.accent : C.muted, fontWeight: 600, paddingTop: 2 }}
-                    onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
-                    title="Click to edit timing"
-                  >
-                    {editingTiming === i ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                        <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            const prevEnd = i > 0 ? segments[i - 1].end_seconds : 0;
-                            if (!isNaN(v) && v >= prevEnd && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds);
-                          }}
-                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
-                        />
-                        <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
-                          onClick={(e) => e.stopPropagation()}
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            const nextStart = i < segments.length - 1 ? segments[i + 1].start_seconds : Infinity;
-                            if (!isNaN(v) && v > seg.start_seconds && v <= nextStart) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v);
-                          }}
-                          style={{ width: 60, padding: "2px 4px", fontSize: 11, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, outline: "none" }}
-                        />
-                      </div>
-                    ) : (
-                      <>
-                        {secondsToTimestamp(seg.start_seconds)}
-                        <div style={{ fontSize: 10, opacity: 0.6 }}>{secondsToTimestamp(seg.end_seconds)}</div>
-                      </>
-                    )}
+                  {/* Left: # + play + time */}
+                  <div style={{ width: 56, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, paddingTop: 2 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: isCurrent ? C.accent : C.muted }}>#{i + 1}</span>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
+                        title="Preview segment"
+                        style={{
+                          width: 22, height: 22, borderRadius: "50%", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                          background: previewingIdx === i ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.06)",
+                          color: previewingIdx === i ? "#818cf8" : C.muted,
+                        }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor">{previewingIdx === i ? <rect x="6" y="4" width="12" height="16" rx="2"/> : <polygon points="5 3 19 12 5 21 5 3"/>}</svg>
+                      </button>
+                    </div>
+                    <div style={{ fontFamily: "monospace", fontSize: 11, color: isCurrent ? C.accent : C.muted, fontWeight: 500, textAlign: "center", lineHeight: 1.3 }}
+                      onClick={(e) => { e.stopPropagation(); setEditingTiming(editingTiming === i ? null : i); }}
+                      title="Click to edit timing"
+                    >
+                      {editingTiming === i ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          <input type="number" step="0.1" min="0" value={seg.start_seconds.toFixed(1)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => { const v = parseFloat(e.target.value); const prevEnd = i > 0 ? segments[i - 1].end_seconds : 0; if (!isNaN(v) && v >= prevEnd && v < seg.end_seconds) updateSegmentTiming(activeLanguage, i, v, seg.end_seconds); }}
+                            style={{ width: 50, padding: "1px 3px", fontSize: 10, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, outline: "none" }}
+                          />
+                          <input type="number" step="0.1" min="0" value={seg.end_seconds.toFixed(1)}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => { const v = parseFloat(e.target.value); const nextStart = i < segments.length - 1 ? segments[i + 1].start_seconds : Infinity; if (!isNaN(v) && v > seg.start_seconds && v <= nextStart) updateSegmentTiming(activeLanguage, i, seg.start_seconds, v); }}
+                            style={{ width: 50, padding: "1px 3px", fontSize: 10, fontFamily: "monospace", background: "rgba(255,255,255,0.08)", border: `1px solid ${C.border}`, borderRadius: 3, color: C.text, outline: "none" }}
+                          />
+                        </div>
+                      ) : (
+                        <>
+                          {secondsToTimestamp(seg.start_seconds)}
+                          <div style={{ fontSize: 9, opacity: 0.5 }}>{secondsToTimestamp(seg.end_seconds)}</div>
+                        </>
+                      )}
+                    </div>
                   </div>
-                  <div>
+
+                  {/* Center: text */}
+                  <div style={{ flex: 1, minWidth: 0 }}>
                     <textarea value={seg.text}
                       onChange={(e) => updateSegmentText(activeLanguage, i, e.target.value)}
                       onClick={(e) => e.stopPropagation()}
                       aria-label={`Narration text for segment ${i + 1}`}
                       rows={2}
-                      style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : C.dim, background: "rgba(255,255,255,0.04)", border: `1px solid ${isCurrent ? "rgba(99,102,241,0.3)" : C.border}`, borderRadius: 6, padding: "8px 10px", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
+                      style={{ width: "100%", fontSize: 13, color: isCurrent ? C.text : "#b0b0c0", background: "transparent", border: "none", borderBottom: `1px solid ${isCurrent ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.04)"}`, padding: "4px 0", outline: "none", resize: "none" as const, lineHeight: 1.5, fontFamily: "inherit" }}
                     />
                     {seg.visual_description && (
-                      <p style={{ fontSize: 11, color: C.muted, marginTop: 4, fontStyle: "italic" }}>{seg.visual_description}</p>
+                      <p style={{ fontSize: 10, color: "#7a7a8e", margin: "2px 0 0", fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{seg.visual_description}</p>
                     )}
                   </div>
-                  <div style={{ display: "flex", gap: 4, paddingTop: 2 }}>
-                    <span style={{ fontSize: 10, background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 4, color: C.muted }}>{seg.pace}</span>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handlePreview(i); }}
-                      style={{
-                        fontSize: 11,
-                        color: previewingIdx === i ? "#818cf8" : "#8b8ba0",
-                        background: previewingIdx === i ? "rgba(99,102,241,0.1)" : "none",
-                        border: "none",
-                        cursor: "pointer",
-                        fontFamily: "inherit",
-                        padding: "2px 6px",
-                        borderRadius: 4,
-                      }}
-                    >
-                      {previewingIdx === i ? "\u25A0 Stop" : "\u25B6 Play"}
+
+                  {/* Right: kebab menu */}
+                  <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 4, paddingTop: 4, position: "relative" }}>
+                    {seg.voice_override && <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "rgba(167,139,250,0.1)", color: "#a78bfa" }}>{availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom"}</span>}
+                    <button onClick={(e) => { e.stopPropagation(); setMenuIdx(menuIdx === i ? null : i); setRefiningIdx(null); setVoicePickerIdx(null); }} style={{
+                      width: 24, height: 24, borderRadius: 5, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                      background: menuIdx === i ? "rgba(255,255,255,0.08)" : "transparent",
+                      color: C.muted,
+                    }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); setDeleteTarget(i); }} style={{ fontSize: 11, color: "#f87171", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>Del</button>
+                    {menuIdx === i && (
+                      <div onClick={(e) => e.stopPropagation()} style={{
+                        position: "absolute", top: "100%", right: 0, marginTop: 2, zIndex: 30,
+                        background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 8,
+                        padding: 4, width: 220, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+                      }}>
+                        {/* Refine with AI submenu */}
+                        <button onClick={() => { setRefiningIdx(refiningIdx === i ? null : i); }} style={{
+                          display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: refiningIdx === i ? "rgba(99,102,241,0.08)" : "transparent",
+                          color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = refiningIdx === i ? "rgba(99,102,241,0.08)" : "transparent"; }}
+                        >
+                          <span>{refineLoading && refiningIdx === i ? "Refining..." : "Refine with AI"}</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                        {refiningIdx === i && (
+                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4 }}>
+                            {REFINE_PRESETS.map((p) => (
+                              <button key={p.label} disabled={refineLoading} onClick={() => handleRefine(i, p.instruction)} style={{
+                                display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                                border: "none", background: "transparent", color: C.dim, fontSize: 11,
+                                cursor: refineLoading ? "wait" : "pointer", fontFamily: "inherit",
+                              }}
+                                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                              >{p.label}</button>
+                            ))}
+                            <div style={{ display: "flex", gap: 3, marginTop: 4 }}>
+                              <input value={customInstruction} onChange={(e) => setCustomInstruction(e.target.value)}
+                                placeholder="Custom..."
+                                onKeyDown={(e) => { if (e.key === "Enter" && customInstruction.trim()) handleRefine(i, customInstruction.trim()); }}
+                                style={{ flex: 1, fontSize: 10, padding: "3px 5px", borderRadius: 3, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.06)", color: C.text, fontFamily: "inherit", outline: "none" }}
+                              />
+                              <button disabled={refineLoading || !customInstruction.trim()} onClick={() => handleRefine(i, customInstruction.trim())} style={{
+                                fontSize: 9, padding: "3px 6px", borderRadius: 3, border: "none",
+                                background: customInstruction.trim() ? "#6366f1" : "rgba(255,255,255,0.05)",
+                                color: "#fff", cursor: customInstruction.trim() ? "pointer" : "default", fontFamily: "inherit",
+                              }}>Go</button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Voice */}
+                        <button onClick={() => { setVoicePickerIdx(voicePickerIdx === i ? null : i); setRefiningIdx(null); }} style={{
+                          display: "flex", width: "100%", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: voicePickerIdx === i ? "rgba(99,102,241,0.08)" : "transparent",
+                          color: C.dim, fontSize: 12, cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = voicePickerIdx === i ? "rgba(99,102,241,0.08)" : "transparent"; }}
+                        >
+                          <span>Voice{seg.voice_override ? ` · ${availableVoices.find(v => v.id === seg.voice_override)?.name || "Custom"}` : ""}</span>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                        </button>
+                        {voicePickerIdx === i && (
+                          <div style={{ padding: "2px 0 2px 8px", borderLeft: "2px solid rgba(99,102,241,0.2)", marginLeft: 8, marginBottom: 4, maxHeight: 180, overflowY: "auto" }}>
+                            <button onClick={() => { updateSegmentVoice(activeLanguage, i, undefined); setVoicePickerIdx(null); setMenuIdx(null); trackEvent("segment_voice_changed", { voice: "default" }); }} style={{
+                              display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                              border: "none", background: !seg.voice_override ? "rgba(99,102,241,0.1)" : "transparent",
+                              color: !seg.voice_override ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                            }}>Project default</button>
+                            {availableVoices.map((v) => (
+                              <button key={v.id} onClick={() => { updateSegmentVoice(activeLanguage, i, v.id); setVoicePickerIdx(null); setMenuIdx(null); trackEvent("segment_voice_changed", { voice: v.name }); }} style={{
+                                display: "block", width: "100%", textAlign: "left", padding: "4px 8px", borderRadius: 4,
+                                border: "none", background: seg.voice_override === v.id ? "rgba(99,102,241,0.1)" : "transparent",
+                                color: seg.voice_override === v.id ? C.accent : C.dim, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+                              }}>{v.name}</button>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Divider + Delete */}
+                        <div style={{ height: 1, background: C.border, margin: "4px 0" }} />
+                        <button onClick={(e) => { e.stopPropagation(); setMenuIdx(null); setDeleteTarget(i); }} style={{
+                          display: "block", width: "100%", textAlign: "left", padding: "6px 8px", borderRadius: 5,
+                          border: "none", background: "transparent", color: "#f87171", fontSize: 12,
+                          cursor: "pointer", fontFamily: "inherit",
+                        }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                        >Delete segment</button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

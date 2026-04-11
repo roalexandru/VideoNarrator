@@ -30,6 +30,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "1"
 tempfile = "3"
 blake3 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 rayon = "1.10"
 directories = "6"
 thiserror = "2"

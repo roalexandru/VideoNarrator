@@ -89,25 +89,27 @@ describe("ReviewScreen", () => {
     expect(screen.getAllByText("Here we see the main feature.").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("renders segment pace badges", () => {
+  it("renders segment numbers and timestamps", () => {
     seedStores();
     render(<ReviewScreen />);
 
-    expect(screen.getAllByText("medium").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("fast").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("#1")).toBeInTheDocument();
+    expect(screen.getByText("#2")).toBeInTheDocument();
   });
 
-  it("delete button removes segment from store", async () => {
+  it("kebab menu opens and shows delete option", async () => {
     seedStores();
     const user = userEvent.setup();
     render(<ReviewScreen />);
 
-    // There should be 2 "Del" buttons
-    const delButtons = screen.getAllByText("Del");
-    expect(delButtons).toHaveLength(2);
+    // Click the kebab menu (three dots) on first segment
+    const kebabButtons = screen.getAllByRole("button").filter(b => b.querySelector("svg circle"));
+    expect(kebabButtons.length).toBeGreaterThanOrEqual(2);
+    await user.click(kebabButtons[0]);
 
-    // Delete the first segment — opens confirmation dialog
-    await user.click(delButtons[0]);
+    // Menu should show Delete segment option
+    const deleteBtn = screen.getByText("Delete segment");
+    await user.click(deleteBtn);
 
     // Confirm deletion in the dialog
     const confirmBtn = screen.getByText("Delete");
@@ -246,27 +248,58 @@ describe("ReviewScreen", () => {
     seedStores();
     render(<ReviewScreen />);
 
-    const playButtons = screen.getAllByText(/Play/);
+    // Play buttons are icon-only now (SVG), verify via aria-label
+    const playButtons = screen.getAllByTitle("Preview segment");
     expect(playButtons).toHaveLength(2);
   });
 
-  it("clicking Play button changes it to Stop state", async () => {
+  it("renders Preview Narration button when segments exist", () => {
+    seedStores();
+    render(<ReviewScreen />);
+
+    expect(screen.getByText(/Preview Narration/)).toBeInTheDocument();
+  });
+
+  it("kebab menu shows Refine with AI and Voice options", async () => {
     seedStores();
     const user = userEvent.setup();
     render(<ReviewScreen />);
 
-    const playButtons = screen.getAllByText(/Play/);
-    expect(playButtons[0].textContent).toContain("Play");
+    // Click first kebab menu
+    const kebabButtons = screen.getAllByRole("button").filter(b => b.querySelector("svg circle"));
+    await user.click(kebabButtons[0]);
 
-    // Click the first Play button — it will try to generate TTS (mocked) and play audio.
-    // In jsdom audio won't actually play, but the state should change to "previewing"
-    // which shows the Stop text. The handlePreview sets previewingIdx immediately.
-    await user.click(playButtons[0]);
+    expect(screen.getByText("Refine with AI")).toBeInTheDocument();
+    expect(screen.getByText(/^Voice/)).toBeInTheDocument();
+    expect(screen.getByText("Delete segment")).toBeInTheDocument();
+  });
 
-    // After clicking, the button for that segment should show Stop
-    // (the mock IPC returns a TTS result, but jsdom's Audio won't fire events,
-    // so previewingIdx stays set until audio ends or errors)
-    const stopButtons = screen.queryAllByText(/Stop/);
-    expect(stopButtons.length).toBeGreaterThanOrEqual(1);
+  it("Refine with AI submenu shows presets", async () => {
+    seedStores();
+    const user = userEvent.setup();
+    render(<ReviewScreen />);
+
+    // Open kebab → click Refine with AI
+    const kebabButtons = screen.getAllByRole("button").filter(b => b.querySelector("svg circle"));
+    await user.click(kebabButtons[0]);
+    await user.click(screen.getByText("Refine with AI"));
+
+    expect(screen.getByText("Make shorter")).toBeInTheDocument();
+    expect(screen.getByText("Make more detailed")).toBeInTheDocument();
+    expect(screen.getByText("Simplify language")).toBeInTheDocument();
+    expect(screen.getByText("More professional")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Custom...")).toBeInTheDocument();
+  });
+
+  it("Voice submenu shows Project default", async () => {
+    seedStores();
+    const user = userEvent.setup();
+    render(<ReviewScreen />);
+
+    const kebabButtons = screen.getAllByRole("button").filter(b => b.querySelector("svg circle"));
+    await user.click(kebabButtons[0]);
+    await user.click(screen.getByText(/^Voice/));
+
+    expect(screen.getByText("Project default")).toBeInTheDocument();
   });
 });
