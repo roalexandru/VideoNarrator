@@ -16,7 +16,7 @@
     <meta property="og:type" content="website" />
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <link rel="stylesheet" href="./src/styles/main.css" />
-    <script>if("scrollRestoration"in history)history.scrollRestoration="manual";window.scrollTo(0,0);</script>
+    <script>if("scrollRestoration"in history)history.scrollRestoration="manual";if(location.hash)history.replaceState(null,"",location.pathname+location.search);window.scrollTo(0,0);document.addEventListener("DOMContentLoaded",function(){window.scrollTo(0,0)});</script>
   </head>
   <body class="min-h-screen">
     <!-- Navigation -->
@@ -209,9 +209,9 @@
               </svg>
             </div>
             <div class="mb-1 text-xs font-semibold uppercase tracking-wider text-brand-purple">Step 5</div>
-            <h3 class="mb-2 text-lg font-semibold">Review</h3>
+            <h3 class="mb-2 text-lg font-semibold">Review &amp; Edit</h3>
             <p class="text-sm leading-relaxed text-text-muted">
-              Preview the generated narration script with segment-level editing. Fine-tune timing and wording.
+              Preview narration synced to video, edit scripts per-segment, adjust timing, and preview voices before export.
             </p>
           </div>
 
@@ -227,7 +227,7 @@
             <div class="mb-1 text-xs font-semibold uppercase tracking-wider text-brand-purple">Step 6</div>
             <h3 class="mb-2 text-lg font-semibold">Export</h3>
             <p class="text-sm leading-relaxed text-text-muted">
-              Get your narration as subtitles, scripts, or professional voiceover audio — ready to use in any video editor.
+              Export narrated video with burned subtitles, generate TTS audio via ElevenLabs or Azure, and save scripts in SRT, VTT, JSON, Markdown, and more.
             </p>
           </div>
         </div>
@@ -257,64 +257,96 @@
           </div>
 
           <!-- App Body -->
-          <div class="flex flex-col min-h-[540px] md:min-h-[600px] md:flex-row">
+          <div class="flex flex-col min-h-[540px] md:h-[600px] md:flex-row">
             <!-- Sidebar -->
-            <div class="hidden w-[180px] shrink-0 flex-col border-r border-[rgba(255,255,255,0.06)] bg-[#111118] p-3 md:flex">
+            <div class="hidden w-[220px] shrink-0 flex-col border-r border-[rgba(255,255,255,0.06)] bg-[#111118] md:flex" style="padding-top:12px">
+              <!-- Back to Projects -->
+              <div style="padding:4px 10px 0">
+                <div style="display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;color:#4a4a5a;font-size:12px">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+                  Projects
+                </div>
+              </div>
+
               <!-- Logo -->
-              <div class="mb-4 flex items-center gap-2 px-1">
-                <svg width="22" height="22" viewBox="0 0 64 64" fill="none">
-                  <defs>
-                    <linearGradient id="sb-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stop-color="#6366f1" />
-                      <stop offset="100%" stop-color="#a855f7" />
-                    </linearGradient>
-                  </defs>
-                  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#sb-grad)" />
-                  <path d="M24 18 L48 32 L24 46 Z" fill="rgba(255,255,255,0.92)" />
-                </svg>
-                <span class="text-sm font-bold text-[#e0e0ea]">Narrator</span>
+              <div style="padding:8px 16px 20px">
+                <div class="flex items-center gap-2">
+                  <svg width="30" height="30" viewBox="0 0 64 64" fill="none">
+                    <defs>
+                      <linearGradient id="sb-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#6366f1" />
+                        <stop offset="100%" stop-color="#a855f7" />
+                      </linearGradient>
+                    </defs>
+                    <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#sb-grad)" />
+                    <path d="M24 18 L48 32 L24 46 Z" fill="rgba(255,255,255,0.92)" />
+                    <line x1="36" y1="50" x2="36" y2="56" stroke="rgba(255,255,255,0.4)" stroke-width="2" stroke-linecap="round" />
+                    <line x1="40" y1="48" x2="40" y2="56" stroke="rgba(255,255,255,0.3)" stroke-width="2" stroke-linecap="round" />
+                    <line x1="44" y1="50" x2="44" y2="56" stroke="rgba(255,255,255,0.2)" stroke-width="2" stroke-linecap="round" />
+                  </svg>
+                  <span class="font-bold text-[#e0e0ea]" style="font-size:15px">Narrator</span>
+                </div>
               </div>
 
               <!-- Steps -->
-              <div class="flex flex-col gap-0.5 text-[12px]">
+              <nav class="flex flex-1 flex-col gap-0.5" style="padding:0 10px;font-size:13px">
                 <!-- Completed steps -->
-                <div class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[#8b8ba0]">
-                  <div class="flex items-center justify-center w-6 h-6 rounded-md bg-[rgba(34,197,94,0.15)]">
+                <div class="flex items-center gap-2.5 rounded-lg text-[#8b8ba0]" style="padding:9px 10px">
+                  <div class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(34,197,94,0.15)]" style="width:26px;height:26px">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   </div>
                   <span>Project Setup</span>
                 </div>
-                <div class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[#8b8ba0]">
-                  <div class="flex items-center justify-center w-6 h-6 rounded-md bg-[rgba(34,197,94,0.15)]">
+                <div class="flex items-center gap-2.5 rounded-lg text-[#8b8ba0]" style="padding:9px 10px">
+                  <div class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(34,197,94,0.15)]" style="width:26px;height:26px">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   </div>
                   <span>Edit Video</span>
                 </div>
-                <div class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[#8b8ba0]">
-                  <div class="flex items-center justify-center w-6 h-6 rounded-md bg-[rgba(34,197,94,0.15)]">
+                <div class="flex items-center gap-2.5 rounded-lg text-[#8b8ba0]" style="padding:9px 10px">
+                  <div class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(34,197,94,0.15)]" style="width:26px;height:26px">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   </div>
                   <span>Configuration</span>
                 </div>
-                <div class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[#8b8ba0]">
-                  <div class="flex items-center justify-center w-6 h-6 rounded-md bg-[rgba(34,197,94,0.15)]">
+                <div class="flex items-center gap-2.5 rounded-lg text-[#8b8ba0]" style="padding:9px 10px">
+                  <div class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(34,197,94,0.15)]" style="width:26px;height:26px">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
                   </div>
                   <span>Processing</span>
                 </div>
 
-                <!-- Active: Review -->
-                <div id="mock-step-review" class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all bg-[rgba(99,102,241,0.12)] text-[#a5b4fc] font-semibold">
-                  <div id="mock-step-review-icon" class="flex items-center justify-center w-6 h-6 rounded-md text-xs font-bold bg-[rgba(99,102,241,0.2)] text-[#a5b4fc]">5</div>
-                  <span>Review &amp; Edit</span>
+                <!-- Active: Review & Edit -->
+                <div id="mock-step-review" class="flex items-center gap-2.5 rounded-lg cursor-pointer transition-all bg-[rgba(99,102,241,0.12)] text-[#a5b4fc] font-semibold" style="padding:9px 10px">
+                  <div id="mock-step-review-icon" class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(99,102,241,0.2)] text-[#a5b4fc]" style="width:26px;height:26px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                  </div>
+                  <div>
+                    <span>Review &amp; Edit</span>
+                    <div id="mock-step-review-desc" style="font-size:10px;color:#5a5a6e;font-weight:400;margin-top:1px">Refine script</div>
+                  </div>
                 </div>
 
                 <!-- Inactive: Export -->
-                <div id="mock-step-export" class="flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-all text-[#5a5a6e] hover:bg-[rgba(255,255,255,0.04)]">
-                  <div id="mock-step-export-icon" class="flex items-center justify-center w-6 h-6 rounded-md text-xs font-bold bg-[rgba(255,255,255,0.04)] text-[#4a4a5a]">6</div>
-                  <span>Export</span>
+                <div id="mock-step-export" class="flex items-center gap-2.5 rounded-lg cursor-pointer transition-all text-[#5a5a6e] hover:bg-[rgba(255,255,255,0.04)]" style="padding:9px 10px">
+                  <div id="mock-step-export-icon" class="flex items-center justify-center shrink-0 rounded-[7px] bg-[rgba(255,255,255,0.04)] text-[#4a4a5a]" style="width:26px;height:26px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  </div>
+                  <div>
+                    <span>Export</span>
+                    <div id="mock-step-export-desc" style="font-size:10px;color:#5a5a6e;font-weight:400;margin-top:1px;display:none">Save &amp; share</div>
+                  </div>
+                </div>
+              </nav>
+
+              <!-- Settings -->
+              <div style="padding:0 10px 8px">
+                <div class="flex items-center gap-2 rounded-lg text-[#4a4a5a]" style="padding:9px 10px;font-size:13px">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                  Settings
                 </div>
               </div>
+              <div style="padding:8px 20px 12px;font-size:11px;color:#2a2a3a">v0.6.0</div>
             </div>
 
             <!-- Mobile Tab Bar (visible on small screens) -->
@@ -328,8 +360,19 @@
 
             <!-- ═══ REVIEW SCREEN ═══ -->
             <div id="mock-review-screen" class="flex flex-col h-full" style="display:flex">
+              <!-- Header -->
+              <div style="display:flex;justify-content:space-between;align-items:center;margin:16px 16px 10px;flex-shrink:0">
+                <div style="display:flex;align-items:center;gap:14px">
+                  <h2 style="font-size:20px;font-weight:700;color:#e0e0ea;margin:0">Review &amp; Edit</h2>
+                  <div style="display:flex;align-items:center;gap:6px">
+                    <span style="font-size:11px;color:#5a5a6e">Preview voice:</span>
+                    <div style="font-size:11px;padding:3px 8px;border-radius:6px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.07);color:#8b8ba0;cursor:default">Built-in (Free)</div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Video Player -->
-              <div class="relative mx-4 mt-4 overflow-hidden rounded-[10px] bg-black" style="aspect-ratio:16/9;max-height:260px">
+              <div class="relative mx-4 overflow-hidden rounded-[10px] bg-black" style="aspect-ratio:16/9;max-height:230px">
                 <!-- Mock video content -->
                 <div id="mock-video-area" class="absolute inset-0 flex cursor-pointer items-center justify-center bg-gradient-to-br from-[#0f0f1a] via-[#1a1028] to-[#0f0f1a]">
                   <!-- Decorative frame content -->
@@ -347,14 +390,14 @@
                 </div>
 
                 <!-- Caption overlay -->
-                <div id="mock-caption" class="pointer-events-none absolute bottom-12 left-1/2 z-20 max-w-[80%] -translate-x-1/2 rounded-lg bg-[rgba(0,0,0,0.75)] px-5 py-2.5 text-center text-[13px] leading-relaxed text-white transition-opacity" style="opacity:0"></div>
+                <div id="mock-caption" class="pointer-events-none absolute bottom-12 left-1/2 z-20 max-w-[80%] -translate-x-1/2 rounded-lg bg-[rgba(0,0,0,0.75)] px-5 py-2.5 text-center text-[15px] leading-relaxed text-white transition-opacity" style="opacity:0"></div>
 
                 <!-- Controls bar -->
                 <div class="absolute bottom-0 left-0 right-0 z-20 flex items-center gap-3 bg-gradient-to-t from-[rgba(0,0,0,0.7)] to-transparent px-4 pt-5 pb-2.5">
                   <button id="mock-play-btn" class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[rgba(255,255,255,0.15)]">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="white"><polygon points="6,4 20,12 6,20"/></svg>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="white"><polygon points="5,3 19,12 5,21"/></svg>
                   </button>
-                  <span id="mock-time-display" class="shrink-0 font-mono text-[11px] text-white">0:00 / 1:03</span>
+                  <span id="mock-time-display" class="shrink-0 font-mono text-[12px] text-white" style="min-width:90px">0:00 / 1:03</span>
                   <!-- Scrubber -->
                   <div id="mock-scrubber" class="relative h-1 flex-1 cursor-pointer rounded-full bg-[rgba(255,255,255,0.2)]">
                     <div id="mock-scrubber-fill" class="absolute left-0 top-0 h-full rounded-full bg-[#818cf8] transition-[width]" style="width:0%"></div>
@@ -372,103 +415,113 @@
                 </div>
                 <!-- Segment thumbnails -->
                 <div class="flex gap-0.5">
-                  <div class="mock-thumb relative h-10 flex-[13] overflow-hidden rounded" style="border:2px solid rgba(99,102,241,0.7);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[13] overflow-hidden rounded" style="border:2px solid rgba(99,102,241,0.7);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#1a1030] to-[#151525]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(99,102,241,0.3)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:00</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:00</span>
                   </div>
-                  <div class="mock-thumb relative h-10 flex-[15] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[15] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#151828] to-[#121520]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(0,0,0,0.45)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:08</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:08</span>
                   </div>
-                  <div class="mock-thumb relative h-10 flex-[17] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[17] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#1a1525] to-[#10121e]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(0,0,0,0.45)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:18</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:18</span>
                   </div>
-                  <div class="mock-thumb relative h-10 flex-[18] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[18] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#121228] to-[#0e101a]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(0,0,0,0.45)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:29</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:29</span>
                   </div>
-                  <div class="mock-thumb relative h-10 flex-[18] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[18] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#18152a] to-[#111320]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(0,0,0,0.45)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:40</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:40</span>
                   </div>
-                  <div class="mock-thumb relative h-10 flex-[19] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
+                  <div class="mock-thumb relative h-12 flex-[19] overflow-hidden rounded" style="border:1px solid rgba(255,255,255,0.06);min-width:0">
                     <div class="absolute inset-0 bg-gradient-to-br from-[#151525] to-[#0f1020]"></div>
                     <div class="mock-thumb-overlay absolute inset-0" style="background-color:rgba(0,0,0,0.45)"></div>
-                    <span class="relative z-10 ml-1 mt-0.5 block font-mono text-[9px] text-white/70 drop-shadow">0:52</span>
+                    <span class="relative z-10 flex h-full items-center justify-center font-mono text-[10px] font-semibold text-white/80 drop-shadow">0:52</span>
                   </div>
                 </div>
               </div>
 
               <!-- Segment Editor List -->
-              <div class="mx-4 mt-2 mb-4 flex-1 overflow-y-auto border-t border-[rgba(255,255,255,0.06)] pt-2" style="max-height:200px">
+              <div class="mock-scrollbar mx-4 mt-2 mb-4 flex-1 overflow-y-auto border-t border-[rgba(255,255,255,0.06)] pt-2" style="max-height:200px">
                 <div id="mock-segments"></div>
               </div>
             </div>
 
             <!-- ═══ EXPORT SCREEN ═══ -->
-            <div id="mock-export-screen" class="flex flex-col gap-3 p-4 overflow-y-auto" style="display:none;max-height:100%">
-              <h2 class="text-[18px] font-bold text-[#e0e0ea] mb-1">Export</h2>
+            <div id="mock-export-screen" class="mock-scrollbar flex flex-col gap-3.5 overflow-y-auto h-full" style="display:none;padding:16px 18px">
+              <div>
+                <h2 style="font-size:20px;font-weight:700;color:#e0e0ea;margin:0 0 12px">Export</h2>
 
-              <!-- Output folder -->
-              <div class="flex items-center gap-2 rounded-lg border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)] px-3.5 py-2.5">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5a5a6e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                <span class="flex-1 truncate font-mono text-[11px] text-[#8b8ba0]">~/Desktop/exports</span>
-                <button class="text-[11px] font-semibold text-[#818cf8] hover:text-[#a5b4fc] transition-colors">Change</button>
-              </div>
+                <!-- Output folder -->
+                <div class="flex items-center gap-2 rounded-lg border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)]" style="padding:10px 14px;margin-bottom:8px">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#5a5a6e" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+                  <span class="flex-1 truncate font-mono text-[12px] text-[#8b8ba0]">~/Desktop/exports</span>
+                  <button class="text-[12px] font-semibold text-[#818cf8] hover:text-[#a5b4fc] transition-colors" style="background:none;border:none;cursor:pointer;font-family:inherit">Change</button>
+                </div>
 
-              <!-- Filename -->
-              <div class="flex items-center gap-2 rounded-lg border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)] px-3.5 py-2.5">
-                <span class="text-[10px] font-semibold text-[#5a5a6e] uppercase tracking-wider whitespace-nowrap">Filename</span>
-                <input type="text" value="product-demo" class="flex-1 bg-transparent font-mono text-[12px] text-[#e0e0ea] outline-none" spellcheck="false" />
+                <!-- Filename -->
+                <div class="flex items-center gap-2 rounded-lg border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)]" style="padding:8px 14px">
+                  <span style="font-size:11px;font-weight:600;color:#5a5a6e;white-space:nowrap">Filename</span>
+                  <input type="text" value="product-demo" style="flex:1;padding:4px 8px;border:1px solid rgba(255,255,255,0.07);border-radius:6px;font-size:13px;background:rgba(255,255,255,0.04);color:#e0e0ea;font-family:monospace;outline:none" spellcheck="false" />
+                </div>
               </div>
 
               <!-- Video Section -->
               <div class="mock-section rounded-xl border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)] overflow-hidden">
-                <div class="mock-section-header flex items-center gap-2 px-4 py-3 cursor-pointer border-b border-[rgba(255,255,255,0.07)]">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/>
-                    <line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/>
-                    <line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/>
-                    <line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/>
-                    <line x1="17" y1="7" x2="22" y2="7"/>
+                <div class="mock-section-header flex items-center gap-2 cursor-pointer border-b border-[rgba(255,255,255,0.07)]" style="padding:14px 18px">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round">
+                    <rect x="2" y="2" width="20" height="20" rx="2.18"/>
+                    <polygon points="10 8 16 12 10 16 10 8"/>
                   </svg>
-                  <span class="text-[12px] font-bold tracking-wide text-[#e0e0ea]">VIDEO</span>
-                  <svg class="mock-chevron ml-auto text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                  <span style="font-size:13px;font-weight:700;color:#e0e0ea;flex:1;letter-spacing:0.3px">VIDEO</span>
+                  <svg class="mock-chevron text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
-                <div class="mock-section-content px-4 py-3.5 space-y-3">
+                <div class="mock-section-content space-y-3.5" style="padding:16px 18px">
                   <!-- Audio mode radios -->
-                  <div class="space-y-2">
-                    <div class="flex items-center gap-2.5">
+                  <div style="display:flex;gap:20px">
+                    <label class="flex items-center gap-2 cursor-pointer" style="font-size:13px;color:#8b8ba0">
                       <div class="mock-radio flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 cursor-pointer" data-group="audio-mode" style="border-color:#818cf8">
                         <div class="mock-radio-dot h-2 w-2 rounded-full bg-[#818cf8]" style="opacity:1"></div>
                       </div>
-                      <span class="text-[12px] text-[#8b8ba0]">Narration only</span>
-                    </div>
-                    <div class="flex items-center gap-2.5">
+                      Narration only
+                    </label>
+                    <label class="flex items-center gap-2 cursor-pointer" style="font-size:13px;color:#8b8ba0">
                       <div class="mock-radio flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 cursor-pointer" data-group="audio-mode" style="border-color:#5a5a6e">
                         <div class="mock-radio-dot h-2 w-2 rounded-full bg-[#818cf8]" style="opacity:0"></div>
                       </div>
-                      <span class="text-[12px] text-[#8b8ba0]">Mix with original audio</span>
-                    </div>
+                      Mix with original
+                    </label>
                   </div>
 
                   <!-- Subtitles toggle -->
-                  <div class="flex items-center justify-between">
-                    <span class="text-[12px] text-[#8b8ba0]">Burn subtitles into video</span>
+                  <label class="flex items-center gap-2.5 cursor-pointer" style="font-size:13px;color:#8b8ba0">
                     <div class="mock-toggle relative h-5 w-9 cursor-pointer rounded-full transition-colors" data-on="false" style="background-color:rgba(255,255,255,0.1)">
                       <div class="mock-toggle-thumb absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left]" style="left:2px"></div>
                     </div>
+                    Burn subtitles into video
+                  </label>
+
+                  <!-- Voice summary -->
+                  <div class="flex items-center gap-2.5 rounded-lg border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.03)]" style="padding:10px 14px">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8b8ba0" stroke-width="2" stroke-linecap="round">
+                      <path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/>
+                      <path d="M19 10v2a7 7 0 01-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+                    </svg>
+                    <span style="flex:1;font-size:13px;color:#8b8ba0">Built-in (Free) &middot; System Default</span>
+                    <button style="background:none;border:none;color:#818cf8;font-size:12px;cursor:pointer;font-family:inherit;font-weight:600">Change</button>
                   </div>
 
                   <!-- Output preview -->
-                  <div class="rounded-md bg-[rgba(255,255,255,0.03)] px-2.5 py-1.5 font-mono text-[11px] text-[#8b8ba0]">
-                    &rarr; product-demo.mp4
+                  <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:6px;background:rgba(255,255,255,0.03);font-size:12px;color:#8b8ba0;font-family:monospace">
+                    <span style="color:#5a5a6e">&rarr;</span> product-demo.mp4
                   </div>
 
                   <!-- Progress bar -->
@@ -491,19 +544,19 @@
 
               <!-- Audio Section -->
               <div class="mock-section rounded-xl border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)] overflow-hidden">
-                <div class="mock-section-header flex items-center gap-2 px-4 py-3 cursor-pointer border-b border-[rgba(255,255,255,0.07)]">
+                <div class="mock-section-header flex items-center gap-2 cursor-pointer border-b border-[rgba(255,255,255,0.07)]" style="padding:14px 18px">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a855f7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
                     <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/>
                   </svg>
-                  <span class="text-[12px] font-bold tracking-wide text-[#e0e0ea]">AUDIO ONLY</span>
-                  <svg class="mock-chevron ml-auto text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                  <span style="font-size:13px;font-weight:700;color:#e0e0ea;flex:1;letter-spacing:0.3px">AUDIO ONLY</span>
+                  <svg class="mock-chevron text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
-                <div class="mock-section-content px-4 py-3.5 space-y-3">
-                  <p class="text-[11px] leading-relaxed text-[#8b8ba0]">Generate narration audio using ElevenLabs text-to-speech and export as a standalone file.</p>
+                <div class="mock-section-content space-y-3.5" style="padding:16px 18px">
+                  <p style="font-size:13px;line-height:1.6;color:#8b8ba0;margin:0">Generate narration audio using ElevenLabs or Azure TTS and export as a standalone file.</p>
 
-                  <div class="rounded-md bg-[rgba(255,255,255,0.03)] px-2.5 py-1.5 font-mono text-[11px] text-[#8b8ba0]">
-                    &rarr; product-demo-audio.mp3
+                  <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:6px;background:rgba(255,255,255,0.03);font-size:12px;color:#8b8ba0;font-family:monospace">
+                    <span style="color:#5a5a6e">&rarr;</span> product-demo-audio.mp3
                   </div>
 
                   <div class="h-1 overflow-hidden rounded-full bg-[rgba(255,255,255,0.06)]">
@@ -523,15 +576,15 @@
 
               <!-- Scripts Section -->
               <div class="mock-section rounded-xl border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)] overflow-hidden">
-                <div class="mock-section-header flex items-center gap-2 px-4 py-3 cursor-pointer" style="border-bottom:none">
+                <div class="mock-section-header flex items-center gap-2 cursor-pointer" style="padding:14px 18px;border-bottom:none">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
                     <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                   </svg>
-                  <span class="text-[12px] font-bold tracking-wide text-[#e0e0ea]">SCRIPTS</span>
-                  <svg class="mock-chevron ml-auto text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform:rotate(-90deg)"><polyline points="6 9 12 15 18 9"/></svg>
+                  <span style="font-size:13px;font-weight:700;color:#e0e0ea;flex:1;letter-spacing:0.3px">SCRIPTS</span>
+                  <svg class="mock-chevron text-[#5a5a6e] transition-transform" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="transform:rotate(-90deg)"><polyline points="6 9 12 15 18 9"/></svg>
                 </div>
-                <div class="mock-section-content px-4 py-3.5 space-y-3" style="display:none">
+                <div class="mock-section-content space-y-3.5" style="display:none;padding:16px 18px">
                   <!-- Format toggles -->
                   <div class="flex flex-wrap gap-1.5">
                     <button class="mock-format-btn" style="font-size:11px;font-weight:600;padding:4px 10px;border-radius:6px;cursor:pointer;transition:all 0.12s;background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.3);color:#818cf8" data-format="json">JSON</button>

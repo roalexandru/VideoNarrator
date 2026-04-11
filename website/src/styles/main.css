@@ -28,3 +28,22 @@ body {
   background: rgba(99, 102, 241, 0.3);
   color: #fff;
 }
+
+/* Custom scrollbar for mock app — matches product */
+.mock-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.mock-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.mock-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+.mock-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+.mock-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+}

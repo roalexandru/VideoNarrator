@@ -93,21 +93,58 @@ function $(id: string): HTMLElement {
 
 // ─── Tab Switching ───────────────────────────────────────────
 
-function applyStepStyle(step: HTMLElement, icon: HTMLElement, active: boolean) {
-  step.style.background = active ? "rgba(99,102,241,0.12)" : "transparent";
-  step.style.color = active ? "#a5b4fc" : "#5a5a6e";
-  step.style.fontWeight = active ? "600" : "400";
-  icon.style.background = active ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.04)";
-  icon.style.color = active ? "#a5b4fc" : "#4a4a5a";
-}
+const ICON_REVIEW = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>`;
+const ICON_EXPORT = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`;
+const ICON_CHECK = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
 function switchTab(tab: "review" | "export") {
   if (tab === activeTab) return;
   activeTab = tab;
 
-  // Update sidebar
-  applyStepStyle($("mock-step-review"), $("mock-step-review-icon"), tab === "review");
-  applyStepStyle($("mock-step-export"), $("mock-step-export-icon"), tab === "export");
+  const stepReview = $("mock-step-review");
+  const stepExport = $("mock-step-export");
+  const iconReview = $("mock-step-review-icon");
+  const iconExport = $("mock-step-export-icon");
+  const descReview = $("mock-step-review-desc");
+  const descExport = $("mock-step-export-desc");
+
+  if (tab === "review") {
+    // Review: active
+    stepReview.style.background = "rgba(99,102,241,0.12)";
+    stepReview.style.color = "#a5b4fc";
+    stepReview.style.fontWeight = "600";
+    iconReview.style.background = "rgba(99,102,241,0.2)";
+    iconReview.style.color = "#a5b4fc";
+    iconReview.innerHTML = ICON_REVIEW;
+    descReview.style.display = "block";
+
+    // Export: upcoming
+    stepExport.style.background = "transparent";
+    stepExport.style.color = "#5a5a6e";
+    stepExport.style.fontWeight = "400";
+    iconExport.style.background = "rgba(255,255,255,0.04)";
+    iconExport.style.color = "#4a4a5a";
+    iconExport.innerHTML = ICON_EXPORT;
+    descExport.style.display = "none";
+  } else {
+    // Review: completed
+    stepReview.style.background = "transparent";
+    stepReview.style.color = "#8b8ba0";
+    stepReview.style.fontWeight = "400";
+    iconReview.style.background = "rgba(34,197,94,0.15)";
+    iconReview.style.color = "#4ade80";
+    iconReview.innerHTML = ICON_CHECK;
+    descReview.style.display = "none";
+
+    // Export: active
+    stepExport.style.background = "rgba(99,102,241,0.12)";
+    stepExport.style.color = "#a5b4fc";
+    stepExport.style.fontWeight = "600";
+    iconExport.style.background = "rgba(99,102,241,0.2)";
+    iconExport.style.color = "#a5b4fc";
+    iconExport.innerHTML = ICON_EXPORT;
+    descExport.style.display = "block";
+  }
 
   // Update mobile tabs
   const mobileReview = document.getElementById("mock-mobile-review");
@@ -136,7 +173,7 @@ function togglePlay() {
   const btn = $("mock-play-btn");
 
   if (isPlaying) {
-    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="white"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`;
+    btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="white"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
     playInterval = setInterval(() => {
       currentTime += 0.1;
       if (currentTime >= TOTAL_DURATION) {
@@ -146,7 +183,7 @@ function togglePlay() {
       updatePlaybackUI();
     }, 100);
   } else {
-    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="white"><polygon points="6,4 20,12 6,20"/></svg>`;
+    btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="white"><polygon points="5,3 19,12 5,21"/></svg>`;
     if (playInterval) {
       clearInterval(playInterval);
       playInterval = null;
@@ -219,8 +256,8 @@ function renderSegments() {
       : "rgba(255,255,255,0.07)";
 
     return `
-      <div class="mock-segment-row" data-index="${i}" style="display:grid;grid-template-columns:60px 1fr auto;gap:12px;padding:10px 14px;border-radius:6px;cursor:pointer;transition:all 0.12s;background:${rowBg};border-left:${borderLeft}">
-        <div style="display:flex;flex-direction:column">
+      <div class="mock-segment-row" data-index="${i}" style="display:grid;grid-template-columns:80px 1fr auto;gap:12px;align-items:start;padding:10px 14px;border-radius:6px;cursor:pointer;transition:all 0.12s;background:${rowBg};border-left:${borderLeft}">
+        <div style="display:flex;flex-direction:column;padding-top:2px">
           <span style="font-family:ui-monospace,monospace;font-size:12px;font-weight:600;color:${tsColor}">${formatTime(seg.start_seconds)}</span>
           <span style="font-family:ui-monospace,monospace;font-size:10px;opacity:0.6;color:${tsColor}">${formatTime(seg.end_seconds)}</span>
         </div>
@@ -232,8 +269,10 @@ function renderSegments() {
           >${seg.text}</textarea>
           <span style="font-size:11px;font-style:italic;color:#5a5a6e">${seg.visual_description}</span>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px">
+        <div style="display:flex;gap:4px;padding-top:2px">
           <span style="font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,0.05);color:#5a5a6e">${seg.pace}</span>
+          <button class="mock-segment-play" data-index="${i}" style="font-size:11px;color:#8b8ba0;background:none;border:none;cursor:pointer;font-family:inherit;padding:2px 6px;border-radius:4px">&#9654; Play</button>
+          <button style="font-size:11px;color:#f87171;background:none;border:none;cursor:pointer;font-family:inherit;padding:2px 6px">Del</button>
         </div>
       </div>
     `;
