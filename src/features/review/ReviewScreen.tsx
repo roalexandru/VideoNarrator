@@ -22,6 +22,14 @@ const AVAILABLE_LANGUAGES = [
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
+const REFINE_PRESETS = [
+  { label: "Make shorter", instruction: "Make this narration segment more concise. Keep the key message but use fewer words." },
+  { label: "Make more detailed", instruction: "Expand this narration segment with more detail and explanation." },
+  { label: "Simplify language", instruction: "Simplify the language to be more accessible. Use shorter sentences and simpler words." },
+  { label: "More professional", instruction: "Make this narration sound more professional and polished." },
+  { label: "More conversational", instruction: "Rewrite in a more casual, conversational tone." },
+];
+
 export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const projectId = useProjectStore((s) => s.projectId);
@@ -84,13 +92,6 @@ export function ReviewScreen() {
   const [customInstruction, setCustomInstruction] = useState("");
   // Kebab menu state (consolidates Voice, Refine, Delete)
   const [menuIdx, setMenuIdx] = useState<number | null>(null);
-  const REFINE_PRESETS = [
-    { label: "Make shorter", instruction: "Make this narration segment more concise. Keep the key message but use fewer words." },
-    { label: "Make more detailed", instruction: "Expand this narration segment with more detail and explanation." },
-    { label: "Simplify language", instruction: "Simplify the language to be more accessible. Use shorter sentences and simpler words." },
-    { label: "More professional", instruction: "Make this narration sound more professional and polished." },
-    { label: "More conversational", instruction: "Rewrite in a more casual, conversational tone." },
-  ];
 
   const handleRefine = useCallback(async (segmentIdx: number, instruction: string) => {
     if (refineLoading || !segments[segmentIdx]) return;

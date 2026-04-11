@@ -45,6 +45,8 @@ export const useWizardStore = create<WizardState>((set) => ({
 
   goToStep: (step) => {
     const clamped = Math.max(0, Math.min(step, 5));
+    const current = useWizardStore.getState().currentStep;
+    if (clamped === current) return; // Prevent duplicate events from effect re-runs
     trackEvent("step_visited", { step: STEP_LABELS[clamped] || `step_${clamped}`, step_index: clamped });
     set({ currentStep: clamped });
   },
