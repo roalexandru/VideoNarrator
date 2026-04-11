@@ -83,7 +83,7 @@ jobs:
           cp "$FFMPEG_DIR/ffmpeg.exe" src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
           cp "$FFMPEG_DIR/ffprobe.exe" src-tauri/binaries/ffprobe-x86_64-pc-windows-msvc.exe
 
-      - uses: tauri-apps/tauri-action@v0.5.25
+      - uses: tauri-apps/tauri-action@v0.6.2
         id: tauri
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
