@@ -207,7 +207,7 @@ export function ProjectLibrary({ onNewProject, onOpenProject, onOpenSettings }: 
                       }}
                         onMouseEnter={(e) => { e.currentTarget.style.color = C.accent; e.currentTarget.style.background = "rgba(99,102,241,0.08)"; }}
                         onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; e.currentTarget.style.background = "none"; }}
-                      >Export</button>
+                      >Share</button>
                       <button onClick={(e) => handleDelete(e, p.id, p.title)} style={{
                         background: "none", border: "none", color: C.muted, cursor: "pointer",
                         fontSize: 11, padding: "3px 6px", borderRadius: 4, fontFamily: "inherit",

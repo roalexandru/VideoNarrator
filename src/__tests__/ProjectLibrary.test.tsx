@@ -231,6 +231,6 @@ describe("ProjectLibrary", () => {
     });
 
     // Export button exists in DOM but is hidden (opacity: 0)
-    expect(screen.getByText("Export")).toBeInTheDocument();
+    expect(screen.getByText("Share")).toBeInTheDocument();
   });
 });

@@ -40,7 +40,7 @@ const sections = [
       },
       {
         q: "Project sharing",
-        a: "Export a project as a portable .narrator file (hover a project card, click \"Export\"). This includes config, scripts, and frames. Import on any machine (Mac or Windows) via \"Import .narrator\" on the Projects screen. The video file is not bundled — re-link it after import.",
+        a: "Share a project as a portable .narrator file (hover a project card, click \"Share\"). This includes config, scripts, and frames. Import on any machine (Mac or Windows) via \"Import .narrator\" on the Projects screen. The video file is not bundled — re-link it after import.",
       },
     ],
   },

@@ -860,6 +860,7 @@ pub async fn save_tts_provider(provider: String) -> Result<(), NarratorError> {
 
 // ── TTS generation command ──
 
+#[derive(Clone)]
 enum TtsProvider {
     ElevenLabs(elevenlabs_client::ElevenLabsConfig),
     Azure(azure_tts_client::AzureTtsConfig),
@@ -899,6 +900,31 @@ fn tts_cache_dir() -> Result<PathBuf, NarratorError> {
     let dir = project_store::get_narrator_dir().join("cache").join("tts");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Apply a per-segment voice override to a TTS provider.
+/// Returns a modified provider with the overridden voice, or clones the original.
+fn apply_voice_override(base: &TtsProvider, voice_override: &Option<String>) -> TtsProvider {
+    let voice_id = match voice_override {
+        Some(v) if !v.is_empty() => v,
+        _ => return base.clone(),
+    };
+    match base {
+        TtsProvider::ElevenLabs(cfg) => {
+            TtsProvider::ElevenLabs(elevenlabs_client::ElevenLabsConfig {
+                voice_id: voice_id.clone(),
+                ..cfg.clone()
+            })
+        }
+        TtsProvider::Azure(cfg) => TtsProvider::Azure(azure_tts_client::AzureTtsConfig {
+            voice_name: voice_id.clone(),
+            ..cfg.clone()
+        }),
+        TtsProvider::Builtin { speed, .. } => TtsProvider::Builtin {
+            voice: voice_id.clone(),
+            speed: *speed,
+        },
+    }
 }
 
 /// Generate speech for a single segment, using cache if available.
@@ -1037,7 +1063,8 @@ pub async fn generate_tts(
             let filename = format!("_tmp_seg_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
+            let seg_tts = apply_voice_override(&tts, &seg.voice_override);
+            match generate_speech_for_provider(&seg_tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     segment_files.push((seg.index, filepath, seg.start_seconds, seg.end_seconds));
                 }
@@ -1223,7 +1250,8 @@ pub async fn generate_tts(
             let filename = format!("segment_{:03}.mp3", seg.index);
             let filepath = out.join(&filename);
 
-            match generate_speech_for_provider(&tts, &seg.text, &filepath).await {
+            let seg_tts = apply_voice_override(&tts, &seg.voice_override);
+            match generate_speech_for_provider(&seg_tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: seg.index,
