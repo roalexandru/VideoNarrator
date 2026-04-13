@@ -21,7 +21,13 @@ export function UpdateChecker() {
       setPhase("checking");
     }
     try {
-      const result = await check();
+      // Timeout after 20s — Windows updater can hang if the endpoint is unreachable
+      const result = await Promise.race<Update | null>([
+        check(),
+        new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error("Update check timed out")), 20000)
+        ),
+      ]);
       if (result) {
         setUpdate(result);
         setPhase("available");
@@ -98,7 +104,24 @@ export function UpdateChecker() {
       borderTop: "1px solid rgba(255,255,255,0.07)",
       animation: "slideUpBar 0.2s ease",
     }}>
-      <style>{`@keyframes slideUpBar { from { transform: translateY(100%); } to { transform: translateY(0); } }`}</style>
+      <style>{`
+        @keyframes slideUpBar { from { transform: translateY(100%); } to { transform: translateY(0); } }
+        @keyframes updateSpin { to { transform: rotate(360deg); } }
+      `}</style>
+
+      {/* Checking */}
+      {phase === "checking" && (
+        <>
+          <div style={{
+            width: 14, height: 14, borderRadius: "50%",
+            border: "2px solid rgba(129,140,248,0.25)", borderTopColor: "#818cf8",
+            animation: "updateSpin 0.8s linear infinite",
+          }} />
+          <span style={{ fontSize: 12, color: "#8b8ba0", flex: 1 }}>
+            Checking for updates...
+          </span>
+        </>
+      )}
 
       {phase === "available" && (
         <>
