@@ -227,6 +227,57 @@ describe("UpdateChecker", () => {
     });
   });
 
+  it("shows 'Checking for updates...' loader during manual check", async () => {
+    let menuCallback: ((event: any) => void) | null = null;
+    mockListen.mockImplementation(async (_event: string, handler: any) => {
+      menuCallback = handler;
+      return () => {};
+    });
+    // Make check() hang so we can observe the checking state
+    let resolveCheck: (v: any) => void = () => {};
+    mockCheck.mockImplementation(() => new Promise((r) => { resolveCheck = r; }));
+
+    render(<UpdateChecker />);
+
+    await act(async () => {
+      menuCallback?.({ payload: "check_for_updates" });
+    });
+
+    // Loader should be visible
+    await waitFor(() => {
+      expect(screen.getByText(/Checking for updates/)).toBeInTheDocument();
+    });
+
+    // Let the check resolve to avoid hanging
+    await act(async () => { resolveCheck(null); });
+  });
+
+  it("times out manual check after 20s and shows dialog", async () => {
+    let menuCallback: ((event: any) => void) | null = null;
+    mockListen.mockImplementation(async (_event: string, handler: any) => {
+      menuCallback = handler;
+      return () => {};
+    });
+    // Never resolves — simulates Windows updater hang
+    mockCheck.mockImplementation(() => new Promise(() => {}));
+
+    render(<UpdateChecker />);
+
+    await act(async () => {
+      menuCallback?.({ payload: "check_for_updates" });
+    });
+
+    // Advance past the 20s timeout
+    await act(async () => { vi.advanceTimersByTime(21000); });
+
+    await waitFor(() => {
+      expect(mockMessage).toHaveBeenCalledWith(
+        "There are currently no updates available.",
+        expect.objectContaining({ title: "Narrator", kind: "info" })
+      );
+    });
+  });
+
   it("shows update bar when manual check finds an update", async () => {
     let menuCallback: ((event: any) => void) | null = null;
     mockListen.mockImplementation(async (_event: string, handler: any) => {
