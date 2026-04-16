@@ -210,6 +210,14 @@ export default function App() {
       speed: c.speed,
       skip_frames: c.skipFrames,
       fps_override: c.fpsOverride,
+      clip_type: c.type ?? 'normal',
+      freeze_source_time: c.freezeSourceTime,
+      freeze_duration: c.freezeDuration,
+      zoom_pan: c.zoomPan ? {
+        startRegion: c.zoomPan.startRegion,
+        endRegion: c.zoomPan.endRegion,
+        easing: c.zoomPan.easing,
+      } : null,
     })) : null;
     return {
       id: ps.projectId || crypto.randomUUID(),
@@ -233,6 +241,7 @@ export default function App() {
       created_at: ps.createdAt || now,
       updated_at: now,
       edit_clips: editClips,
+      timeline_effects: es.effects.length > 0 ? es.effects : null,
       video_metadata: ps.videoFile ? {
         path: ps.videoFile.path,
         duration_seconds: ps.videoFile.duration,
@@ -271,6 +280,7 @@ export default function App() {
   const configProvider = useConfigStore((s) => s.aiProvider);
   const configModel = useConfigStore((s) => s.model);
   const editClips = useEditStore((s) => s.clips);
+  const editEffects = useEditStore((s) => s.effects);
 
   useEffect(() => {
     // Only auto-save when in editor view with a video file (same guard as manual save)
@@ -289,7 +299,7 @@ export default function App() {
     return () => {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
-  }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel, editClips, buildSavePayload]);
+  }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel, editClips, editEffects, buildSavePayload]);
 
   // ── Listen for native menu events from the Rust backend ──
   useEffect(() => {
@@ -409,16 +419,29 @@ export default function App() {
         const duration = useProjectStore.getState().videoFile?.duration || 0;
         es.initFromVideo(duration);
         // Replace the default single clip with saved clips
-        const restored = cfg.edit_clips.map((c: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null }) => ({
+        const restored = cfg.edit_clips.map((c: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null; clip_type?: string; freeze_source_time?: number; freeze_duration?: number; zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null }) => ({
           id: crypto.randomUUID(),
           sourceStart: c.source_start,
           sourceEnd: c.source_end,
           speed: c.speed,
           skipFrames: c.skip_frames,
           fpsOverride: c.fps_override,
+          type: (c.clip_type === 'freeze' ? 'freeze' : undefined) as 'normal' | 'freeze' | undefined,
+          freezeSourceTime: c.freeze_source_time,
+          freezeDuration: c.freeze_duration,
+          zoomPan: c.zoom_pan ? {
+            startRegion: c.zoom_pan.startRegion,
+            endRegion: c.zoom_pan.endRegion,
+            easing: c.zoom_pan.easing as 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out',
+          } : undefined,
         }));
         // Directly set clips via store — initFromVideo already set sourceDuration
         useEditStore.setState({ clips: restored, selectedClipIndex: 0 });
+      }
+
+      // Restore timeline effects if saved
+      if (cfg.timeline_effects && Array.isArray(cfg.timeline_effects) && cfg.timeline_effects.length > 0) {
+        useEditStore.setState({ effects: cfg.timeline_effects as import("./stores/editStore").TimelineEffect[] });
       }
 
       const ss = useScriptStore.getState();

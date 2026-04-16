@@ -128,7 +128,12 @@ export interface LoadedProject {
     custom_prompt: string;
     created_at: string;
     updated_at: string;
-    edit_clips?: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null }[];
+    edit_clips?: {
+      source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null;
+      clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
+      zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
+    }[];
+    timeline_effects?: unknown[];
     video_metadata?: VideoMetadata;
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
@@ -153,13 +158,20 @@ export const getRecordingsDirectory = () => invoke<string>("get_recordings_direc
 
 // Video editing
 export interface VideoEditPlan {
-  clips: { start_seconds: number; end_seconds: number; speed: number; fps_override: number | null }[];
+  clips: {
+    start_seconds: number; end_seconds: number; speed: number; fps_override: number | null;
+    clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
+    zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
+  }[];
 }
 export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel });
 
 export const extractEditThumbnails = (videoPath: string, outputDir: string, count: number) =>
   invoke<string[]>("extract_edit_thumbnails", { videoPath, outputDir, count });
+
+export const extractSingleFrame = (videoPath: string, timestamp: number, outputPath: string) =>
+  invoke<string>("extract_single_frame", { videoPath, timestamp, outputPath });
 
 export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel });

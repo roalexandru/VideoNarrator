@@ -613,6 +613,7 @@ pub async fn generate_narration(
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
         edit_clips: None,
+        timeline_effects: None,
         video_metadata: None,
     };
     if let Err(e) = project_store::create_project(&project_config) {
@@ -1573,6 +1574,15 @@ pub async fn extract_edit_thumbnails(
     count: usize,
 ) -> Result<Vec<String>, NarratorError> {
     video_edit::extract_edit_thumbnails(&video_path, &output_dir, count).await
+}
+
+#[tauri::command]
+pub async fn extract_single_frame(
+    video_path: String,
+    timestamp: f64,
+    output_path: String,
+) -> Result<String, NarratorError> {
+    video_edit::extract_single_frame(&video_path, timestamp, &output_path).await
 }
 
 #[tauri::command]
