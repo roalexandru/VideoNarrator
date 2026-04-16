@@ -596,6 +596,7 @@ pub async fn generate_narration(
 
     // Auto-save project
     let project_config = ProjectConfig {
+        schema_version: 1,
         id: project_id.clone(),
         title: params.title.clone(),
         description: params.description.clone(),

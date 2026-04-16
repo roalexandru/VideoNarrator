@@ -110,14 +110,18 @@ export function EditVideoScreen() {
     return () => { v.removeEventListener("loadedmetadata", onMeta); v.removeEventListener("timeupdate", onTime); v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause); };
   }, [dragging, clips]);
 
+  const [thumbsLoading, setThumbsLoading] = useState(false);
+
   // Extract thumbnails
   useEffect(() => {
     if (!videoFile?.path) return;
-    // Scale thumbnail count: short videos get more detail, long videos fewer to stay fast
+    setThumbsLoading(true);
     const dur = videoFile.duration || 120;
     const thumbCount = dur > 600 ? 30 : dur > 300 ? 40 : 60;
     extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || crypto.randomUUID()}`, thumbCount)
-      .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p)))).catch(() => {});
+      .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p))))
+      .catch(() => {})
+      .finally(() => setThumbsLoading(false));
   }, [videoFile?.path, projectId]);
 
   // Track video container size for zoom/pan overlay
@@ -600,6 +604,10 @@ export function EditVideoScreen() {
               ))}
             </div>
 
+            {/* Thumbnail loading shimmer */}
+            {thumbsLoading && (
+              <div style={{ position: "absolute", top: 24, left: 0, right: 0, height: 62, background: "linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.02) 100%)", backgroundSize: "200% 100%", animation: "shimmer 1.5s infinite", zIndex: 0, borderRadius: 4 }} />
+            )}
             {/* Clip blocks — CONTIGUOUS, draggable for reorder */}
             <div style={{ position: "relative", height: 64 }}>
               {(() => {
@@ -717,7 +725,7 @@ export function EditVideoScreen() {
               const LANE_GAP = 2;
               const lanes: { endTime: number }[] = [];
               const effectLanes: Map<string, number> = new Map();
-              const sorted = [...effects].sort((a, b) => a.startTime - b.startTime);
+              const sorted = [...effects].sort((a, b) => a.startTime - b.startTime || a.id.localeCompare(b.id));
               for (const effect of sorted) {
                 let lane = 0;
                 while (lane < lanes.length && lanes[lane].endTime > effect.startTime) lane++;
@@ -759,8 +767,8 @@ export function EditVideoScreen() {
                         {transInPct > 0 && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${transInPct}%`, background: `${meta.color}30`, borderRight: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />}
                         {transOutPct > 0 && <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: `${transOutPct}%`, background: `${meta.color}30`, borderLeft: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />}
                         <span style={{ fontSize: 8, color: isSel ? meta.color : C.dim, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", zIndex: 1, pointerEvents: "none" }}>{meta.label}</span>
-                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'start', effect.startTime, effect.endTime)} style={{ position: "absolute", left: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }} />
-                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'end', effect.startTime, effect.endTime)} style={{ position: "absolute", right: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }} />
+                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'start', effect.startTime, effect.endTime)} style={{ position: "absolute", left: -2, top: 0, bottom: 0, width: 12, cursor: "ew-resize", zIndex: 2 }} />
+                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'end', effect.startTime, effect.endTime)} style={{ position: "absolute", right: -2, top: 0, bottom: 0, width: 12, cursor: "ew-resize", zIndex: 2 }} />
                       </div>
                     );
                   })}
@@ -944,7 +952,7 @@ export function EditVideoScreen() {
                         'zoom-pan': { transitionIn: 1, transitionOut: 1, reverse: true, zoomPan: { ...DEFAULT_ZOOM_PAN } },
                         'spotlight': { transitionIn: 0.5, transitionOut: 0.5, reverse: true, spotlight: { x: 0.5, y: 0.5, radius: 0.15, dimOpacity: 0.7 } },
                         'blur': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, blur: { x: 0.3, y: 0.3, width: 0.4, height: 0.4, radius: 20 } },
-                        'text': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, text: { content: 'Text', x: 0.5, y: 0.5, fontSize: 48, color: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif', bold: true, italic: false, underline: false, background: '', align: 'center' as const } },
+                        'text': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, text: { content: 'Text', x: 0.5, y: 0.5, fontSize: 5, color: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif', bold: true, italic: false, underline: false, background: '', align: 'center' as const } },
                         'fade': { transitionIn: 1, transitionOut: 1, reverse: true, fade: { color: '#000000', opacity: 1 } },
                       };
                       const newEffect: Omit<TimelineEffect, 'id'> = {

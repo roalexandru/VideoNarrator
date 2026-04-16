@@ -439,9 +439,21 @@ export default function App() {
         useEditStore.setState({ clips: restored, selectedClipIndex: 0 });
       }
 
-      // Restore timeline effects if saved
+      // Restore timeline effects if saved — validate known types, warn on unknown
       if (cfg.timeline_effects && Array.isArray(cfg.timeline_effects) && cfg.timeline_effects.length > 0) {
-        useEditStore.setState({ effects: cfg.timeline_effects as import("./stores/editStore").TimelineEffect[] });
+        const KNOWN_TYPES = new Set(['zoom-pan', 'spotlight', 'blur', 'text', 'fade']);
+        const validated = (cfg.timeline_effects as import("./stores/editStore").TimelineEffect[]).filter((e) => {
+          if (!e.id || !e.type || typeof e.startTime !== 'number' || typeof e.endTime !== 'number') {
+            console.warn("Skipping malformed timeline effect:", e);
+            return false;
+          }
+          if (!KNOWN_TYPES.has(e.type)) {
+            console.warn(`Skipping unknown effect type "${e.type}":`, e);
+            return false;
+          }
+          return true;
+        });
+        useEditStore.setState({ effects: validated });
       }
 
       const ss = useScriptStore.getState();

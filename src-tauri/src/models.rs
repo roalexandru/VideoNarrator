@@ -194,6 +194,10 @@ pub struct NarrationStyle {
     pub pause_markers: bool,
 }
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 // ── Zoom/Pan ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,6 +246,8 @@ pub struct EditClip {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub title: String,
     pub description: String,

@@ -133,26 +133,11 @@ interface EditStore {
   getEffectsAtTime: (outputTime: number) => TimelineEffect[];
 }
 
-function deepCopyEffect(e: TimelineEffect): TimelineEffect {
-  return {
-    ...e,
-    zoomPan: e.zoomPan ? { ...e.zoomPan, startRegion: { ...e.zoomPan.startRegion }, endRegion: { ...e.zoomPan.endRegion } } : undefined,
-    spotlight: e.spotlight ? { ...e.spotlight } : undefined,
-    blur: e.blur ? { ...e.blur } : undefined,
-    text: e.text ? { ...e.text } : undefined,
-    fade: e.fade ? { ...e.fade } : undefined,
-  };
-}
-
-function deepCopyClip(c: EditClip): EditClip {
-  return { ...c, zoomPan: c.zoomPan ? { ...c.zoomPan, startRegion: { ...c.zoomPan.startRegion }, endRegion: { ...c.zoomPan.endRegion } } : c.zoomPan };
-}
-
 // Helper: push current state to undo stack before mutation
 function pushUndo(state: EditStore): Partial<EditStore> {
   const snapshot: ClipSnapshot = {
-    clips: state.clips.map(deepCopyClip),
-    effects: state.effects.map(deepCopyEffect),
+    clips: structuredClone(state.clips),
+    effects: structuredClone(state.effects),
     selectedClipIndex: state.selectedClipIndex,
     selectedEffectId: state.selectedEffectId,
   };
@@ -163,8 +148,8 @@ function pushUndo(state: EditStore): Partial<EditStore> {
 
 function snapshotState(state: EditStore): ClipSnapshot {
   return {
-    clips: state.clips.map(deepCopyClip),
-    effects: state.effects.map(deepCopyEffect),
+    clips: structuredClone(state.clips),
+    effects: structuredClone(state.effects),
     selectedClipIndex: state.selectedClipIndex,
     selectedEffectId: state.selectedEffectId,
   };
@@ -231,8 +216,8 @@ export const useEditStore = create<EditStore>((set, get) => ({
           const undo = pushUndo(state);
           const relativeTime = (outputTime - cumulative) * clip.speed;
           const sourceMiddle = clip.sourceStart + relativeTime;
-          const left: EditClip = { ...clip, id: crypto.randomUUID(), sourceEnd: sourceMiddle, zoomPan: null };
-          const right: EditClip = { ...clip, id: crypto.randomUUID(), sourceStart: sourceMiddle, zoomPan: null };
+          const left: EditClip = { ...clip, id: crypto.randomUUID(), sourceEnd: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
+          const right: EditClip = { ...clip, id: crypto.randomUUID(), sourceStart: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
           const clips = [...state.clips];
           clips.splice(i, 1, left, right);
           return { ...undo, clips, selectedClipIndex: i };
@@ -373,8 +358,8 @@ export const useEditStore = create<EditStore>((set, get) => ({
           if (clip.type !== 'freeze' && outputTime > cumulative && outputTime < cumulative + dur) {
             const relativeTime = (outputTime - cumulative) * clip.speed;
             const sourceMiddle = clip.sourceStart + relativeTime;
-            const left: EditClip = { ...clip, id: crypto.randomUUID(), sourceEnd: sourceMiddle, zoomPan: null };
-            const right: EditClip = { ...clip, id: crypto.randomUUID(), sourceStart: sourceMiddle, zoomPan: null };
+            const left: EditClip = { ...clip, id: crypto.randomUUID(), sourceEnd: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
+            const right: EditClip = { ...clip, id: crypto.randomUUID(), sourceStart: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
             clips.splice(i, 1, left, freezeClip, right);
             return { ...undo, clips, selectedClipIndex: i + 1 };
           }
@@ -455,6 +440,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
   addEffect: (effect) =>
     set((state) => {
+      if (effect.startTime >= effect.endTime) return state; // reject invalid
       const undo = pushUndo(state);
       const newEffect: TimelineEffect = { ...effect, id: crypto.randomUUID() };
       return { ...undo, effects: [...state.effects, newEffect], selectedEffectId: newEffect.id };
@@ -469,7 +455,15 @@ export const useEditStore = create<EditStore>((set, get) => ({
   updateEffect: (id, partial) =>
     set((state) => {
       const undo = pushUndo(state);
-      const effects = state.effects.map((e) => e.id === id ? { ...e, ...partial } : e);
+      const effects = state.effects.map((e) => {
+        if (e.id !== id) return e;
+        const merged = { ...e, ...partial };
+        // Validate: swap if startTime >= endTime
+        if (merged.startTime >= merged.endTime) {
+          merged.endTime = Math.max(merged.startTime + 0.5, e.endTime);
+        }
+        return merged;
+      });
       return { ...undo, effects };
     }),
 
@@ -490,7 +484,8 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
   selectEffect: (id) => set((state) => ({ selectedEffectId: id, selectedClipIndex: id ? null : state.selectedClipIndex })),
 
-  getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime <= e.endTime),
+  // Half-open interval [start, end) — avoids double-triggering at seams between adjacent effects
+  getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime < e.endTime),
 
   reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
 }));

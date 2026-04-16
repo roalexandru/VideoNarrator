@@ -9,6 +9,112 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+// ── Validation helpers (S1–S5) ──
+
+/// Validate a video path is within the user's home directory or temp (S1: path traversal).
+fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
+    let path = PathBuf::from(p);
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok();
+    let temp = std::env::temp_dir();
+
+    // Check existing paths via canonicalization
+    if let Ok(canonical) = std::fs::canonicalize(&path) {
+        if let Some(ref h) = home {
+            if canonical.starts_with(h) {
+                return Ok(canonical);
+            }
+        }
+        if canonical.starts_with(&temp) {
+            return Ok(canonical);
+        }
+    }
+    // Allow non-existent output paths if parent exists and is valid
+    if let Some(parent) = path.parent() {
+        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+            if let Some(ref h) = home {
+                if canonical_parent.starts_with(h) {
+                    return Ok(path);
+                }
+            }
+            if canonical_parent.starts_with(&temp) {
+                return Ok(path);
+            }
+        }
+    }
+    Err(NarratorError::ExportError(format!("Path not allowed: {p}")))
+}
+
+/// Validate clip parameters (S2: DoS, F4: bounds).
+fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), NarratorError> {
+    let err = |msg: &str| NarratorError::ExportError(format!("Clip {index}: {msg}"));
+    if clip.speed <= 0.0 || clip.speed > 100.0 {
+        return Err(err(&format!("speed {} out of range (0, 100]", clip.speed)));
+    }
+    if clip.start_seconds < -0.1 {
+        return Err(err("start_seconds is negative"));
+    }
+    if clip.end_seconds < clip.start_seconds {
+        return Err(err("end_seconds < start_seconds"));
+    }
+    if clip.end_seconds > duration + 1.0 {
+        return Err(err("end_seconds exceeds video duration"));
+    }
+    if let Some(fd) = clip.freeze_duration {
+        if fd <= 0.0 || fd > 600.0 {
+            return Err(err(&format!(
+                "freeze_duration {} out of range (0, 600]",
+                fd
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate zoom regions (S4: NaN/Infinity).
+fn validate_zoom(zp: &ZoomPanEffect) -> Result<(), NarratorError> {
+    let err = |field: &str| NarratorError::ExportError(format!("Zoom region has invalid {field}"));
+    for (label, r) in [("start", &zp.start_region), ("end", &zp.end_region)] {
+        if !r.x.is_finite() || !r.y.is_finite() || !r.width.is_finite() || !r.height.is_finite() {
+            return Err(err(&format!("{label} region values")));
+        }
+        if r.width <= 0.0 || r.height <= 0.0 {
+            return Err(err(&format!("{label} region size")));
+        }
+    }
+    Ok(())
+}
+
+/// Escape text for ffmpeg drawtext filter (S3: injection prevention).
+/// Will be used when text overlay rendering is implemented.
+#[allow(dead_code)]
+pub fn escape_ffmpeg_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "'\\''")
+        .replace(':', "\\:")
+        .replace('%', "%%")
+        .replace(['\n', '\r'], "")
+}
+
+/// Validate a hex color string (S3: injection prevention).
+/// Will be used when overlay effect rendering is implemented.
+#[allow(dead_code)]
+pub fn validate_hex_color(s: &str) -> Result<String, NarratorError> {
+    let trimmed = s.trim().trim_start_matches('#');
+    if (trimmed.len() == 6 || trimmed.len() == 8) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        Ok(format!("#{trimmed}"))
+    } else {
+        Err(NarratorError::ExportError(format!(
+            "Invalid hex color: {s}"
+        )))
+    }
+}
+
+const MAX_OUTPUT_FPS: f64 = 60.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoEditPlan {
     pub clips: Vec<EditClip>,
@@ -294,7 +400,7 @@ async fn process_freeze_clip(
         "-pix_fmt".into(),
         "yuv420p".into(),
         "-r".into(),
-        format!("{:.0}", fps.min(60.0)),
+        format!("{:.0}", fps.min(MAX_OUTPUT_FPS)),
         "-an".into(), // no audio for freeze frames
     ]);
     args.push(clip_path.to_string_lossy().to_string());
@@ -331,7 +437,9 @@ fn build_zoompan_filter(
     fps: f64,
     duration_seconds: f64,
 ) -> String {
-    let total_frames = (duration_seconds * fps.min(60.0)).round().max(1.0) as u32;
+    let total_frames = (duration_seconds * fps.min(MAX_OUTPUT_FPS))
+        .round()
+        .max(1.0) as u32;
 
     // Zoom: 1/region_width gives the zoom factor (region covering 50% width = 2x zoom)
     let z_start = 1.0 / effect.start_region.width.max(0.01);
@@ -365,7 +473,7 @@ fn build_zoompan_filter(
         d = total_frames,
         w = width,
         h = height,
-        fps = fps.min(60.0).round() as u32,
+        fps = fps.min(MAX_OUTPUT_FPS).round() as u32,
     )
 }
 
@@ -375,6 +483,10 @@ pub async fn apply_edits(
     plan: &VideoEditPlan,
     on_progress: impl Fn(f64),
 ) -> Result<String, NarratorError> {
+    // S1: Validate paths
+    validate_path(input_path)?;
+    validate_path(output_path)?;
+
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
     let total = plan.clips.len();
@@ -385,6 +497,14 @@ pub async fn apply_edits(
 
     // Probe video metadata (needed for freeze frame and zoom/pan)
     let meta = video_engine::probe_video(std::path::Path::new(input_path)).await?;
+
+    // S2/F4: Validate all clips
+    for (i, clip) in plan.clips.iter().enumerate() {
+        validate_clip(clip, meta.duration_seconds, i)?;
+        if let Some(ref zp) = clip.zoom_pan {
+            validate_zoom(zp)?;
+        }
+    }
 
     // If single clip with no modifications, check if it covers the full source
     let has_effects =

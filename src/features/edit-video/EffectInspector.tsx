@@ -107,7 +107,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
           {fonts.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
         {/* Size */}
-        <NumInput label="" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={8} max={200} width={36} />
+        <NumInput label="Size %" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={1} max={20} width={36} />
         {/* Bold / Italic / Underline */}
         <div style={{ display: "flex", gap: 1, background: "rgba(255,255,255,0.03)", borderRadius: 4, padding: 1 }}>
           {toggleBtn(!!t.bold, () => onUpdate({ text: { ...t, bold: !t.bold } }), "B", "Bold")}

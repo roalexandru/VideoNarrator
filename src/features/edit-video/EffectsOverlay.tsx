@@ -2,7 +2,7 @@
  * Renders visual overlays for active timeline effects on top of the video preview.
  * When an effect is selected, its region becomes interactive (draggable/resizable).
  */
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, memo } from "react";
 import type { TimelineEffect } from "../../stores/editStore";
 import { effectOpacity as calcEffectOpacity } from "./easing";
 
@@ -165,7 +165,8 @@ function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, itali
     document.addEventListener("mousemove", onMouseMove); document.addEventListener("mouseup", onMouseUp);
   }, [x, y, videoW, videoH, onMove, onCommit]);
 
-  const scaledFont = fontSize * (videoW / 1920);
+  // fontSize is stored as a percentage of video height (1-20%), default ~5%
+  const scaledFont = (fontSize / 100) * videoH;
 
   return (
     <div
@@ -201,7 +202,7 @@ function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, itali
 
 // ── Main Overlay ──
 
-export function EffectsOverlay({ effects, outputTime, videoWidth, videoHeight, selectedEffectId, onUpdateEffectLive, onCommitEffect }: EffectsOverlayProps) {
+export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime, videoWidth, videoHeight, selectedEffectId, onUpdateEffectLive, onCommitEffect }: EffectsOverlayProps) {
   const activeEffects = effects.filter(
     (e) => e.type !== 'zoom-pan' && outputTime >= e.startTime && outputTime <= e.endTime
   );
@@ -314,4 +315,4 @@ export function EffectsOverlay({ effects, outputTime, videoWidth, videoHeight, s
       })}
     </div>
   );
-}
+});

@@ -668,6 +668,7 @@ mod tests {
         std::fs::create_dir_all(project_dir.join("exports")).unwrap();
 
         let config = ProjectConfig {
+            schema_version: 1,
             id: project_id.clone(),
             title: "Test Project".to_string(),
             description: "A test".to_string(),
