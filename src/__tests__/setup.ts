@@ -248,6 +248,9 @@ export function setupDefaultMocks() {
       case "extract_edit_thumbnails":
         return ["/tmp/thumbs/t0.png", "/tmp/thumbs/t1.png"];
 
+      case "extract_single_frame":
+        return "/tmp/frame.jpg";
+
       case "apply_video_edits":
         return "/tmp/edited.mp4";
 
