@@ -12,6 +12,77 @@ use tokio::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoEditPlan {
     pub clips: Vec<EditClip>,
+    #[serde(default)]
+    pub effects: Option<Vec<OverlayEffect>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayEffect {
+    #[serde(rename = "type")]
+    pub effect_type: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    #[serde(default)]
+    pub transition_in: Option<f64>,
+    #[serde(default)]
+    pub transition_out: Option<f64>,
+    #[serde(default)]
+    pub reverse: Option<bool>,
+    #[serde(default)]
+    pub spotlight: Option<SpotlightData>,
+    #[serde(default)]
+    pub blur: Option<BlurData>,
+    #[serde(default)]
+    pub text: Option<TextData>,
+    #[serde(default)]
+    pub fade: Option<FadeData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpotlightData {
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub dim_opacity: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlurData {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub radius: f64,
+    #[serde(default)]
+    pub invert: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextData {
+    pub content: String,
+    pub x: f64,
+    pub y: f64,
+    pub font_size: f64,
+    pub color: String,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub bold: Option<bool>,
+    #[serde(default)]
+    pub italic: Option<bool>,
+    #[serde(default)]
+    pub background: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FadeData {
+    pub color: String,
+    pub opacity: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

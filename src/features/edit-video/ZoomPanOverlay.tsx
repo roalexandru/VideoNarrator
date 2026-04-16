@@ -182,18 +182,6 @@ export function ZoomPanOverlay({
   onEndChange,
   onCommit,
 }: ZoomPanOverlayProps) {
-  // Keyboard: Tab to switch active region, Escape handled by parent
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.code === "Tab") {
-        e.preventDefault();
-        onActiveRegionChange(activeRegion === 'start' ? 'end' : 'start');
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [activeRegion, onActiveRegionChange]);
-
   return (
     <div style={{
       position: "absolute",

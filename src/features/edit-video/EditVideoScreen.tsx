@@ -51,7 +51,6 @@ export function EditVideoScreen() {
   const [isEditingZoomPan, setIsEditingZoomPan] = useState(false);
   const [activeZoomRegion, setActiveZoomRegion] = useState<'start' | 'end'>('start');
   const [showAddEffectMenu, setShowAddEffectMenu] = useState(false);
-  const [draggingEffect, setDraggingEffect] = useState<{ id: string; edge: 'start' | 'end' | 'move'; startX: number; origStart: number; origEnd: number } | null>(null);
   const [videoContainerRect, setVideoContainerRect] = useState({ width: 0, height: 0, left: 0, top: 0 });
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
@@ -306,16 +305,27 @@ export function EditVideoScreen() {
       if (e.code === "Space") { e.preventDefault(); togglePlay(); }
       if (e.code === "KeyS") { e.preventDefault(); splitAt(outputTime); }
       if (e.code === "KeyF") { e.preventDefault(); insertFreezeFrame(outputTime); }
-      if (e.code === "Escape" && isEditingZoomPan) { e.preventDefault(); setIsEditingZoomPan(false); }
-      if (e.code === "Escape" && showAddEffectMenu) { e.preventDefault(); setShowAddEffectMenu(false); }
-      if ((e.code === "Delete" || e.code === "Backspace") && selectedClipIndex !== null && clips.length > 1) { e.preventDefault(); deleteClip(selectedClipIndex); }
+      if (e.code === "Escape") {
+        e.preventDefault();
+        if (showAddEffectMenu) setShowAddEffectMenu(false);
+        else if (isEditingZoomPan) setIsEditingZoomPan(false);
+        else if (selectedEffectId) selectEffect(null);
+        return;
+      }
+      if (e.code === "Delete" || e.code === "Backspace") {
+        e.preventDefault();
+        // Delete selected effect first, then clip
+        if (selectedEffectId) { removeEffect(selectedEffectId); }
+        else if (selectedClipIndex !== null && clips.length > 1) { deleteClip(selectedClipIndex); }
+        return;
+      }
       if (e.code === "ArrowLeft") { e.preventDefault(); seekToOutput(outputTime - 1); }
       if (e.code === "ArrowRight") { e.preventDefault(); seekToOutput(outputTime + 1); }
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) { e.preventDefault(); undo(); }
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
-  }, [isPlaying, selectedClipIndex, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo, insertFreezeFrame, isEditingZoomPan, showAddEffectMenu]);
+  }, [isPlaying, selectedClipIndex, selectedEffectId, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo, insertFreezeFrame, isEditingZoomPan, showAddEffectMenu, selectEffect, removeEffect]);
 
   const togglePlay = () => {
     const v = videoRef.current; if (!v) return;
@@ -386,6 +396,35 @@ export function EditVideoScreen() {
       }
     };
   }, []);
+
+  // Effect drag — uses document-level listeners to avoid losing drag on mouse-leave
+  const handleEffectDragStart = useCallback((e: React.MouseEvent, effectId: string, edge: 'start' | 'end' | 'move', origStart: number, origEnd: number) => {
+    e.preventDefault(); e.stopPropagation();
+    selectEffect(effectId);
+    const startX = e.clientX;
+    const pps = pxPerSec;
+    const onMove = (me: MouseEvent) => {
+      const timeDelta = (me.clientX - startX) / pps;
+      if (edge === 'move') {
+        const newStart = Math.max(0, origStart + timeDelta);
+        const dur = origEnd - origStart;
+        updateEffectLive(effectId, { startTime: newStart, endTime: Math.min(newStart + dur, outputDuration) });
+      } else if (edge === 'start') {
+        const newStart = Math.max(0, Math.min(origEnd - 0.5, origStart + timeDelta));
+        updateEffectLive(effectId, { startTime: newStart });
+      } else {
+        const newEnd = Math.min(outputDuration, Math.max(origStart + 0.5, origEnd + timeDelta));
+        updateEffectLive(effectId, { endTime: newEnd });
+      }
+    };
+    const onUp = () => {
+      commitEffectChange();
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [pxPerSec, outputDuration, selectEffect, updateEffectLive, commitEffectChange]);
 
   // Playhead drag — capture pxPerSec at drag start for consistency
   const handlePlayheadDown = (e: React.MouseEvent) => {
@@ -670,90 +709,63 @@ export function EditVideoScreen() {
               })()}
             </div>
 
-            {/* Effects track — draggable, resizable effect blocks */}
-            <div
-              style={{ position: "relative", height: 28, borderTop: `1px solid ${C.border}` }}
-              onMouseMove={(e) => {
-                if (!draggingEffect || !timelineRef.current) return;
-                const timeDelta = (e.clientX - draggingEffect.startX) / pxPerSec;
-                if (draggingEffect.edge === 'move') {
-                  const newStart = Math.max(0, draggingEffect.origStart + timeDelta);
-                  const dur = draggingEffect.origEnd - draggingEffect.origStart;
-                  updateEffectLive(draggingEffect.id, { startTime: newStart, endTime: Math.min(newStart + dur, outputDuration) });
-                } else if (draggingEffect.edge === 'start') {
-                  const newStart = Math.max(0, Math.min(draggingEffect.origEnd - 0.5, draggingEffect.origStart + timeDelta));
-                  updateEffectLive(draggingEffect.id, { startTime: newStart });
-                } else {
-                  const newEnd = Math.min(outputDuration, Math.max(draggingEffect.origStart + 0.5, draggingEffect.origEnd + timeDelta));
-                  updateEffectLive(draggingEffect.id, { endTime: newEnd });
-                }
-              }}
-              onMouseUp={() => { if (draggingEffect) { commitEffectChange(); setDraggingEffect(null); } }}
-              onMouseLeave={() => { if (draggingEffect) { commitEffectChange(); setDraggingEffect(null); } }}
-            >
-              {/* "FX" label */}
-              <div style={{ position: "absolute", top: 2, left: 4, fontSize: 8, color: C.muted, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", pointerEvents: "none", zIndex: 1 }}>FX</div>
-              {effects.map((effect) => {
-                const meta = EFFECT_META[effect.type];
-                const leftPx = effect.startTime * pxPerSec;
-                const widthPx = Math.max((effect.endTime - effect.startTime) * pxPerSec, 12);
-                const isSel = effect.id === selectedEffectId;
-                const transIn = effect.transitionIn ?? 0;
-                const transOut = effect.transitionOut ?? 0;
-                const totalDur = effect.endTime - effect.startTime;
-                const transInPct = totalDur > 0 ? (transIn / totalDur) * 100 : 0;
-                const transOutPct = totalDur > 0 ? (transOut / totalDur) * 100 : 0;
-                return (
-                  <div key={effect.id}
-                    onClick={(e) => { e.stopPropagation(); selectEffect(effect.id); }}
-                    style={{
-                      position: "absolute", top: 3, height: 22, left: leftPx, width: widthPx,
-                      borderRadius: 4, cursor: "grab", pointerEvents: "auto",
-                      background: isSel ? `${meta.color}40` : `${meta.color}20`,
-                      border: isSel ? `1.5px solid ${meta.color}` : `1px solid ${meta.color}50`,
-                      display: "flex", alignItems: "center", justifyContent: "center", gap: 3,
-                      overflow: "hidden", userSelect: "none",
-                    }}
-                    onMouseDown={(e) => {
-                      e.preventDefault(); e.stopPropagation();
-                      selectEffect(effect.id);
-                      setDraggingEffect({ id: effect.id, edge: 'move', startX: e.clientX, origStart: effect.startTime, origEnd: effect.endTime });
-                    }}
-                  >
-                    {/* Transition-in marker */}
-                    {transInPct > 0 && (
-                      <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${transInPct}%`, background: `${meta.color}30`, borderRight: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />
-                    )}
-                    {/* Transition-out marker */}
-                    {transOutPct > 0 && (
-                      <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: `${transOutPct}%`, background: `${meta.color}30`, borderLeft: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />
-                    )}
-                    {/* Label */}
-                    <span style={{ fontSize: 8, color: isSel ? meta.color : C.dim, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", zIndex: 1, pointerEvents: "none" }}>
-                      {meta.label}
-                    </span>
-                    {/* Left resize handle */}
-                    <div
-                      onMouseDown={(e) => {
-                        e.preventDefault(); e.stopPropagation();
-                        selectEffect(effect.id);
-                        setDraggingEffect({ id: effect.id, edge: 'start', startX: e.clientX, origStart: effect.startTime, origEnd: effect.endTime });
-                      }}
-                      style={{ position: "absolute", left: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }}
-                    />
-                    {/* Right resize handle */}
-                    <div
-                      onMouseDown={(e) => {
-                        e.preventDefault(); e.stopPropagation();
-                        selectEffect(effect.id);
-                        setDraggingEffect({ id: effect.id, edge: 'end', startX: e.clientX, origStart: effect.startTime, origEnd: effect.endTime });
-                      }}
-                      style={{ position: "absolute", right: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
+            {/* Effects track — stacked lanes for overlapping effects */}
+            {(() => {
+              // Compute lanes: assign each effect to the lowest lane that doesn't overlap
+              const LANE_H = 24;
+              const LANE_GAP = 2;
+              const lanes: { endTime: number }[] = [];
+              const effectLanes: Map<string, number> = new Map();
+              const sorted = [...effects].sort((a, b) => a.startTime - b.startTime);
+              for (const effect of sorted) {
+                let lane = 0;
+                while (lane < lanes.length && lanes[lane].endTime > effect.startTime) lane++;
+                if (lane >= lanes.length) lanes.push({ endTime: effect.endTime });
+                else lanes[lane].endTime = Math.max(lanes[lane].endTime, effect.endTime);
+                effectLanes.set(effect.id, lane);
+              }
+              const numLanes = Math.max(1, lanes.length);
+              const trackH = numLanes * (LANE_H + LANE_GAP) + 4;
+
+              return (
+                <div style={{ position: "relative", height: trackH, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ position: "absolute", top: 2, left: 4, fontSize: 8, color: C.muted, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", pointerEvents: "none", zIndex: 1 }}>FX</div>
+                  {effects.map((effect) => {
+                    const meta = EFFECT_META[effect.type];
+                    const leftPx = effect.startTime * pxPerSec;
+                    const widthPx = Math.max((effect.endTime - effect.startTime) * pxPerSec, 12);
+                    const lane = effectLanes.get(effect.id) ?? 0;
+                    const topPx = 2 + lane * (LANE_H + LANE_GAP);
+                    const isSel = effect.id === selectedEffectId;
+                    const transIn = effect.transitionIn ?? 0;
+                    const transOut = effect.transitionOut ?? 0;
+                    const totalDur = effect.endTime - effect.startTime;
+                    const transInPct = totalDur > 0 ? (transIn / totalDur) * 100 : 0;
+                    const transOutPct = totalDur > 0 ? ((effect.reverse ? transOut : 0) / totalDur) * 100 : 0;
+                    return (
+                      <div key={effect.id}
+                        onClick={(e) => { e.stopPropagation(); selectEffect(effect.id); }}
+                        style={{
+                          position: "absolute", top: topPx, height: LANE_H, left: leftPx, width: widthPx,
+                          borderRadius: 4, cursor: "grab", pointerEvents: "auto",
+                          background: isSel ? `${meta.color}40` : `${meta.color}20`,
+                          border: isSel ? `1.5px solid ${meta.color}` : `1px solid ${meta.color}50`,
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 3,
+                          overflow: "hidden", userSelect: "none",
+                        }}
+                        onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'move', effect.startTime, effect.endTime)}
+                      >
+                        {transInPct > 0 && <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${transInPct}%`, background: `${meta.color}30`, borderRight: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />}
+                        {transOutPct > 0 && <div style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: `${transOutPct}%`, background: `${meta.color}30`, borderLeft: `1px dashed ${meta.color}60`, pointerEvents: "none" }} />}
+                        <span style={{ fontSize: 8, color: isSel ? meta.color : C.dim, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", zIndex: 1, pointerEvents: "none" }}>{meta.label}</span>
+                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'start', effect.startTime, effect.endTime)} style={{ position: "absolute", left: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }} />
+                        <div onMouseDown={(e) => handleEffectDragStart(e, effect.id, 'end', effect.startTime, effect.endTime)} style={{ position: "absolute", right: -1, top: 0, bottom: 0, width: 6, cursor: "ew-resize", zIndex: 2 }} />
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {/* Playhead */}
             <div onMouseDown={handlePlayheadDown} style={{
@@ -782,7 +794,7 @@ export function EditVideoScreen() {
                   <div style={{ width: 1, height: 20, background: C.border }} />
                   <span style={{ fontSize: 11, color: C.muted }}>Duration</span>
                   <input type="number" min="0.1" max="30" step="0.1" value={selClip.freezeDuration ?? 3}
-                    onChange={(e) => { const v = parseFloat(e.target.value); if (v >= 0.1 && v <= 30) setFreezeDuration(selectedClipIndex!, v); }}
+                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setFreezeDuration(selectedClipIndex!, Math.max(0.1, Math.min(30, v))); }}
                     style={{ width: 48, padding: "2px 4px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: "#38bdf8", fontSize: 11, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
                   <span style={{ fontSize: 11, color: C.muted }}>s</span>
                 </>
@@ -810,7 +822,7 @@ export function EditVideoScreen() {
                     onTouchEnd={() => commitSpeedChange()}
                     style={{ width: 80, accentColor: "#6366f1" }} />
                   <input type="number" min="0.25" max="30" step="0.25" value={selClip.speed}
-                    onChange={(e) => { const v = parseFloat(e.target.value); if (v >= 0.25 && v <= 30) setClipSpeed(selectedClipIndex!, v); }}
+                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setClipSpeed(selectedClipIndex!, Math.max(0.25, Math.min(30, v))); }}
                     style={{ width: 38, padding: "2px 4px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: selClip.speed !== 1 ? "#a855f7" : C.dim, fontSize: 11, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
                   <span style={{ fontSize: 11, color: C.muted }}>x</span>
                   {selClip.speed > 1 && (
@@ -864,7 +876,7 @@ export function EditVideoScreen() {
               {/* Transition timing: In → Hold → Out */}
               <span style={{ fontSize: 9, color: C.muted }}>{labels.inLabel}</span>
               <input type="number" min="0" max={eDur} step="0.1" value={eTransIn}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (v >= 0) updateEffect(selectedEffect.id, { transitionIn: Math.min(v, eDur - (eReverse ? eTransOut : 0)) }); }}
+                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) updateEffect(selectedEffect.id, { transitionIn: Math.max(0, Math.min(v, eDur - (eReverse ? eTransOut : 0))) }); }}
                 style={numStyle} />
               <span style={{ fontSize: 9, color: C.muted }}>s</span>
               <span style={{ fontSize: 9, color: C.dim, fontWeight: 600 }}>{labels.holdLabel}: {eHold.toFixed(1)}s</span>
@@ -877,7 +889,7 @@ export function EditVideoScreen() {
               </label>
               <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>{labels.outLabel}</span>
               <input type="number" min="0" max={eDur - eTransIn} step="0.1" value={eTransOut}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (v >= 0) updateEffect(selectedEffect.id, { transitionOut: Math.min(v, eDur - eTransIn) }); }}
+                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) updateEffect(selectedEffect.id, { transitionOut: Math.max(0, Math.min(v, eDur - eTransIn)) }); }}
                 style={{ ...numStyle, visibility: eReverse ? "visible" : "hidden" }} />
               <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>s</span>
               <div style={{ width: 1, height: 20, background: C.border }} />

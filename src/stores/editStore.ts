@@ -133,7 +133,14 @@ interface EditStore {
 }
 
 function deepCopyEffect(e: TimelineEffect): TimelineEffect {
-  return { ...e, zoomPan: e.zoomPan ? { ...e.zoomPan, startRegion: { ...e.zoomPan.startRegion }, endRegion: { ...e.zoomPan.endRegion } } : undefined };
+  return {
+    ...e,
+    zoomPan: e.zoomPan ? { ...e.zoomPan, startRegion: { ...e.zoomPan.startRegion }, endRegion: { ...e.zoomPan.endRegion } } : undefined,
+    spotlight: e.spotlight ? { ...e.spotlight } : undefined,
+    blur: e.blur ? { ...e.blur } : undefined,
+    text: e.text ? { ...e.text } : undefined,
+    fade: e.fade ? { ...e.fade } : undefined,
+  };
 }
 
 function deepCopyClip(c: EditClip): EditClip {
@@ -305,7 +312,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
       };
     }),
 
-  selectClip: (index) => set({ selectedClipIndex: index }),
+  selectClip: (index) => set({ selectedClipIndex: index, selectedEffectId: null }),
   setEditedVideoPath: (path) => set({ editedVideoPath: path }),
 
   getOutputDuration: () => get().clips.reduce((sum, c) => sum + clipOutputDuration(c), 0),
@@ -479,7 +486,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
       return { undoStack: stack, redoStack: [], _preZoomPanSnapshot: null };
     }),
 
-  selectEffect: (id) => set({ selectedEffectId: id, selectedClipIndex: id ? null : undefined }),
+  selectEffect: (id) => set((state) => ({ selectedEffectId: id, selectedClipIndex: id ? null : state.selectedClipIndex })),
 
   getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime <= e.endTime),
 

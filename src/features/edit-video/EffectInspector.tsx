@@ -3,19 +3,30 @@
  * Spatial controls (position, size) are handled by draggable overlays on the video.
  * This inspector handles non-spatial properties: text content, colors, opacity, blur radius, etc.
  */
+import { useState } from "react";
 import type { TimelineEffect } from "../../stores/editStore";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)" };
 
-function NumInput({ label, value, onChange, min = 0, max = 100, step = 1, width = 40, color = C.dim }: {
+function NumInput({ label, value, onChange, min = 0, max = 100, width = 40, color = C.dim }: {
   label: string; value: number; onChange: (v: number) => void;
-  min?: number; max?: number; step?: number; width?: number; color?: string;
+  min?: number; max?: number; width?: number; color?: string;
 }) {
+  const [editing, setEditing] = useState<string | null>(null);
   return (
     <>
-      <span style={{ fontSize: 10, color: C.muted }}>{label}</span>
-      <input type="number" min={min} max={max} step={step} value={value}
-        onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v >= min && v <= max) onChange(v); }}
+      {label && <span style={{ fontSize: 10, color: C.muted }}>{label}</span>}
+      <input type="text" inputMode="numeric"
+        value={editing !== null ? editing : value}
+        onChange={(e) => {
+          const raw = e.target.value;
+          setEditing(raw);
+          const v = parseFloat(raw);
+          if (!isNaN(v)) onChange(Math.max(min, Math.min(max, v)));
+        }}
+        onFocus={(e) => setEditing(e.target.value)}
+        onBlur={() => { setEditing(null); }}
+        onKeyDown={(e) => { if (e.key === "Enter") { setEditing(null); (e.target as HTMLInputElement).blur(); } }}
         style={{ width, padding: "2px 3px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color, fontSize: 10, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
     </>
   );
@@ -31,7 +42,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
     const s = effect.spotlight;
     return (
       <>
-        <NumInput label="Dim" value={Math.round(s.dimOpacity * 100)} onChange={(v) => onUpdate({ spotlight: { ...s, dimOpacity: v / 100 } })} max={100} step={5} />
+        <NumInput label="Dim" value={Math.round(s.dimOpacity * 100)} onChange={(v) => onUpdate({ spotlight: { ...s, dimOpacity: v / 100 } })} max={100} />
         <span style={{ fontSize: 10, color: C.muted }}>%</span>
       </>
     );
@@ -41,7 +52,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
     const b = effect.blur;
     return (
       <>
-        <NumInput label="Blur" value={b.radius} onChange={(v) => onUpdate({ blur: { ...b, radius: v } })} min={1} max={50} step={1} width={36} />
+        <NumInput label="Blur" value={b.radius} onChange={(v) => onUpdate({ blur: { ...b, radius: v } })} min={1} max={50} width={36} />
         <span style={{ fontSize: 10, color: C.muted }}>px</span>
         <div style={{ width: 1, height: 20, background: C.border }} />
         <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
@@ -107,7 +118,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
           {fonts.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
         {/* Size */}
-        <NumInput label="" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={8} max={200} step={2} width={36} />
+        <NumInput label="" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={8} max={200} width={36} />
         {/* Bold / Italic / Underline */}
         <div style={{ display: "flex", gap: 1, background: "rgba(255,255,255,0.03)", borderRadius: 4, padding: 1 }}>
           {toggleBtn(!!t.bold, () => onUpdate({ text: { ...t, bold: !t.bold } }), "B", "Bold")}
@@ -164,7 +175,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
           onChange={(e) => onUpdate({ fade: { ...f, color: e.target.value } })}
           style={{ width: 24, height: 24, padding: 0, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", background: "transparent" }}
         />
-        <NumInput label="Opacity" value={Math.round(f.opacity * 100)} onChange={(v) => onUpdate({ fade: { ...f, opacity: v / 100 } })} max={100} step={5} />
+        <NumInput label="Opacity" value={Math.round(f.opacity * 100)} onChange={(v) => onUpdate({ fade: { ...f, opacity: v / 100 } })} max={100} />
         <span style={{ fontSize: 10, color: C.muted }}>%</span>
         <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>Use In/Out transitions for smooth fades.</span>
       </>

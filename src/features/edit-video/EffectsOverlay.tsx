@@ -144,9 +144,9 @@ function DraggableCircle({ cx, cy, radius, color, videoW, videoH, isSelected, on
 
 // ── Draggable Text ──
 
-function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, italic, underline, background, align, videoW, videoH, isSelected, onMove, onCommit }: {
+function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, italic, underline, background, align, opacity, videoW, videoH, isSelected, onMove, onCommit }: {
   x: number; y: number; content: string; fontSize: number; color: string;
-  fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string;
+  fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string; opacity?: number;
   videoW: number; videoH: number; isSelected: boolean;
   onMove: (x: number, y: number) => void; onCommit: () => void;
 }) {
@@ -187,6 +187,7 @@ function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, itali
         lineHeight: 1.3,
         cursor: isSelected ? "move" : "default",
         pointerEvents: isSelected ? "auto" : "none",
+        opacity: opacity ?? 1,
         userSelect: "none", zIndex: isSelected ? 6 : 3,
         outline: isSelected ? "2px dashed rgba(16,185,129,0.5)" : "none",
         outlineOffset: 6, borderRadius: 4,
@@ -290,7 +291,7 @@ export function EffectsOverlay({ effects, outputTime, videoWidth, videoHeight, s
             <DraggableText key={effect.id}
               x={t.x} y={t.y} content={t.content} fontSize={t.fontSize} color={t.color}
               fontFamily={t.fontFamily} bold={t.bold} italic={t.italic} underline={t.underline}
-              background={t.background} align={t.align}
+              background={t.background} align={t.align} opacity={opacity}
               videoW={videoWidth} videoH={videoHeight} isSelected={isSel}
               onMove={(nx, ny) => onUpdateEffectLive(effect.id, { text: { ...t, x: nx, y: ny } })}
               onCommit={onCommitEffect}
