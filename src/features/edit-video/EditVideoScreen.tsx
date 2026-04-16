@@ -11,6 +11,7 @@ import { computeZoomTransform, computeZoomAtTime } from "./easing";
 import { ZoomPanOverlay } from "./ZoomPanOverlay";
 import { EffectsOverlay } from "./EffectsOverlay";
 import { EffectInspector } from "./EffectInspector";
+import { NumericInput } from "./NumericInput";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -793,9 +794,8 @@ export function EditVideoScreen() {
                   </span>
                   <div style={{ width: 1, height: 20, background: C.border }} />
                   <span style={{ fontSize: 11, color: C.muted }}>Duration</span>
-                  <input type="number" min="0.1" max="30" step="0.1" value={selClip.freezeDuration ?? 3}
-                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setFreezeDuration(selectedClipIndex!, Math.max(0.1, Math.min(30, v))); }}
-                    style={{ width: 48, padding: "2px 4px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: "#38bdf8", fontSize: 11, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+                  <NumericInput value={selClip.freezeDuration ?? 3} min={0.1} max={30} width={48} color="#38bdf8"
+                    onChange={(v) => setFreezeDuration(selectedClipIndex!, v)} />
                   <span style={{ fontSize: 11, color: C.muted }}>s</span>
                 </>
               ) : (
@@ -821,9 +821,8 @@ export function EditVideoScreen() {
                     onMouseUp={() => commitSpeedChange()}
                     onTouchEnd={() => commitSpeedChange()}
                     style={{ width: 80, accentColor: "#6366f1" }} />
-                  <input type="number" min="0.25" max="30" step="0.25" value={selClip.speed}
-                    onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setClipSpeed(selectedClipIndex!, Math.max(0.25, Math.min(30, v))); }}
-                    style={{ width: 38, padding: "2px 4px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: selClip.speed !== 1 ? "#a855f7" : C.dim, fontSize: 11, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+                  <NumericInput value={selClip.speed} min={0.25} max={30} width={38} color={selClip.speed !== 1 ? "#a855f7" : C.dim}
+                    onChange={(v) => setClipSpeed(selectedClipIndex!, v)} />
                   <span style={{ fontSize: 11, color: C.muted }}>x</span>
                   {selClip.speed > 1 && (
                     <>
@@ -858,7 +857,7 @@ export function EditVideoScreen() {
             const eTransOut = selectedEffect.transitionOut ?? 0;
             const eReverse = selectedEffect.reverse ?? false;
             const eHold = Math.max(0, eDur - eTransIn - (eReverse ? eTransOut : 0));
-            const numStyle: React.CSSProperties = { width: 38, padding: "2px 3px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color: eMeta.color, fontSize: 10, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" };
+
             const labelNames: Record<string, { inLabel: string; outLabel: string; holdLabel: string }> = {
               'zoom-pan': { inLabel: 'Zoom In', outLabel: 'Zoom Out', holdLabel: 'Hold' },
               'spotlight': { inLabel: 'Fade In', outLabel: 'Fade Out', holdLabel: 'Hold' },
@@ -875,9 +874,8 @@ export function EditVideoScreen() {
               <div style={{ width: 1, height: 20, background: C.border }} />
               {/* Transition timing: In → Hold → Out */}
               <span style={{ fontSize: 9, color: C.muted }}>{labels.inLabel}</span>
-              <input type="number" min="0" max={eDur} step="0.1" value={eTransIn}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) updateEffect(selectedEffect.id, { transitionIn: Math.max(0, Math.min(v, eDur - (eReverse ? eTransOut : 0))) }); }}
-                style={numStyle} />
+              <NumericInput value={eTransIn} min={0} max={eDur} width={38} color={eMeta.color}
+                onChange={(v) => updateEffect(selectedEffect.id, { transitionIn: Math.min(v, eDur - (eReverse ? eTransOut : 0)) })} />
               <span style={{ fontSize: 9, color: C.muted }}>s</span>
               <span style={{ fontSize: 9, color: C.dim, fontWeight: 600 }}>{labels.holdLabel}: {eHold.toFixed(1)}s</span>
               {/* Return / Reverse toggle + out duration — always rendered to prevent layout shift */}
@@ -888,9 +886,9 @@ export function EditVideoScreen() {
                 Return
               </label>
               <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>{labels.outLabel}</span>
-              <input type="number" min="0" max={eDur - eTransIn} step="0.1" value={eTransOut}
-                onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) updateEffect(selectedEffect.id, { transitionOut: Math.max(0, Math.min(v, eDur - eTransIn)) }); }}
-                style={{ ...numStyle, visibility: eReverse ? "visible" : "hidden" }} />
+              <NumericInput value={eTransOut} min={0} max={eDur - eTransIn} width={38} color={eMeta.color}
+                onChange={(v) => updateEffect(selectedEffect.id, { transitionOut: v })}
+                style={{ visibility: eReverse ? "visible" : "hidden" }} />
               <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>s</span>
               <div style={{ width: 1, height: 20, background: C.border }} />
               {/* Zoom-specific: Easing */}

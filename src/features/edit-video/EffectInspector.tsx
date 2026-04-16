@@ -3,8 +3,8 @@
  * Spatial controls (position, size) are handled by draggable overlays on the video.
  * This inspector handles non-spatial properties: text content, colors, opacity, blur radius, etc.
  */
-import { useState } from "react";
 import type { TimelineEffect } from "../../stores/editStore";
+import { NumericInput } from "./NumericInput";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)" };
 
@@ -12,22 +12,11 @@ function NumInput({ label, value, onChange, min = 0, max = 100, width = 40, colo
   label: string; value: number; onChange: (v: number) => void;
   min?: number; max?: number; width?: number; color?: string;
 }) {
-  const [editing, setEditing] = useState<string | null>(null);
   return (
     <>
       {label && <span style={{ fontSize: 10, color: C.muted }}>{label}</span>}
-      <input type="text" inputMode="numeric"
-        value={editing !== null ? editing : value}
-        onChange={(e) => {
-          const raw = e.target.value;
-          setEditing(raw);
-          const v = parseFloat(raw);
-          if (!isNaN(v)) onChange(Math.max(min, Math.min(max, v)));
-        }}
-        onFocus={(e) => setEditing(e.target.value)}
-        onBlur={() => { setEditing(null); }}
-        onKeyDown={(e) => { if (e.key === "Enter") { setEditing(null); (e.target as HTMLInputElement).blur(); } }}
-        style={{ width, padding: "2px 3px", borderRadius: 4, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.04)", color, fontSize: 10, fontWeight: 600, textAlign: "center", outline: "none", fontFamily: "inherit" }} />
+      <NumericInput value={value} onChange={onChange} min={min} max={max} width={width} color={color}
+        style={{ fontSize: 10, padding: "2px 3px" }} />
     </>
   );
 }
