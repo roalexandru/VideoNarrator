@@ -929,6 +929,8 @@ export function EditVideoScreen() {
               + Effect
             </Button>
             {showAddEffectMenu && (
+              <>
+              <div onClick={() => setShowAddEffectMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 29 }} />
               <div style={{
                 position: "absolute", bottom: 36, right: 0, zIndex: 30,
                 background: "#1a1a24", border: `1px solid ${C.border}`, borderRadius: 6,
@@ -969,6 +971,7 @@ export function EditVideoScreen() {
                   </div>
                 ))}
               </div>
+              </>
             )}
           </div>
         </div>

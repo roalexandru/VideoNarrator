@@ -90,6 +90,7 @@ interface EditStore {
   redoStack: ClipSnapshot[];
   _preSpeedSnapshot: ClipSnapshot | null;
   _preZoomPanSnapshot: ClipSnapshot | null;
+  _preEffectSnapshot: ClipSnapshot | null;
   canUndo: () => boolean;
   canRedo: () => boolean;
   undo: () => void;
@@ -180,6 +181,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
   redoStack: [],
   _preSpeedSnapshot: null,
   _preZoomPanSnapshot: null,
+  _preEffectSnapshot: null,
 
   canUndo: () => get().undoStack.length > 0,
   canRedo: () => get().redoStack.length > 0,
@@ -473,22 +475,22 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
   updateEffectLive: (id, partial) =>
     set((state) => {
-      const snapshot = state._preZoomPanSnapshot || snapshotState(state);
+      const snapshot = state._preEffectSnapshot || snapshotState(state);
       const effects = state.effects.map((e) => e.id === id ? { ...e, ...partial } : e);
-      return { effects, _preZoomPanSnapshot: snapshot };
+      return { effects, _preEffectSnapshot: snapshot };
     }),
 
   commitEffectChange: () =>
     set((state) => {
-      if (!state._preZoomPanSnapshot) return state;
-      const stack = [...state.undoStack, state._preZoomPanSnapshot];
+      if (!state._preEffectSnapshot) return state;
+      const stack = [...state.undoStack, state._preEffectSnapshot];
       if (stack.length > MAX_UNDO) stack.shift();
-      return { undoStack: stack, redoStack: [], _preZoomPanSnapshot: null };
+      return { undoStack: stack, redoStack: [], _preEffectSnapshot: null };
     }),
 
   selectEffect: (id) => set((state) => ({ selectedEffectId: id, selectedClipIndex: id ? null : state.selectedClipIndex })),
 
   getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime <= e.endTime),
 
-  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null }),
+  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
 }));
