@@ -139,6 +139,7 @@ pub fn run() {
             commands::get_recordings_directory,
             commands::apply_video_edits,
             commands::extract_edit_thumbnails,
+            commands::extract_single_frame,
             commands::merge_audio_video,
             commands::open_folder,
             commands::list_project_frames,

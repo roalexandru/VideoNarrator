@@ -1,6 +1,7 @@
-//! Video editing operations: trim, speed, frame dropping, and concatenation.
+//! Video editing operations: trim, speed, frame dropping, zoom/pan, freeze frame, and concatenation.
 
 use crate::error::NarratorError;
+use crate::models::{EasingPreset, ZoomPanEffect};
 use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
@@ -8,9 +9,186 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+// ── Validation helpers (S1–S5) ──
+
+/// Validate a video path is within the user's home directory or temp (S1: path traversal).
+fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
+    let path = PathBuf::from(p);
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map(PathBuf::from)
+        .ok();
+    let temp = std::env::temp_dir();
+
+    // Check existing paths via canonicalization
+    if let Ok(canonical) = std::fs::canonicalize(&path) {
+        if let Some(ref h) = home {
+            if canonical.starts_with(h) {
+                return Ok(canonical);
+            }
+        }
+        if canonical.starts_with(&temp) {
+            return Ok(canonical);
+        }
+    }
+    // Allow non-existent output paths if parent exists and is valid
+    if let Some(parent) = path.parent() {
+        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
+            if let Some(ref h) = home {
+                if canonical_parent.starts_with(h) {
+                    return Ok(path);
+                }
+            }
+            if canonical_parent.starts_with(&temp) {
+                return Ok(path);
+            }
+        }
+    }
+    Err(NarratorError::ExportError(format!("Path not allowed: {p}")))
+}
+
+/// Validate clip parameters (S2: DoS, F4: bounds).
+fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), NarratorError> {
+    let err = |msg: &str| NarratorError::ExportError(format!("Clip {index}: {msg}"));
+    if clip.speed <= 0.0 || clip.speed > 100.0 {
+        return Err(err(&format!("speed {} out of range (0, 100]", clip.speed)));
+    }
+    if clip.start_seconds < -0.1 {
+        return Err(err("start_seconds is negative"));
+    }
+    if clip.end_seconds < clip.start_seconds {
+        return Err(err("end_seconds < start_seconds"));
+    }
+    if clip.end_seconds > duration + 1.0 {
+        return Err(err("end_seconds exceeds video duration"));
+    }
+    if let Some(fd) = clip.freeze_duration {
+        if fd <= 0.0 || fd > 600.0 {
+            return Err(err(&format!(
+                "freeze_duration {} out of range (0, 600]",
+                fd
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate zoom regions (S4: NaN/Infinity).
+fn validate_zoom(zp: &ZoomPanEffect) -> Result<(), NarratorError> {
+    let err = |field: &str| NarratorError::ExportError(format!("Zoom region has invalid {field}"));
+    for (label, r) in [("start", &zp.start_region), ("end", &zp.end_region)] {
+        if !r.x.is_finite() || !r.y.is_finite() || !r.width.is_finite() || !r.height.is_finite() {
+            return Err(err(&format!("{label} region values")));
+        }
+        if r.width <= 0.0 || r.height <= 0.0 {
+            return Err(err(&format!("{label} region size")));
+        }
+    }
+    Ok(())
+}
+
+/// Escape text for ffmpeg drawtext filter (S3: injection prevention).
+/// Will be used when text overlay rendering is implemented.
+#[allow(dead_code)]
+pub fn escape_ffmpeg_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\'', "'\\''")
+        .replace(':', "\\:")
+        .replace('%', "%%")
+        .replace(['\n', '\r'], "")
+}
+
+/// Validate a hex color string (S3: injection prevention).
+/// Will be used when overlay effect rendering is implemented.
+#[allow(dead_code)]
+pub fn validate_hex_color(s: &str) -> Result<String, NarratorError> {
+    let trimmed = s.trim().trim_start_matches('#');
+    if (trimmed.len() == 6 || trimmed.len() == 8) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        Ok(format!("#{trimmed}"))
+    } else {
+        Err(NarratorError::ExportError(format!(
+            "Invalid hex color: {s}"
+        )))
+    }
+}
+
+const MAX_OUTPUT_FPS: f64 = 60.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoEditPlan {
     pub clips: Vec<EditClip>,
+    #[serde(default)]
+    pub effects: Option<Vec<OverlayEffect>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayEffect {
+    #[serde(rename = "type")]
+    pub effect_type: String,
+    pub start_time: f64,
+    pub end_time: f64,
+    #[serde(default)]
+    pub transition_in: Option<f64>,
+    #[serde(default)]
+    pub transition_out: Option<f64>,
+    #[serde(default)]
+    pub reverse: Option<bool>,
+    #[serde(default)]
+    pub spotlight: Option<SpotlightData>,
+    #[serde(default)]
+    pub blur: Option<BlurData>,
+    #[serde(default)]
+    pub text: Option<TextData>,
+    #[serde(default)]
+    pub fade: Option<FadeData>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpotlightData {
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub dim_opacity: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlurData {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub radius: f64,
+    #[serde(default)]
+    pub invert: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextData {
+    pub content: String,
+    pub x: f64,
+    pub y: f64,
+    pub font_size: f64,
+    pub color: String,
+    #[serde(default)]
+    pub font_family: Option<String>,
+    #[serde(default)]
+    pub bold: Option<bool>,
+    #[serde(default)]
+    pub italic: Option<bool>,
+    #[serde(default)]
+    pub background: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FadeData {
+    pub color: String,
+    pub opacity: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +199,14 @@ pub struct EditClip {
     #[serde(default)]
     pub skip_frames: bool,
     pub fps_override: Option<f64>,
+    #[serde(default)]
+    pub clip_type: Option<String>,
+    #[serde(default)]
+    pub freeze_source_time: Option<f64>,
+    #[serde(default)]
+    pub freeze_duration: Option<f64>,
+    #[serde(default)]
+    pub zoom_pan: Option<ZoomPanEffect>,
 }
 
 /// Run an ffmpeg command with real-time progress reporting.
@@ -105,12 +291,202 @@ fn parse_ffmpeg_time(time_str: &str) -> f64 {
     }
 }
 
+/// Extract a single frame from a video at a given timestamp.
+pub async fn extract_single_frame(
+    video_path: &str,
+    timestamp: f64,
+    output_path: &str,
+) -> Result<String, NarratorError> {
+    let ffmpeg = video_engine::detect_ffmpeg()?;
+
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args([
+            "-y",
+            "-ss",
+            &format!("{:.3}", timestamp),
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            output_path,
+        ])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Frame extraction failed: {}",
+            &stderr[..stderr.len().min(300)]
+        )));
+    }
+
+    Ok(output_path.to_string())
+}
+
+/// Process a freeze frame clip: extract a single frame, then create a video of it held for the specified duration.
+async fn process_freeze_clip(
+    ffmpeg: &Path,
+    input_path: &str,
+    clip: &EditClip,
+    clip_index: usize,
+    out_dir: &Path,
+    meta: &crate::models::VideoMetadata,
+) -> Result<PathBuf, NarratorError> {
+    let width = meta.width;
+    let height = meta.height;
+    let fps = meta.fps;
+    let timestamp = clip.freeze_source_time.unwrap_or(clip.start_seconds);
+    let duration = clip.freeze_duration.unwrap_or(3.0);
+    let frame_path = out_dir.join(format!("_freeze_frame_{:03}.jpg", clip_index));
+    let clip_path = out_dir.join(format!("_edit_clip_{:03}.mp4", clip_index));
+
+    // Step 1: Extract the single frame
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args([
+            "-y",
+            "-ss",
+            &format!("{:.3}", timestamp),
+            "-i",
+            input_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+        ])
+        .arg(frame_path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Freeze frame extraction failed: {}",
+            &stderr[..stderr.len().min(300)]
+        )));
+    }
+
+    // Step 2: Create a video from the still frame
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-loop".into(),
+        "1".into(),
+        "-i".into(),
+        frame_path.to_string_lossy().to_string(),
+        "-t".into(),
+        format!("{:.3}", duration),
+    ];
+
+    // If zoom/pan is specified, apply zoompan filter to the still image
+    if let Some(ref zp) = clip.zoom_pan {
+        let zp_filter = build_zoompan_filter(zp, width, height, fps, duration);
+        args.extend([
+            "-vf".into(),
+            format!("{},scale={}:{}", zp_filter, width, height),
+        ]);
+    } else {
+        args.extend(["-vf".into(), format!("scale={}:{}", width, height)]);
+    }
+
+    args.extend([
+        "-c:v".into(),
+        "libx264".into(),
+        "-pix_fmt".into(),
+        "yuv420p".into(),
+        "-r".into(),
+        format!("{:.0}", fps.min(MAX_OUTPUT_FPS)),
+        "-an".into(), // no audio for freeze frames
+    ]);
+    args.push(clip_path.to_string_lossy().to_string());
+
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Freeze clip creation failed: {}",
+            &stderr[..stderr.len().min(300)]
+        )));
+    }
+
+    // Clean up extracted frame
+    let _ = tokio::fs::remove_file(&frame_path).await;
+
+    Ok(clip_path)
+}
+
+/// Build an ffmpeg zoompan filter expression from a ZoomPanEffect.
+///
+/// The zoompan filter uses per-frame expressions for z (zoom), x (pan-x), y (pan-y).
+/// `on` = current frame number, `d` = total frames (set as the duration parameter).
+fn build_zoompan_filter(
+    effect: &ZoomPanEffect,
+    width: u32,
+    height: u32,
+    fps: f64,
+    duration_seconds: f64,
+) -> String {
+    let total_frames = (duration_seconds * fps.min(MAX_OUTPUT_FPS))
+        .round()
+        .max(1.0) as u32;
+
+    // Zoom: 1/region_width gives the zoom factor (region covering 50% width = 2x zoom)
+    let z_start = 1.0 / effect.start_region.width.max(0.01);
+    let z_end = 1.0 / effect.end_region.width.max(0.01);
+
+    // Pan centers (normalized 0-1)
+    let sx = effect.start_region.x + effect.start_region.width / 2.0;
+    let sy = effect.start_region.y + effect.start_region.height / 2.0;
+    let ex = effect.end_region.x + effect.end_region.width / 2.0;
+    let ey = effect.end_region.y + effect.end_region.height / 2.0;
+
+    // Easing expression for progress (on/d mapped through easing function)
+    let progress = match effect.easing {
+        EasingPreset::Linear => "on/d".to_string(),
+        EasingPreset::EaseIn => "(on/d)*(on/d)".to_string(),
+        EasingPreset::EaseOut => "(on/d)*(2-on/d)".to_string(),
+        EasingPreset::EaseInOut => {
+            "if(lt(on/d,0.5),2*(on/d)*(on/d),-1+(4-2*(on/d))*(on/d))".to_string()
+        }
+    };
+
+    format!(
+        "zoompan=z='{z_s}+({z_e}-{z_s})*({p})':x='iw*({sx}+({ex}-{sx})*({p}))-iw/zoom/2':y='ih*({sy}+({ey}-{sy})*({p}))-ih/zoom/2':d={d}:s={w}x{h}:fps={fps}",
+        z_s = z_start,
+        z_e = z_end,
+        p = progress,
+        sx = sx,
+        ex = ex,
+        sy = sy,
+        ey = ey,
+        d = total_frames,
+        w = width,
+        h = height,
+        fps = fps.min(MAX_OUTPUT_FPS).round() as u32,
+    )
+}
+
 pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
     on_progress: impl Fn(f64),
 ) -> Result<String, NarratorError> {
+    // S1: Validate paths
+    validate_path(input_path)?;
+    validate_path(output_path)?;
+
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
     let total = plan.clips.len();
@@ -119,14 +495,30 @@ pub async fn apply_edits(
         return Err(NarratorError::ExportError("No clips to process".into()));
     }
 
+    // Probe video metadata (needed for freeze frame and zoom/pan)
+    let meta = video_engine::probe_video(std::path::Path::new(input_path)).await?;
+
+    // S2/F4: Validate all clips
+    for (i, clip) in plan.clips.iter().enumerate() {
+        validate_clip(clip, meta.duration_seconds, i)?;
+        if let Some(ref zp) = clip.zoom_pan {
+            validate_zoom(zp)?;
+        }
+    }
+
     // If single clip with no modifications, check if it covers the full source
-    if total == 1 && plan.clips[0].speed == 1.0 && plan.clips[0].fps_override.is_none() {
+    let has_effects =
+        plan.clips[0].clip_type.as_deref() == Some("freeze") || plan.clips[0].zoom_pan.is_some();
+    if total == 1
+        && plan.clips[0].speed == 1.0
+        && plan.clips[0].fps_override.is_none()
+        && !has_effects
+    {
         let clip = &plan.clips[0];
 
-        // Probe original duration to check if the clip covers the full video
-        let probe = video_engine::probe_video(std::path::Path::new(input_path)).await?;
+        // Check if the clip covers the full video (using already-probed metadata)
         let covers_full =
-            clip.start_seconds < 0.5 && (clip.end_seconds - probe.duration_seconds).abs() < 0.5;
+            clip.start_seconds < 0.5 && (clip.end_seconds - meta.duration_seconds).abs() < 0.5;
 
         if covers_full {
             // No edits — just use the original file directly (symlink or copy)
@@ -172,6 +564,14 @@ pub async fn apply_edits(
     for (i, clip) in plan.clips.iter().enumerate() {
         on_progress((i as f64 / total as f64) * 80.0);
 
+        // Handle freeze frame clips separately
+        if clip.clip_type.as_deref() == Some("freeze") {
+            let clip_path =
+                process_freeze_clip(&ffmpeg, input_path, clip, i, out_dir, &meta).await?;
+            clip_files.push(clip_path);
+            continue;
+        }
+
         let clip_path = out_dir.join(format!("_edit_clip_{:03}.mp4", i));
         let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input_path.into()];
 
@@ -182,6 +582,16 @@ pub async fn apply_edits(
         // Build video filter chain
         let mut vfilters = Vec::new();
         let needs_speed = (clip.speed - 1.0).abs() > 0.01;
+
+        // Zoom/Pan effect (must come before speed adjustment)
+        if let Some(ref zp) = clip.zoom_pan {
+            let clip_duration = (clip.end_seconds - clip.start_seconds) / clip.speed;
+            let zp_filter =
+                build_zoompan_filter(zp, meta.width, meta.height, meta.fps, clip_duration);
+            vfilters.push(zp_filter);
+            // zoompan outputs at its own resolution, add scale to ensure consistency
+            vfilters.push(format!("scale={}:{}", meta.width, meta.height));
+        }
 
         if let Some(fps) = clip.fps_override {
             vfilters.push(format!("fps={:.3}", fps));

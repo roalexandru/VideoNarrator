@@ -668,6 +668,7 @@ mod tests {
         std::fs::create_dir_all(project_dir.join("exports")).unwrap();
 
         let config = ProjectConfig {
+            schema_version: 1,
             id: project_id.clone(),
             title: "Test Project".to_string(),
             description: "A test".to_string(),
@@ -681,6 +682,7 @@ mod tests {
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
             edit_clips: None,
+            timeline_effects: None,
             video_metadata: None,
         };
 

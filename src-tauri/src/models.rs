@@ -194,6 +194,37 @@ pub struct NarrationStyle {
     pub pause_markers: bool,
 }
 
+fn default_schema_version() -> u32 {
+    1
+}
+
+// ── Zoom/Pan ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoomRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EasingPreset {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoomPanEffect {
+    pub start_region: ZoomRegion,
+    pub end_region: ZoomRegion,
+    pub easing: EasingPreset,
+}
+
 // ── Project ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,10 +234,20 @@ pub struct EditClip {
     pub speed: f64,
     pub skip_frames: bool,
     pub fps_override: Option<f64>,
+    #[serde(default)]
+    pub clip_type: Option<String>,
+    #[serde(default)]
+    pub freeze_source_time: Option<f64>,
+    #[serde(default)]
+    pub freeze_duration: Option<f64>,
+    #[serde(default)]
+    pub zoom_pan: Option<ZoomPanEffect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub title: String,
     pub description: String,
@@ -221,6 +262,8 @@ pub struct ProjectConfig {
     pub updated_at: String,
     #[serde(default)]
     pub edit_clips: Option<Vec<EditClip>>,
+    #[serde(default)]
+    pub timeline_effects: Option<serde_json::Value>,
     #[serde(default)]
     pub video_metadata: Option<VideoMetadata>,
 }

@@ -79,13 +79,37 @@ export function ProcessingScreen() {
         const homeDir = await getHomeDir();
         const ext = videoPath.split(".").pop() || "mp4";
         const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
+        // Map effects from the effects track onto clips for the Rust backend.
+        // The Rust pipeline processes zoom_pan per-clip, so we find which effect overlaps each clip.
+        const effectsTrack = editSnapshot.effects || [];
+        let cumOutTime = 0;
         const editPlan = {
-          clips: editSnapshot.clips.map((c) => ({
-            start_seconds: c.sourceStart,
-            end_seconds: c.sourceEnd,
-            speed: c.speed,
-            fps_override: c.fpsOverride,
-          })),
+          clips: editSnapshot.clips.map((c) => {
+            const clipDur = c.type === 'freeze' ? (c.freezeDuration ?? 3) : (c.sourceEnd - c.sourceStart) / c.speed;
+            const clipStart = cumOutTime;
+            const clipEnd = cumOutTime + clipDur;
+            cumOutTime = clipEnd;
+            // Find the first zoom-pan effect that overlaps this clip
+            const overlapping = effectsTrack.find((e) =>
+              e.type === 'zoom-pan' && e.zoomPan && e.startTime < clipEnd && e.endTime > clipStart
+            );
+            // Use effect's zoom_pan if found, otherwise fall back to clip-level zoom_pan
+            const zoomPan = overlapping?.zoomPan ?? c.zoomPan;
+            return {
+              start_seconds: c.sourceStart,
+              end_seconds: c.sourceEnd,
+              speed: c.speed,
+              fps_override: c.fpsOverride,
+              clip_type: c.type ?? 'normal',
+              freeze_source_time: c.freezeSourceTime,
+              freeze_duration: c.freezeDuration,
+              zoom_pan: zoomPan ? {
+                startRegion: zoomPan.startRegion,
+                endRegion: zoomPan.endRegion,
+                easing: zoomPan.easing,
+              } : null,
+            };
+          }),
         };
         const editCh = new Channel<ProgressEvent>();
         editCh.onmessage = (e: ProgressEvent) => {
