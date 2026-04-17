@@ -1,5 +1,5 @@
 import { useCallback, useState, useEffect } from "react";
-import { Channel } from "@tauri-apps/api/core";
+import { Channel, convertFileSrc } from "@tauri-apps/api/core";
 import { useProcessingStore } from "../../stores/processingStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useConfigStore } from "../../stores/configStore";
@@ -139,7 +139,7 @@ export function ProcessingScreen() {
       title: project.title, description: project.description,
       style: config.style, primary_language: config.primaryLanguage,
       additional_languages: config.languages.filter((l) => l !== config.primaryLanguage),
-      frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: config.maxFrames },
+      frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: Math.max(config.maxFrames, 20), skip_dedup: true },
       ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature },
       custom_prompt: config.customPrompt,
     };
@@ -302,11 +302,21 @@ export function ProcessingScreen() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
                 {proc.frames.slice(0, 16).map((f) => (
                   <div key={f.index} style={{
-                    aspectRatio: "16/10", background: "rgba(255,255,255,0.04)", borderRadius: 5,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    color: C.muted, fontSize: 10, border: `1px solid ${C.border}`,
+                    aspectRatio: "16/10", borderRadius: 5, overflow: "hidden", position: "relative",
+                    border: `1px solid ${C.border}`,
                   }}>
-                    {f.timestamp_seconds.toFixed(0)}s
+                    <img
+                      src={convertFileSrc(typeof f.path === 'string' ? f.path : (f.path as { toString(): string }).toString())}
+                      alt={`Frame at ${f.timestamp_seconds.toFixed(0)}s`}
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                    />
+                    <div style={{
+                      position: "absolute", bottom: 2, left: 2, fontSize: 9, fontWeight: 700,
+                      color: "#fff", background: "rgba(0,0,0,0.6)", padding: "1px 4px", borderRadius: 3,
+                    }}>
+                      {f.timestamp_seconds.toFixed(0)}s
+                    </div>
                   </div>
                 ))}
                 {proc.frames.length > 16 && (
@@ -336,9 +346,17 @@ export function ProcessingScreen() {
           {segCount === 0 ? (
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 14 }}>
               {proc.phase === "generating_narration" ? (
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ width: 24, height: 24, border: "2px solid rgba(99,102,241,0.3)", borderTopColor: C.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 12px" }} />
-                  Waiting for AI response...
+                <div style={{ textAlign: "center", maxWidth: 300 }}>
+                  <div style={{ width: 28, height: 28, border: "2.5px solid rgba(99,102,241,0.2)", borderTopColor: C.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 16px" }} />
+                  <div style={{ fontSize: 14, fontWeight: 600, color: C.dim, marginBottom: 8 }}>Generating narration with AI...</div>
+                  <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+                    The AI is analyzing your video frames and creating a timed narration script. This typically takes 30–90 seconds.
+                  </div>
+                  {proc.progress > 0 && (
+                    <div style={{ marginTop: 12, fontSize: 11, color: C.accent, fontWeight: 600 }}>
+                      {Math.round(proc.progress)}% complete
+                    </div>
+                  )}
                 </div>
               ) : "Narration will appear here as it's generated..."}
             </div>

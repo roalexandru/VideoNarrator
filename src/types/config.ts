@@ -50,6 +50,7 @@ export interface FrameConfig {
   density: FrameDensity;
   scene_threshold: number;
   max_frames: number;
+  skip_dedup?: boolean;
 }
 
 export interface ProviderKeyStatus {

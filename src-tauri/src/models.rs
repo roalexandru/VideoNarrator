@@ -30,6 +30,8 @@ pub struct FrameConfig {
     pub density: FrameDensity,
     pub scene_threshold: f64,
     pub max_frames: usize,
+    #[serde(default)]
+    pub skip_dedup: bool,
 }
 
 impl Default for FrameConfig {
@@ -38,6 +40,7 @@ impl Default for FrameConfig {
             density: FrameDensity::Medium,
             scene_threshold: 0.3,
             max_frames: 30,
+            skip_dedup: false,
         }
     }
 }

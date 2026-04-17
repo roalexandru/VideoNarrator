@@ -492,8 +492,11 @@ pub fn build_user_message(
 /// Check if an error is a rate limit (429) that should be retried.
 fn is_rate_limit_error(err: &NarratorError) -> bool {
     let msg = err.to_string().to_lowercase();
-    msg.contains("429") || msg.contains("rate limit") || msg.contains("too many requests")
-        || msg.contains("rate_limit") || msg.contains("overloaded")
+    msg.contains("429")
+        || msg.contains("rate limit")
+        || msg.contains("too many requests")
+        || msg.contains("rate_limit")
+        || msg.contains("overloaded")
 }
 
 /// Call an AI provider with exponential backoff on rate limit errors.

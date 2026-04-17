@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useEditStore } from "../../stores/editStore";
 import { useConfigStore } from "../../stores/configStore";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
@@ -32,6 +33,7 @@ const REFINE_PRESETS = [
 
 export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
+  const editedVideoPath = useEditStore((s) => s.editedVideoPath);
   const projectId = useProjectStore((s) => s.projectId);
   const configLanguages = useConfigStore((s) => s.languages);
   const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, updateSegmentTiming, deleteSegment, setScript, canUndo, canRedo, undo, redo } = useScriptStore();
@@ -266,7 +268,9 @@ export function ReviewScreen() {
     return () => window.removeEventListener("keydown", handler);
   }, [canUndo, canRedo, undo, redo]);
 
-  const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
+  // Use edited video if available, otherwise original
+  const videoPath = editedVideoPath || videoFile?.path;
+  const src = videoPath ? convertFileSrc(videoPath) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
   const currentSegment = currentSegmentIdx >= 0 ? segments[currentSegmentIdx] : null;
 

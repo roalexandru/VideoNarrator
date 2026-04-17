@@ -38,9 +38,7 @@ fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
                 || s.starts_with("/usr/sbin")
                 || s.starts_with("/System")
             {
-                return Err(NarratorError::ExportError(format!(
-                    "Path not allowed: {p}"
-                )));
+                return Err(NarratorError::ExportError(format!("Path not allowed: {p}")));
             }
         }
     }
@@ -638,10 +636,11 @@ pub async fn apply_edits(
         // Zoom/Pan effect — animated crop+scale for video clips
         if let Some(ref zp) = clip.zoom_pan {
             let clip_duration = clip.end_seconds - clip.start_seconds;
-            let total_frames = (clip_duration * meta.fps.min(MAX_OUTPUT_FPS)).round().max(1.0);
-            let zp_filter = build_zoompan_filter_for_video(
-                zp, meta.width, meta.height, total_frames,
-            );
+            let total_frames = (clip_duration * meta.fps.min(MAX_OUTPUT_FPS))
+                .round()
+                .max(1.0);
+            let zp_filter =
+                build_zoompan_filter_for_video(zp, meta.width, meta.height, total_frames);
             vfilters.push(zp_filter);
         }
 
@@ -677,9 +676,12 @@ pub async fn apply_edits(
         vfilters.push("format=yuv420p".to_string());
         args.extend(["-vf".into(), vfilters.join(",")]);
         args.extend([
-            "-c:v".into(), "libx264".into(),
-            "-preset".into(), "medium".into(),
-            "-crf".into(), "15".into(),
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "medium".into(),
+            "-crf".into(),
+            "15".into(),
         ]);
         if !afilters.is_empty() {
             args.extend(["-af".into(), afilters.join(",")]);
@@ -692,7 +694,11 @@ pub async fn apply_edits(
         args.extend(["-movflags".into(), "+faststart".into()]);
         args.push(clip_path.to_string_lossy().to_string());
 
-        tracing::info!("Clip {i}: zoom={has_zoom} speed={} filters={}", clip.speed, vfilters.len());
+        tracing::info!(
+            "Clip {i}: zoom={has_zoom} speed={} filters={}",
+            clip.speed,
+            vfilters.len()
+        );
 
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
@@ -714,20 +720,32 @@ pub async fn apply_edits(
                 .lines()
                 .filter(|l| {
                     let ll = l.to_lowercase();
-                    ll.contains("error") || ll.contains("invalid") || ll.contains("no such")
-                        || ll.contains("not found") || ll.contains("failed") || ll.contains("unknown")
-                        || ll.contains("unrecognized") || ll.contains("does not")
+                    ll.contains("error")
+                        || ll.contains("invalid")
+                        || ll.contains("no such")
+                        || ll.contains("not found")
+                        || ll.contains("failed")
+                        || ll.contains("unknown")
+                        || ll.contains("unrecognized")
+                        || ll.contains("does not")
                 })
                 .collect::<Vec<_>>()
                 .join("; ");
-            let detail = if meaningful.is_empty() { err_tail.to_string() } else { meaningful };
+            let detail = if meaningful.is_empty() {
+                err_tail.to_string()
+            } else {
+                meaningful
+            };
             return Err(NarratorError::FfmpegFailed(format!(
                 "Clip {i} failed: {detail}"
             )));
         }
 
         // Verify clip file was actually created and has content
-        let clip_size = tokio::fs::metadata(&clip_path).await.map(|m| m.len()).unwrap_or(0);
+        let clip_size = tokio::fs::metadata(&clip_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
         if clip_size == 0 {
             tracing::error!("Clip {i} produced empty file: {}", clip_path.display());
             tracing::error!("Clip {i} ffmpeg args: {:?}", &args);

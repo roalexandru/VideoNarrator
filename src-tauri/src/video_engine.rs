@@ -261,6 +261,7 @@ pub async fn extract_frames(
     // hashing are CPU/IO-intensive, so run on the blocking thread pool.
     let output_dir_owned = output_dir.to_path_buf();
     let max_frames = config.max_frames;
+    let skip_dedup = config.skip_dedup;
     let duration = metadata.duration_seconds;
     let frames = tokio::task::spawn_blocking(move || {
         let mut entries: Vec<_> = std::fs::read_dir(&output_dir_owned)
@@ -301,8 +302,12 @@ pub async fn extract_frames(
             });
         }
 
-        // Deduplicate similar frames using blake3 hashing
-        Ok::<_, NarratorError>(deduplicate_frames(frames))
+        // Deduplicate similar frames using blake3 hashing (unless skip_dedup is set)
+        if skip_dedup {
+            Ok::<_, NarratorError>(frames)
+        } else {
+            Ok::<_, NarratorError>(deduplicate_frames(frames))
+        }
     })
     .await
     .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))??;
