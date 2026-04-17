@@ -502,19 +502,21 @@ async fn generate_with_retry(
     system_prompt: &str,
     user_message: serde_json::Value,
 ) -> Result<String, NarratorError> {
-    let max_retries = 3;
+    let max_retries = 4;
+    let delays = [5, 15, 30, 60]; // seconds — aggressive backoff for rate limits
     let mut result = Err(NarratorError::ApiError("No attempts made".into()));
     for attempt in 0..=max_retries {
         if attempt > 0 {
-            let delay_secs = 2u64.pow(attempt as u32);
+            let delay_secs = delays.get(attempt as usize - 1).copied().unwrap_or(60);
             tracing::warn!(
-                "Rate limited, retrying in {delay_secs}s (attempt {attempt}/{max_retries})"
+                "Rate limited by API provider. Waiting {delay_secs}s before retry (attempt {attempt}/{max_retries})"
             );
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
         }
         match provider.generate(system_prompt, user_message.clone()).await {
             Ok(text) => return Ok(text),
             Err(e) if is_rate_limit_error(&e) && attempt < max_retries => {
+                tracing::warn!("Rate limit error: {e}");
                 result = Err(e);
                 continue;
             }
