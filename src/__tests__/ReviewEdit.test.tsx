@@ -74,10 +74,10 @@ describe("ReviewScreen", () => {
     seedStores();
     render(<ReviewScreen />);
 
-    // Timestamps may appear in both the timeline and the segment editor, so use getAllByText
-    expect(screen.getAllByText("0:00").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("0:15").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("0:30").length).toBeGreaterThanOrEqual(1);
+    // Timestamps now include centiseconds (M:SS.CC format)
+    expect(screen.getAllByText("0:00.00").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("0:15.00").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("0:30.00").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders segment text", () => {

@@ -139,7 +139,7 @@ export function ProcessingScreen() {
       title: project.title, description: project.description,
       style: config.style, primary_language: config.primaryLanguage,
       additional_languages: config.languages.filter((l) => l !== config.primaryLanguage),
-      frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: Math.max(config.maxFrames, 20), skip_dedup: true },
+      frame_config: { density: "heavy", scene_threshold: config.sceneThreshold, max_frames: Math.max(config.maxFrames, 30), skip_dedup: true },
       ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature },
       custom_prompt: config.customPrompt,
     };
@@ -307,7 +307,7 @@ export function ProcessingScreen() {
                   }}>
                     <img
                       src={convertFileSrc(typeof f.path === 'string' ? f.path : (f.path as { toString(): string }).toString())}
-                      alt={`Frame at ${f.timestamp_seconds.toFixed(0)}s`}
+                      alt={`Frame at ${f.timestamp_seconds.toFixed(2)}s`}
                       style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                       onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                     />
@@ -315,7 +315,7 @@ export function ProcessingScreen() {
                       position: "absolute", bottom: 2, left: 2, fontSize: 9, fontWeight: 700,
                       color: "#fff", background: "rgba(0,0,0,0.6)", padding: "1px 4px", borderRadius: 3,
                     }}>
-                      {f.timestamp_seconds.toFixed(0)}s
+                      {f.timestamp_seconds.toFixed(1)}s
                     </div>
                   </div>
                 ))}

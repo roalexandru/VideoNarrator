@@ -163,10 +163,9 @@ fn format_vtt_time(seconds: f64) -> String {
 }
 
 fn format_human_time(seconds: f64) -> String {
-    let total_secs = seconds as u64;
-    let m = total_secs / 60;
-    let s = total_secs % 60;
-    format!("{m}:{s:02}")
+    let m = (seconds / 60.0).floor() as u64;
+    let s = seconds % 60.0;
+    format!("{m}:{s:05.2}")
 }
 
 #[cfg(test)]
@@ -242,9 +241,9 @@ mod tests {
 
     #[test]
     fn test_format_human_time() {
-        assert_eq!(format_human_time(0.0), "0:00");
-        assert_eq!(format_human_time(65.0), "1:05");
-        assert_eq!(format_human_time(125.5), "2:05");
+        assert_eq!(format_human_time(0.0), "0:00.00");
+        assert_eq!(format_human_time(65.0), "1:05.00");
+        assert_eq!(format_human_time(125.5), "2:05.50");
     }
 
     #[test]
@@ -268,7 +267,7 @@ mod tests {
     fn test_export_txt() {
         let script = sample_script();
         let txt = export_txt(&script);
-        assert!(txt.contains("[0:00 - 0:08]"));
+        assert!(txt.contains("[0:00.00 - 0:08.50]"));
         assert!(txt.contains("Welcome to the demo."));
     }
 
@@ -380,8 +379,8 @@ mod tests {
         let script = test_script();
         let txt = export_txt(&script);
         // Verify human-readable time format
-        assert!(txt.contains("[0:00 - 0:10]"));
-        assert!(txt.contains("[0:12 - 0:25]"));
+        assert!(txt.contains("[0:00.00 - 0:10.00]"));
+        assert!(txt.contains("[0:12.00 - 0:25.00]"));
         assert!(txt.contains("First segment."));
         assert!(txt.contains("Second segment."));
     }

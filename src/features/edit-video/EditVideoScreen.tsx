@@ -668,7 +668,7 @@ export function EditVideoScreen() {
                       {isFreeze && (
                         <div style={{ position: "absolute", bottom: 2, left: 4, pointerEvents: "none" }}>
                           <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: "rgba(56,189,248,0.85)", color: "#fff", fontWeight: 700 }}>
-                            {(clip.freezeDuration ?? 3).toFixed(1)}s
+                            {(clip.freezeDuration ?? 3).toFixed(2)}s
                           </span>
                         </div>
                       )}
@@ -821,7 +821,7 @@ export function EditVideoScreen() {
                   ) : (
                     <>
                       <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>
-                        {secondsToTimestamp(selClip.sourceStart)}→{secondsToTimestamp(selClip.sourceEnd)} &middot; {clipOutputDuration(selClip).toFixed(1)}s
+                        {secondsToTimestamp(selClip.sourceStart)}→{secondsToTimestamp(selClip.sourceEnd)} &middot; {clipOutputDuration(selClip).toFixed(2)}s
                       </span>
                       <Button variant="secondary" size="sm" onClick={() => splitAt(outputTime)}>Split (S)</Button>
                       <Button variant="secondary" size="sm" onClick={() => insertFreezeFrame(outputTime)}>Freeze (F)</Button>
@@ -847,12 +847,12 @@ export function EditVideoScreen() {
                   <>
                     <div style={{ width: 8, height: 8, borderRadius: 2, background: eMeta.color, flexShrink: 0 }} />
                     <span style={{ fontSize: 11, color: eMeta.color, fontWeight: 600, flexShrink: 0 }}>{eMeta.label}</span>
-                    <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>{eDur.toFixed(1)}s</span>
+                    <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>{eDur.toFixed(2)}s</span>
                     <div style={{ width: 1, height: 18, background: C.border, flexShrink: 0 }} />
                     <span style={{ fontSize: 9, color: C.muted, flexShrink: 0 }}>{l.inLabel}</span>
                     <NumericInput value={eTransIn} min={0} max={eDur} width={34} color={eMeta.color}
                       onChange={(v) => updateEffect(selectedEffect.id, { transitionIn: Math.min(v, eDur - (eReverse ? eTransOut : 0)) })} />
-                    <span style={{ fontSize: 9, color: C.dim, fontWeight: 600, flexShrink: 0 }}>{l.holdLabel}: {eHold.toFixed(1)}s</span>
+                    <span style={{ fontSize: 9, color: C.dim, fontWeight: 600, flexShrink: 0 }}>{l.holdLabel}: {eHold.toFixed(2)}s</span>
                     <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", fontSize: 9, color: eReverse ? eMeta.color : C.muted, fontWeight: 600, flexShrink: 0 }}>
                       <input type="checkbox" checked={eReverse}
                         onChange={(e) => updateEffect(selectedEffect.id, { reverse: e.target.checked, transitionOut: e.target.checked && eTransOut === 0 ? eTransIn : eTransOut })}
@@ -930,7 +930,7 @@ export function EditVideoScreen() {
                   {selClip.speed > 1 && (
                     <>
                       <span style={{ fontSize: 9, color: C.muted }}>
-                        ({((selClip.sourceEnd - selClip.sourceStart)).toFixed(0)}s→{((selClip.sourceEnd - selClip.sourceStart) / selClip.speed).toFixed(0)}s)
+                        ({((selClip.sourceEnd - selClip.sourceStart)).toFixed(2)}s→{((selClip.sourceEnd - selClip.sourceStart) / selClip.speed).toFixed(2)}s)
                       </span>
                       <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
                         <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} title="Fast-forward" style={{

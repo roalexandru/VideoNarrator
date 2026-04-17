@@ -268,7 +268,7 @@ export function ReviewScreen() {
     return () => window.removeEventListener("keydown", handler);
   }, [canUndo, canRedo, undo, redo]);
 
-  // Use edited video if available, otherwise original
+  // Use edited video for review — narration timestamps match the edited timeline
   const videoPath = editedVideoPath || videoFile?.path;
   const src = videoPath ? convertFileSrc(videoPath) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);

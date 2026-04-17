@@ -3,16 +3,16 @@ import { secondsToTimestamp, formatFileSize, formatDuration } from "./formatters
 
 describe("secondsToTimestamp", () => {
   it("formats zero", () => {
-    expect(secondsToTimestamp(0)).toBe("0:00");
+    expect(secondsToTimestamp(0)).toBe("0:00.00");
   });
   it("formats seconds only", () => {
-    expect(secondsToTimestamp(45)).toBe("0:45");
+    expect(secondsToTimestamp(45)).toBe("0:45.00");
   });
   it("formats minutes and seconds", () => {
-    expect(secondsToTimestamp(125)).toBe("2:05");
+    expect(secondsToTimestamp(125)).toBe("2:05.00");
   });
   it("handles fractional seconds", () => {
-    expect(secondsToTimestamp(65.7)).toBe("1:05");
+    expect(secondsToTimestamp(65.7)).toBe("1:05.70");
   });
 });
 
@@ -33,12 +33,12 @@ describe("formatFileSize", () => {
 
 describe("formatDuration", () => {
   it("formats seconds only", () => {
-    expect(formatDuration(30)).toBe("30s");
+    expect(formatDuration(30)).toBe("30.0s");
   });
   it("formats minutes and seconds", () => {
-    expect(formatDuration(125)).toBe("2m 5s");
+    expect(formatDuration(125)).toBe("2m 5.0s");
   });
   it("formats zero", () => {
-    expect(formatDuration(0)).toBe("0s");
+    expect(formatDuration(0)).toBe("0.0s");
   });
 });

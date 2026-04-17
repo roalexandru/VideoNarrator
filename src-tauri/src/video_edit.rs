@@ -58,8 +58,11 @@ fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), Nar
     if clip.end_seconds < clip.start_seconds {
         return Err(err("end_seconds < start_seconds"));
     }
-    if clip.end_seconds > duration + 1.0 {
-        return Err(err("end_seconds exceeds video duration"));
+    if clip.end_seconds > duration + 5.0 {
+        return Err(err(&format!(
+            "end_seconds {:.1} exceeds video duration {:.1}",
+            clip.end_seconds, duration
+        )));
     }
     if let Some(fd) = clip.freeze_duration {
         if fd <= 0.0 || fd > 600.0 {
