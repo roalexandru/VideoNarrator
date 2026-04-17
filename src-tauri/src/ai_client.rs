@@ -455,7 +455,12 @@ pub fn build_user_message(
         IMPORTANT: Generate narration covering the ENTIRE {dur:.1}s video.\n\
         The LAST segment's end_seconds MUST be {dur:.1}.\n\
         Leave 2-5 second GAPS between segments for natural pacing.\n\
-        Distribute narration evenly from 0s to {dur:.0}s — do NOT stop halfway.",
+        Distribute narration evenly from 0s to {dur:.0}s — do NOT stop halfway.\n\n\
+        PAY CLOSE ATTENTION to what is visible on screen in each frame:\n\
+        - Read any text visible in terminals, code editors, browsers, or dialogs\n\
+        - Note the state of visible applications (what window is active, what buttons are shown)\n\
+        - Describe what is happening based on the visible UI state changes between frames\n\
+        - Reference specific on-screen content in the narration (commands typed, output shown, menus opened)",
         video_metadata.width,
         video_metadata.height,
         video_metadata.fps,
@@ -487,6 +492,147 @@ pub fn build_user_message(
     }
 
     Ok(serde_json::Value::Array(content))
+}
+
+/// Generate narration in chunks when there are too many frames for a single API call.
+/// Splits frames into batches, generates segments per batch with context from previous.
+async fn generate_chunked(
+    provider: &dyn AiProvider,
+    system_prompt: &str,
+    user_message: &serde_json::Value,
+    image_count: usize,
+) -> Result<String, NarratorError> {
+    let parts = user_message
+        .as_array()
+        .ok_or_else(|| NarratorError::ApiError("Expected array for chunked generation".into()))?;
+
+    // Separate text parts (first) from image+text pairs
+    let mut text_parts = Vec::new();
+    let mut image_pairs: Vec<(serde_json::Value, serde_json::Value)> = Vec::new(); // (text label, image)
+
+    let mut i = 0;
+    while i < parts.len() {
+        if parts[i]["type"] == "image" {
+            // This shouldn't happen — text label comes before image
+            image_pairs.push((json!({"type": "text", "text": ""}), parts[i].clone()));
+            i += 1;
+        } else if i + 1 < parts.len() && parts[i + 1]["type"] == "image" {
+            // Text label + image pair
+            image_pairs.push((parts[i].clone(), parts[i + 1].clone()));
+            i += 2;
+        } else {
+            // Text-only part (context, instructions)
+            text_parts.push(parts[i].clone());
+            i += 1;
+        }
+    }
+
+    let num_chunks = image_pairs.len().div_ceil(MAX_FRAMES_PER_CALL);
+    tracing::info!(
+        "Chunked generation: {} frames in {} chunks of up to {}",
+        image_count,
+        num_chunks,
+        MAX_FRAMES_PER_CALL
+    );
+
+    let mut all_segments: Vec<crate::models::Segment> = Vec::new();
+    let mut merged_script: Option<NarrationScript> = None;
+
+    for chunk_idx in 0..num_chunks {
+        let start = chunk_idx * MAX_FRAMES_PER_CALL;
+        let end = (start + MAX_FRAMES_PER_CALL).min(image_pairs.len());
+        let chunk_pairs = &image_pairs[start..end];
+
+        // Build the message for this chunk
+        let mut chunk_content = text_parts.clone();
+
+        // Add context from previous chunks
+        if !all_segments.is_empty() {
+            let prev_summary: String = all_segments
+                .iter()
+                .map(|s| {
+                    format!(
+                        "[{:.1}s-{:.1}s]: {}",
+                        s.start_seconds,
+                        s.end_seconds,
+                        &s.text[..s.text.len().min(80)]
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            chunk_content.push(json!({
+                "type": "text",
+                "text": format!(
+                    "\n--- PREVIOUSLY GENERATED SEGMENTS (for context, do NOT repeat these) ---\n{prev_summary}\n--- NOW CONTINUE narration for the following frames. Start from where the previous segments ended. ---\n"
+                )
+            }));
+        } else {
+            chunk_content.push(json!({
+                "type": "text",
+                "text": format!("\nThis is batch {}/{num_chunks} of frames. Generate narration segments for these frames.", chunk_idx + 1)
+            }));
+        }
+
+        // Add the frame images for this chunk
+        for (text_label, image) in chunk_pairs {
+            chunk_content.push(text_label.clone());
+            chunk_content.push(image.clone());
+        }
+
+        let chunk_message = serde_json::Value::Array(chunk_content);
+
+        tracing::info!(
+            "Chunk {}/{}: {} frames (image pairs {}-{})",
+            chunk_idx + 1,
+            num_chunks,
+            end - start,
+            start,
+            end - 1
+        );
+
+        let response = generate_with_retry(provider, system_prompt, chunk_message).await?;
+
+        // Parse the chunk response
+        let json_text = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let chunk_script: NarrationScript = serde_json::from_str(json_text).map_err(|e| {
+            NarratorError::ApiError(format!(
+                "Failed to parse chunk {} response: {e}\nResponse: {}",
+                chunk_idx + 1,
+                &json_text[..json_text.len().min(500)]
+            ))
+        })?;
+
+        if merged_script.is_none() {
+            let base = NarrationScript {
+                title: chunk_script.title.clone(),
+                total_duration_seconds: chunk_script.total_duration_seconds,
+                segments: Vec::new(),
+                metadata: chunk_script.metadata.clone(),
+            };
+            merged_script = Some(base);
+        }
+        all_segments.extend(chunk_script.segments);
+    }
+
+    // Build the final merged script
+    if let Some(mut script) = merged_script {
+        // Re-index segments
+        for (i, seg) in all_segments.iter_mut().enumerate() {
+            seg.index = i;
+        }
+        script.segments = all_segments;
+        // Return as JSON string (same format as single-call response)
+        serde_json::to_string(&script)
+            .map_err(|e| NarratorError::ApiError(format!("Failed to serialize merged script: {e}")))
+    } else {
+        Err(NarratorError::ApiError("No chunks generated".into()))
+    }
 }
 
 /// Check if an error is a rate limit (429) that should be retried.
@@ -529,6 +675,11 @@ async fn generate_with_retry(
     result
 }
 
+/// Generate narration, chunking the request if there are too many frames.
+/// Each chunk gets up to MAX_FRAMES_PER_CALL frames. Subsequent chunks receive
+/// context about previously generated segments so the narrative is coherent.
+const MAX_FRAMES_PER_CALL: usize = 10;
+
 pub async fn generate_narration(
     provider: &dyn AiProvider,
     system_prompt: &str,
@@ -536,7 +687,17 @@ pub async fn generate_narration(
     _style: &str,
     _language: &str,
 ) -> Result<NarrationScript, NarratorError> {
-    let response_text = generate_with_retry(provider, system_prompt, user_message).await?;
+    // Check if the message has too many image parts — if so, chunk it
+    let parts = user_message.as_array();
+    let image_count = parts
+        .map(|p| p.iter().filter(|v| v["type"] == "image").count())
+        .unwrap_or(0);
+
+    let response_text = if image_count > MAX_FRAMES_PER_CALL {
+        generate_chunked(provider, system_prompt, &user_message, image_count).await?
+    } else {
+        generate_with_retry(provider, system_prompt, user_message).await?
+    };
 
     // Try to parse the JSON response
     // Strip markdown code fences if present

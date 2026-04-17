@@ -359,11 +359,33 @@ fn hash_frame_file(path: &Path) -> String {
     }
 }
 
+/// Encode a frame as base64 JPEG, downscaling to max_width if larger.
+/// Keeps text readable for screen recordings (1024px default).
 pub fn frame_to_base64(path: &Path) -> Result<String, NarratorError> {
-    let data = std::fs::read(path)?;
+    frame_to_base64_scaled(path, 1024)
+}
+
+pub fn frame_to_base64_scaled(path: &Path, max_width: u32) -> Result<String, NarratorError> {
+    let img = image::open(path).map_err(|e| {
+        NarratorError::FrameExtractionError(format!("Failed to open frame {}: {e}", path.display()))
+    })?;
+
+    let (w, h) = (img.width(), img.height());
+    let img = if w > max_width {
+        let new_h = (h as f64 * max_width as f64 / w as f64).round() as u32;
+        img.resize(max_width, new_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    let mut buf = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut buf);
+    img.write_to(&mut cursor, image::ImageFormat::Jpeg)
+        .map_err(|e| NarratorError::FrameExtractionError(format!("JPEG encode failed: {e}")))?;
+
     Ok(base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        &data,
+        &buf,
     ))
 }
 
