@@ -624,11 +624,24 @@ pub async fn apply_edits(
         }
 
         let clip_path = out_dir.join(format!("_edit_clip_{:03}.mp4", i));
-        let mut args: Vec<String> = vec!["-y".into(), "-i".into(), input_path.into()];
+        let clip_duration = clip.end_seconds - clip.start_seconds;
+        let expected_output_dur = if (clip.speed - 1.0).abs() > 0.01 {
+            clip_duration / clip.speed
+        } else {
+            clip_duration
+        };
 
-        // Trim
-        args.extend(["-ss".into(), format!("{:.3}", clip.start_seconds)]);
-        args.extend(["-to".into(), format!("{:.3}", clip.end_seconds)]);
+        // Belt-and-suspenders: input -t limits reading, output -t limits writing.
+        // Input seeking (-ss before -i) resets PTS to 0 at the seek point.
+        let mut args: Vec<String> = vec![
+            "-y".into(),
+            "-ss".into(),
+            format!("{:.3}", clip.start_seconds),
+            "-t".into(),
+            format!("{:.3}", clip_duration), // INPUT -t: read exactly this many seconds
+            "-i".into(),
+            input_path.into(),
+        ];
 
         // Build video filter chain
         let mut vfilters = Vec::new();
@@ -638,7 +651,6 @@ pub async fn apply_edits(
 
         // Zoom/Pan effect — animated crop+scale for video clips
         if let Some(ref zp) = clip.zoom_pan {
-            let clip_duration = clip.end_seconds - clip.start_seconds;
             let total_frames = (clip_duration * meta.fps.min(MAX_OUTPUT_FPS))
                 .round()
                 .max(1.0);
@@ -661,11 +673,17 @@ pub async fn apply_edits(
             }
         }
 
-        // Audio filter handling (actual -an or -c:a is added below with the encoder args)
+        // Audio filter handling — atempo must be chained for values outside 0.5-2.0 range
         let drop_audio = needs_speed && clip.skip_frames;
         if needs_speed && !clip.skip_frames {
             let mut atempo_chain = Vec::new();
             let mut remaining = clip.speed;
+            // Chain atempo=2.0 for speeds above 2.0
+            while remaining > 2.0 {
+                atempo_chain.push("atempo=2.0".to_string());
+                remaining /= 2.0;
+            }
+            // Chain atempo=0.5 for speeds below 0.5
             while remaining < 0.5 {
                 atempo_chain.push("atempo=0.5".to_string());
                 remaining /= 0.5;
@@ -675,7 +693,6 @@ pub async fn apply_edits(
         }
 
         // Always re-encode every clip with identical settings for reliable concat.
-        // Stream copy mixing causes "no streams" errors due to format mismatches.
         vfilters.push("format=yuv420p".to_string());
         args.extend(["-vf".into(), vfilters.join(",")]);
         args.extend([
@@ -685,7 +702,13 @@ pub async fn apply_edits(
             "medium".into(),
             "-crf".into(),
             "15".into(),
+            "-avoid_negative_ts".into(),
+            "make_zero".into(),
         ]);
+
+        // Limit output duration — critical for speed-changed clips where setpts
+        // changes output timing but ffmpeg may read more input than needed.
+        args.extend(["-t".into(), format!("{:.3}", expected_output_dur)]);
         if !afilters.is_empty() {
             args.extend(["-af".into(), afilters.join(",")]);
         }
@@ -698,9 +721,12 @@ pub async fn apply_edits(
         args.push(clip_path.to_string_lossy().to_string());
 
         tracing::info!(
-            "Clip {i}: zoom={has_zoom} speed={} filters={}",
+            "Clip {i}: src={:.3}-{:.3} ({:.3}s) speed={} expected_out={:.3}s zoom={has_zoom}",
+            clip.start_seconds,
+            clip.end_seconds,
+            clip_duration,
             clip.speed,
-            vfilters.len()
+            expected_output_dur
         );
 
         let output = Command::new(ffmpeg.as_os_str())
@@ -749,6 +775,16 @@ pub async fn apply_edits(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
+        // Log actual duration for debugging
+        if let Ok(probe) = video_engine::probe_video(&clip_path).await {
+            let drift = probe.duration_seconds - expected_output_dur;
+            tracing::info!(
+                "Clip {i}: actual_out={:.3}s (expected {:.3}s, drift={:.3}s)",
+                probe.duration_seconds,
+                expected_output_dur,
+                drift
+            );
+        }
         if clip_size == 0 {
             tracing::error!("Clip {i} produced empty file: {}", clip_path.display());
             tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
@@ -1197,5 +1233,83 @@ mod tests {
             extract_time_from_ffmpeg_line("size=1024kB time=00:00:10.00"),
             Some("00:00:10.00".to_string())
         );
+    }
+
+    #[test]
+    fn test_atempo_chaining_for_high_speeds() {
+        // Simulate the atempo chain logic for speed=10x
+        let speed = 10.0_f64;
+        let mut chain = Vec::new();
+        let mut remaining = speed;
+        while remaining > 2.0 {
+            chain.push("atempo=2.0".to_string());
+            remaining /= 2.0;
+        }
+        while remaining < 0.5 {
+            chain.push("atempo=0.5".to_string());
+            remaining /= 0.5;
+        }
+        chain.push(format!("atempo={:.4}", remaining));
+
+        // 10 / 2 / 2 / 2 = 1.25 → needs 3x atempo=2.0 + 1x atempo=1.25
+        assert_eq!(chain.len(), 4);
+        assert_eq!(chain[0], "atempo=2.0");
+        assert_eq!(chain[1], "atempo=2.0");
+        assert_eq!(chain[2], "atempo=2.0");
+        assert!(chain[3].starts_with("atempo=1.25"));
+        // Product should equal original speed: 2 * 2 * 2 * 1.25 = 10
+        let product: f64 = chain
+            .iter()
+            .map(|s| s.strip_prefix("atempo=").unwrap().parse::<f64>().unwrap())
+            .product();
+        assert!((product - speed).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_expected_output_duration() {
+        // 20 seconds at 10x speed = 2 seconds output
+        let clip_duration: f64 = 20.0;
+        let speed: f64 = 10.0;
+        let expected = clip_duration / speed;
+        assert!((expected - 2.0).abs() < 0.001);
+
+        // 60 seconds at 1x speed = 60 seconds output
+        let expected_1x: f64 = 60.0 / 1.0;
+        assert!((expected_1x - 60.0).abs() < 0.001);
+
+        // 30 seconds at 3x speed = 10 seconds output
+        let expected_3x: f64 = 30.0 / 3.0;
+        assert!((expected_3x - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_validate_clip_bounds() {
+        let clip = EditClip {
+            start_seconds: 10.0,
+            end_seconds: 30.0,
+            speed: 5.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&clip, 60.0, 0).is_ok());
+
+        // Speed 0 should fail
+        let bad_speed = EditClip {
+            speed: 0.0,
+            ..clip.clone()
+        };
+        assert!(validate_clip(&bad_speed, 60.0, 0).is_err());
+
+        // end < start should fail
+        let bad_range = EditClip {
+            start_seconds: 30.0,
+            end_seconds: 10.0,
+            ..clip.clone()
+        };
+        assert!(validate_clip(&bad_range, 60.0, 0).is_err());
     }
 }
