@@ -207,7 +207,8 @@ export function EditVideoScreen() {
         const d = clipOutputDuration(clip);
         if (clamped < cum + d) {
           if (clip.type === 'freeze') {
-            videoRef.current.playbackRate = 0; // freeze the video
+            // Don't set playbackRate=0 (unsupported in many browsers). Tick handler pauses video for freeze clips.
+            videoRef.current.playbackRate = 1;
           } else {
             videoRef.current.playbackRate = clip.speed;
           }
@@ -357,7 +358,18 @@ export function EditVideoScreen() {
         }
         cum += d;
       }
-      v.play();
+      v.play().then(() => {
+        // Re-enforce playbackRate after play resolves (some browsers reset it)
+        let c2 = 0;
+        for (const clip of clips) {
+          const d2 = clipOutputDuration(clip);
+          if (outputTime >= c2 && outputTime < c2 + d2 && clip.type !== 'freeze') {
+            v.playbackRate = clip.speed;
+            break;
+          }
+          c2 += d2;
+        }
+      }).catch(() => {});
     }
   };
 
@@ -787,199 +799,175 @@ export function EditVideoScreen() {
           </div>
         </div>
 
-        {/* CLIP INSPECTOR */}
-        <div style={{ flexShrink: 0, padding: "8px 12px", borderTop: `1px solid ${C.border}`, display: "flex", alignItems: "center", gap: 12, minHeight: 44, flexWrap: "wrap" }}>
-          {selClip ? (
-            <>
-              <span style={{ fontSize: 12, color: selClip.type === 'freeze' ? "#38bdf8" : C.dim, fontWeight: 600 }}>
-                {selClip.type === 'freeze' ? 'Freeze' : 'Clip'} {(selectedClipIndex ?? 0) + 1}/{clips.length}
-              </span>
-              {selClip.type === 'freeze' ? (
-                /* ── Freeze clip inspector ── */
+        {/* INSPECTOR — Two-row stable layout */}
+        <div style={{ flexShrink: 0, borderTop: `1px solid ${C.border}` }}>
+          {/* ROW 1: Identity + transitions (or clip info) | Delete + Add Effect pinned right */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", minHeight: 36 }}>
+            {/* Left content */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+              {selClip ? (
                 <>
-                  <span style={{ fontSize: 11, color: C.muted }}>
-                    at {secondsToTimestamp(selClip.freezeSourceTime ?? 0)}
+                  <span style={{ fontSize: 11, color: selClip.type === 'freeze' ? "#38bdf8" : C.dim, fontWeight: 600, flexShrink: 0 }}>
+                    {selClip.type === 'freeze' ? 'Freeze' : 'Clip'} {(selectedClipIndex ?? 0) + 1}/{clips.length}
                   </span>
-                  <div style={{ width: 1, height: 20, background: C.border }} />
-                  <span style={{ fontSize: 11, color: C.muted }}>Duration</span>
-                  <NumericInput value={selClip.freezeDuration ?? 3} min={0.1} max={30} width={48} color="#38bdf8"
-                    onChange={(v) => setFreezeDuration(selectedClipIndex!, v)} />
-                  <span style={{ fontSize: 11, color: C.muted }}>s</span>
+                  {selClip.type === 'freeze' ? (
+                    <>
+                      <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>at {secondsToTimestamp(selClip.freezeSourceTime ?? 0)}</span>
+                      <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>Duration</span>
+                      <NumericInput value={selClip.freezeDuration ?? 3} min={0.1} max={30} width={44} color="#38bdf8"
+                        onChange={(v) => setFreezeDuration(selectedClipIndex!, v)} />
+                      <span style={{ fontSize: 10, color: C.muted }}>s</span>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>
+                        {secondsToTimestamp(selClip.sourceStart)}→{secondsToTimestamp(selClip.sourceEnd)} &middot; {clipOutputDuration(selClip).toFixed(1)}s
+                      </span>
+                      <Button variant="secondary" size="sm" onClick={() => splitAt(outputTime)}>Split (S)</Button>
+                      <Button variant="secondary" size="sm" onClick={() => insertFreezeFrame(outputTime)}>Freeze (F)</Button>
+                    </>
+                  )}
                 </>
-              ) : (
-                /* ── Normal clip inspector ── */
-                <>
-                  <span style={{ fontSize: 11, color: C.muted }}>
-                    src {secondsToTimestamp(selClip.sourceStart)}→{secondsToTimestamp(selClip.sourceEnd)} &middot; {clipOutputDuration(selClip).toFixed(1)}s out
-                  </span>
-                  <div style={{ width: 1, height: 20, background: C.border }} />
-                  <Button variant="secondary" size="sm" onClick={() => splitAt(outputTime)}>Split (S)</Button>
-                  <Button variant="secondary" size="sm" onClick={() => insertFreezeFrame(outputTime)}>Freeze (F)</Button>
-                </>
+              ) : selectedEffect ? (() => {
+                const eMeta = EFFECT_META[selectedEffect.type];
+                const eDur = selectedEffect.endTime - selectedEffect.startTime;
+                const eTransIn = selectedEffect.transitionIn ?? 0;
+                const eTransOut = selectedEffect.transitionOut ?? 0;
+                const eReverse = selectedEffect.reverse ?? false;
+                const eHold = Math.max(0, eDur - eTransIn - (eReverse ? eTransOut : 0));
+                const labels: Record<string, { inLabel: string; outLabel: string; holdLabel: string }> = {
+                  'zoom-pan': { inLabel: 'Zoom In', outLabel: 'Zoom Out', holdLabel: 'Hold' },
+                  'spotlight': { inLabel: 'Fade In', outLabel: 'Fade Out', holdLabel: 'Hold' },
+                  'blur': { inLabel: 'Blur In', outLabel: 'Blur Out', holdLabel: 'Hold' },
+                  'text': { inLabel: 'Appear', outLabel: 'Disappear', holdLabel: 'Visible' },
+                  'fade': { inLabel: 'Fade In', outLabel: 'Fade Out', holdLabel: 'Hold' },
+                };
+                const l = labels[selectedEffect.type] || labels['zoom-pan'];
+                return (
+                  <>
+                    <div style={{ width: 8, height: 8, borderRadius: 2, background: eMeta.color, flexShrink: 0 }} />
+                    <span style={{ fontSize: 11, color: eMeta.color, fontWeight: 600, flexShrink: 0 }}>{eMeta.label}</span>
+                    <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>{eDur.toFixed(1)}s</span>
+                    <div style={{ width: 1, height: 18, background: C.border, flexShrink: 0 }} />
+                    <span style={{ fontSize: 9, color: C.muted, flexShrink: 0 }}>{l.inLabel}</span>
+                    <NumericInput value={eTransIn} min={0} max={eDur} width={34} color={eMeta.color}
+                      onChange={(v) => updateEffect(selectedEffect.id, { transitionIn: Math.min(v, eDur - (eReverse ? eTransOut : 0)) })} />
+                    <span style={{ fontSize: 9, color: C.dim, fontWeight: 600, flexShrink: 0 }}>{l.holdLabel}: {eHold.toFixed(1)}s</span>
+                    <label style={{ display: "flex", alignItems: "center", gap: 3, cursor: "pointer", fontSize: 9, color: eReverse ? eMeta.color : C.muted, fontWeight: 600, flexShrink: 0 }}>
+                      <input type="checkbox" checked={eReverse}
+                        onChange={(e) => updateEffect(selectedEffect.id, { reverse: e.target.checked, transitionOut: e.target.checked && eTransOut === 0 ? eTransIn : eTransOut })}
+                        style={{ accentColor: eMeta.color, width: 11, height: 11 }} />
+                      Return
+                    </label>
+                    <span style={{ fontSize: 9, color: C.muted, flexShrink: 0, visibility: eReverse ? "visible" : "hidden" }}>{l.outLabel}</span>
+                    <NumericInput value={eTransOut} min={0} max={eDur - eTransIn} width={34} color={eMeta.color}
+                      onChange={(v) => updateEffect(selectedEffect.id, { transitionOut: v })}
+                      style={{ visibility: eReverse ? "visible" : "hidden" }} />
+                  </>
+                );
+              })() : (
+                <span style={{ fontSize: 11, color: C.muted }}>Click timeline to place playhead. S to split. F to freeze frame.</span>
               )}
-              <Button variant="danger" size="sm" onClick={() => { if (selectedClipIndex !== null && clips.length > 1) deleteClip(selectedClipIndex); }} disabled={clips.length <= 1}>Delete</Button>
-
-              {/* Speed controls — only for normal clips */}
-              {selClip.type !== 'freeze' && (
+            </div>
+            {/* Right: Delete + Add Effect — always pinned */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+              {selClip && (
+                <Button variant="danger" size="sm" onClick={() => { if (selectedClipIndex !== null && clips.length > 1) deleteClip(selectedClipIndex); }} disabled={clips.length <= 1}>Delete</Button>
+              )}
+              {selectedEffect && (
+                <Button variant="danger" size="sm" onClick={() => { removeEffect(selectedEffect.id); setIsEditingZoomPan(false); }}>Delete</Button>
+              )}
+              <div style={{ position: "relative" }}>
+                <Button variant="secondary" size="sm" onClick={() => setShowAddEffectMenu((v) => !v)}>+ Effect</Button>
+                {showAddEffectMenu && (
+                  <>
+                  <div onClick={() => setShowAddEffectMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 29 }} />
+                  <div style={{ position: "absolute", bottom: 32, right: 0, zIndex: 30, background: "#1a1a24", border: `1px solid ${C.border}`, borderRadius: 6, padding: 4, minWidth: 130, boxShadow: "0 8px 24px rgba(0,0,0,0.5)" }}>
+                    {(Object.entries(EFFECT_META) as [EffectType, { label: string; color: string }][]).map(([type, meta]) => (
+                      <div key={type}
+                        onClick={() => {
+                          const start = outputTime;
+                          const end = Math.min(start + 5, outputDuration);
+                          if (end - start < 0.5) return;
+                          const defaults: Record<string, Partial<Omit<TimelineEffect, 'id'>>> = {
+                            'zoom-pan': { transitionIn: 1, transitionOut: 1, reverse: true, zoomPan: { ...DEFAULT_ZOOM_PAN } },
+                            'spotlight': { transitionIn: 0.5, transitionOut: 0.5, reverse: true, spotlight: { x: 0.5, y: 0.5, radius: 0.15, dimOpacity: 0.7 } },
+                            'blur': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, blur: { x: 0.3, y: 0.3, width: 0.4, height: 0.4, radius: 20 } },
+                            'text': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, text: { content: 'Text', x: 0.5, y: 0.5, fontSize: 5, color: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif', bold: true, italic: false, underline: false, background: '', align: 'center' as const } },
+                            'fade': { transitionIn: 1, transitionOut: 1, reverse: true, fade: { color: '#000000', opacity: 1 } },
+                          };
+                          addEffect({ type, startTime: start, endTime: end, ...defaults[type] });
+                          setShowAddEffectMenu(false);
+                        }}
+                        style={{ padding: "6px 10px", borderRadius: 4, cursor: "pointer", display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: C.text, transition: "background 0.1s" }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                      >
+                        <div style={{ width: 8, height: 8, borderRadius: 2, background: meta.color, flexShrink: 0 }} />
+                        {meta.label}
+                      </div>
+                    ))}
+                  </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+          {/* ROW 2: Effect-specific controls (or clip speed) — only shows when something is selected */}
+          {(selClip || selectedEffect) && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 12px 6px", minHeight: 30, borderTop: `1px solid rgba(255,255,255,0.03)` }}>
+              {selClip && selClip.type !== 'freeze' && (
                 <>
-                  <div style={{ width: 1, height: 20, background: C.border }} />
-                  <span style={{ fontSize: 11, color: C.muted }}>Speed</span>
+                  <span style={{ fontSize: 10, color: C.muted }}>Speed</span>
                   <input type="range" min="0.25" max="30" step="0.25" value={selClip.speed}
                     onChange={(e) => setClipSpeedLive(selectedClipIndex!, parseFloat(e.target.value))}
                     onMouseUp={() => commitSpeedChange()}
                     onTouchEnd={() => commitSpeedChange()}
                     style={{ width: 80, accentColor: "#6366f1" }} />
-                  <NumericInput value={selClip.speed} min={0.25} max={30} width={38} color={selClip.speed !== 1 ? "#a855f7" : C.dim}
+                  <NumericInput value={selClip.speed} min={0.25} max={30} width={36} color={selClip.speed !== 1 ? "#a855f7" : C.dim}
                     onChange={(v) => setClipSpeed(selectedClipIndex!, v)} />
-                  <span style={{ fontSize: 11, color: C.muted }}>x</span>
+                  <span style={{ fontSize: 10, color: C.muted }}>x</span>
                   {selClip.speed > 1 && (
                     <>
-                      <span style={{ fontSize: 10, color: C.muted, marginLeft: 2 }}>
+                      <span style={{ fontSize: 9, color: C.muted }}>
                         ({((selClip.sourceEnd - selClip.sourceStart)).toFixed(0)}s→{((selClip.sourceEnd - selClip.sourceStart) / selClip.speed).toFixed(0)}s)
                       </span>
-                      <div style={{ width: 1, height: 20, background: C.border }} />
                       <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
-                        <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} title="Plays all frames faster (fast-forward effect)" style={{
-                          padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
+                        <button onClick={() => setClipSkipFrames(selectedClipIndex!, false)} title="Fast-forward" style={{
+                          padding: "2px 6px", borderRadius: 4, border: "none", fontSize: 9, fontWeight: 600,
                           background: !selClip.skipFrames ? "rgba(168,85,247,0.2)" : "transparent",
-                          color: !selClip.skipFrames ? "#a855f7" : C.muted,
-                          cursor: "pointer", fontFamily: "inherit",
+                          color: !selClip.skipFrames ? "#a855f7" : C.muted, cursor: "pointer", fontFamily: "inherit",
                         }}>Speed up</button>
-                        <button onClick={() => setClipSkipFrames(selectedClipIndex!, true)} title="Drops frames for clean jump-cuts (no jitter)" style={{
-                          padding: "3px 8px", borderRadius: 4, border: "none", fontSize: 10, fontWeight: 600,
+                        <button onClick={() => setClipSkipFrames(selectedClipIndex!, true)} title="Time-lapse" style={{
+                          padding: "2px 6px", borderRadius: 4, border: "none", fontSize: 9, fontWeight: 600,
                           background: selClip.skipFrames ? "rgba(245,158,11,0.2)" : "transparent",
-                          color: selClip.skipFrames ? "#f59e0b" : C.muted,
-                          cursor: "pointer", fontFamily: "inherit",
+                          color: selClip.skipFrames ? "#f59e0b" : C.muted, cursor: "pointer", fontFamily: "inherit",
                         }}>Time-lapse</button>
                       </div>
                     </>
                   )}
                 </>
               )}
-
-            </>
-          ) : selectedEffect ? ((() => {
-            const eMeta = EFFECT_META[selectedEffect.type];
-            const eDur = selectedEffect.endTime - selectedEffect.startTime;
-            const eTransIn = selectedEffect.transitionIn ?? 0;
-            const eTransOut = selectedEffect.transitionOut ?? 0;
-            const eReverse = selectedEffect.reverse ?? false;
-            const eHold = Math.max(0, eDur - eTransIn - (eReverse ? eTransOut : 0));
-
-            const labelNames: Record<string, { inLabel: string; outLabel: string; holdLabel: string }> = {
-              'zoom-pan': { inLabel: 'Zoom In', outLabel: 'Zoom Out', holdLabel: 'Hold' },
-              'spotlight': { inLabel: 'Fade In', outLabel: 'Fade Out', holdLabel: 'Hold' },
-              'blur': { inLabel: 'Blur In', outLabel: 'Blur Out', holdLabel: 'Hold' },
-              'text': { inLabel: 'Appear', outLabel: 'Disappear', holdLabel: 'Visible' },
-              'fade': { inLabel: 'Fade In', outLabel: 'Fade Out', holdLabel: 'Hold' },
-            };
-            const labels = labelNames[selectedEffect.type] || labelNames['zoom-pan'];
-            return (
-            <>
-              <div style={{ width: 8, height: 8, borderRadius: 2, background: eMeta.color, flexShrink: 0 }} />
-              <span style={{ fontSize: 12, color: eMeta.color, fontWeight: 600 }}>{eMeta.label}</span>
-              <span style={{ fontSize: 10, color: C.muted }}>{eDur.toFixed(1)}s</span>
-              <div style={{ width: 1, height: 20, background: C.border }} />
-              {/* Transition timing: In → Hold → Out */}
-              <span style={{ fontSize: 9, color: C.muted }}>{labels.inLabel}</span>
-              <NumericInput value={eTransIn} min={0} max={eDur} width={38} color={eMeta.color}
-                onChange={(v) => updateEffect(selectedEffect.id, { transitionIn: Math.min(v, eDur - (eReverse ? eTransOut : 0)) })} />
-              <span style={{ fontSize: 9, color: C.muted }}>s</span>
-              <span style={{ fontSize: 9, color: C.dim, fontWeight: 600 }}>{labels.holdLabel}: {eHold.toFixed(1)}s</span>
-              {/* Return / Reverse toggle + out duration — always rendered to prevent layout shift */}
-              <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", fontSize: 9, color: eReverse ? eMeta.color : C.muted, fontWeight: 600 }}>
-                <input type="checkbox" checked={eReverse}
-                  onChange={(e) => updateEffect(selectedEffect.id, { reverse: e.target.checked, transitionOut: e.target.checked && eTransOut === 0 ? eTransIn : eTransOut })}
-                  style={{ accentColor: eMeta.color, width: 12, height: 12 }} />
-                Return
-              </label>
-              <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>{labels.outLabel}</span>
-              <NumericInput value={eTransOut} min={0} max={eDur - eTransIn} width={38} color={eMeta.color}
-                onChange={(v) => updateEffect(selectedEffect.id, { transitionOut: v })}
-                style={{ visibility: eReverse ? "visible" : "hidden" }} />
-              <span style={{ fontSize: 9, color: C.muted, visibility: eReverse ? "visible" : "hidden" }}>s</span>
-              <div style={{ width: 1, height: 20, background: C.border }} />
-              {/* Zoom-specific: Easing */}
-              {selectedEffect.type === 'zoom-pan' && (
-                <>
-                  {selectedEffect.zoomPan && (
-                    <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
-                      {(['linear', 'ease-in', 'ease-out', 'ease-in-out'] as EasingPreset[]).map((preset) => (
-                        <button key={preset} onClick={() => updateEffect(selectedEffect.id, { zoomPan: { ...selectedEffect.zoomPan!, easing: preset } })}
-                          style={{
-                            padding: "3px 6px", borderRadius: 4, border: "none", fontSize: 9, fontWeight: 600,
-                            background: selectedEffect.zoomPan?.easing === preset ? "rgba(99,102,241,0.2)" : "transparent",
-                            color: selectedEffect.zoomPan?.easing === preset ? "#818cf8" : C.muted,
-                            cursor: "pointer", fontFamily: "inherit",
-                          }}>
-                          {preset === 'ease-in-out' ? 'Smooth' : preset === 'ease-in' ? 'Ease In' : preset === 'ease-out' ? 'Ease Out' : 'Linear'}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </>
+              {selectedEffect && selectedEffect.type === 'zoom-pan' && selectedEffect.zoomPan && (
+                <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
+                  {(['linear', 'ease-in', 'ease-out', 'ease-in-out'] as EasingPreset[]).map((preset) => (
+                    <button key={preset} onClick={() => updateEffect(selectedEffect.id, { zoomPan: { ...selectedEffect.zoomPan!, easing: preset } })}
+                      style={{
+                        padding: "2px 6px", borderRadius: 4, border: "none", fontSize: 9, fontWeight: 600,
+                        background: selectedEffect.zoomPan?.easing === preset ? "rgba(99,102,241,0.2)" : "transparent",
+                        color: selectedEffect.zoomPan?.easing === preset ? "#818cf8" : C.muted,
+                        cursor: "pointer", fontFamily: "inherit",
+                      }}>
+                      {preset === 'ease-in-out' ? 'Smooth' : preset === 'ease-in' ? 'Ease In' : preset === 'ease-out' ? 'Ease Out' : 'Linear'}
+                    </button>
+                  ))}
+                </div>
               )}
-              {/* Non-zoom effect-specific controls */}
-              {selectedEffect.type !== 'zoom-pan' && (
+              {selectedEffect && selectedEffect.type !== 'zoom-pan' && (
                 <EffectInspector effect={selectedEffect} onUpdate={(partial) => updateEffect(selectedEffect.id, partial)} />
               )}
-              <Button variant="danger" size="sm" onClick={() => { removeEffect(selectedEffect.id); setIsEditingZoomPan(false); }}>Delete</Button>
-            </>
-            );
-          })()) : (
-            <span style={{ fontSize: 12, color: C.muted }}>Click timeline to place playhead. S to split. F to freeze frame. Ctrl+Scroll to zoom.</span>
+            </div>
           )}
-          {/* Add Effect button — always visible, outside scrollable area */}
-          <div style={{ marginLeft: "auto", position: "relative" }}>
-            <Button variant="secondary" size="sm" onClick={() => setShowAddEffectMenu((v) => !v)}>
-              + Effect
-            </Button>
-            {showAddEffectMenu && (
-              <>
-              <div onClick={() => setShowAddEffectMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 29 }} />
-              <div style={{
-                position: "absolute", bottom: 36, right: 0, zIndex: 30,
-                background: "#1a1a24", border: `1px solid ${C.border}`, borderRadius: 6,
-                padding: 4, minWidth: 130, boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-              }}>
-                {(Object.entries(EFFECT_META) as [EffectType, { label: string; color: string }][]).map(([type, meta]) => (
-                  <div key={type}
-                    onClick={() => {
-                      const start = outputTime;
-                      const end = Math.min(start + 5, outputDuration);
-                      if (end - start < 0.5) return;
-                      const defaults: Record<string, Partial<Omit<TimelineEffect, 'id'>>> = {
-                        'zoom-pan': { transitionIn: 1, transitionOut: 1, reverse: true, zoomPan: { ...DEFAULT_ZOOM_PAN } },
-                        'spotlight': { transitionIn: 0.5, transitionOut: 0.5, reverse: true, spotlight: { x: 0.5, y: 0.5, radius: 0.15, dimOpacity: 0.7 } },
-                        'blur': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, blur: { x: 0.3, y: 0.3, width: 0.4, height: 0.4, radius: 20 } },
-                        'text': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, text: { content: 'Text', x: 0.5, y: 0.5, fontSize: 5, color: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif', bold: true, italic: false, underline: false, background: '', align: 'center' as const } },
-                        'fade': { transitionIn: 1, transitionOut: 1, reverse: true, fade: { color: '#000000', opacity: 1 } },
-                      };
-                      const newEffect: Omit<TimelineEffect, 'id'> = {
-                        type,
-                        startTime: start,
-                        endTime: end,
-                        ...defaults[type],
-                      };
-                      addEffect(newEffect);
-                      setShowAddEffectMenu(false);
-                    }}
-                    style={{
-                      padding: "6px 10px", borderRadius: 4, cursor: "pointer",
-                      display: "flex", alignItems: "center", gap: 8,
-                      fontSize: 12, color: C.text, transition: "background 0.1s",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-                  >
-                    <div style={{ width: 8, height: 8, borderRadius: 2, background: meta.color, flexShrink: 0 }} />
-                    {meta.label}
-                  </div>
-                ))}
-              </div>
-              </>
-            )}
-          </div>
         </div>
       </div>
     </div>

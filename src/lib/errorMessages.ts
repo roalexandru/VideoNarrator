@@ -54,7 +54,9 @@ export function toUserMessage(raw: unknown): string {
     return "FFmpeg is required but not installed. Install it:\n• macOS: brew install ffmpeg\n• Windows: choco install ffmpeg\n• Linux: sudo apt install ffmpeg\nThen restart Narrator.";
   }
   if (lower.includes("ffmpeg failed") || lower.includes("ffmpegfailed")) {
-    return "Video processing failed. Make sure FFmpeg is up to date (v5+ recommended) and try again.";
+    // Show the actual ffmpeg error detail so users (and developers) can diagnose
+    const detail = msg.replace(/^.*?ffmpeg\s*(failed)?:?\s*/i, "").trim();
+    return `Video processing failed${detail ? `: ${detail}` : ""}. Make sure FFmpeg is up to date (v5+ recommended).`;
   }
 
   // ── Video probe ──

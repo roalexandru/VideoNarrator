@@ -65,6 +65,9 @@ export function ProcessingScreen() {
     let videoPath = project.videoFile!.path;
     const hasEdits = editSnapshot.clips.length > 1
       || editSnapshot.clips.some((c) => c.speed !== 1.0)
+      || editSnapshot.clips.some((c) => c.type === 'freeze')
+      || editSnapshot.clips.some((c) => !!c.zoomPan)
+      || (editSnapshot.effects && editSnapshot.effects.length > 0 && editSnapshot.effects.some((e) => e.type === 'zoom-pan'))
       || (editSnapshot.clips.length === 1 && editSnapshot.sourceDuration > 0
           && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
 
@@ -72,6 +75,9 @@ export function ProcessingScreen() {
       trackEvent("video_edited", {
         clips_count: editSnapshot.clips.length,
         has_speed_change: editSnapshot.clips.some(c => c.speed !== 1.0),
+        has_freeze: editSnapshot.clips.some(c => c.type === 'freeze'),
+        has_zoom: editSnapshot.clips.some(c => !!c.zoomPan) || (editSnapshot.effects || []).some(e => e.type === 'zoom-pan'),
+        effects_count: (editSnapshot.effects || []).length,
         has_trim: editSnapshot.clips.length === 1 && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5),
       });
       try {
@@ -118,6 +124,7 @@ export function ProcessingScreen() {
         videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
         editSnapshot.setEditedVideoPath(videoPath);
       } catch (err: unknown) {
+        console.error("apply_video_edits failed:", err);
         trackError("apply_video_edits", err);
         proc.setError(toUserMessage(err));
         proc.setPhase("error");
@@ -364,9 +371,12 @@ export function ProcessingScreen() {
         </div>
       </div>
 
-      {/* Error */}
+      {/* Error — click to copy */}
       {proc.error && (
-        <div style={{ marginTop: 16, padding: "12px 16px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, fontSize: 13, color: "#f87171" }}>
+        <div
+          onClick={() => { navigator.clipboard.writeText(proc.error!).catch(() => {}); }}
+          title="Click to copy error message"
+          style={{ marginTop: 16, padding: "12px 16px", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, fontSize: 13, color: "#f87171", cursor: "pointer", userSelect: "text" }}>
           {proc.error}
         </div>
       )}

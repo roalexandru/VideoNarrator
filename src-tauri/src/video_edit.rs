@@ -11,40 +11,41 @@ use tokio::process::Command;
 
 // ── Validation helpers (S1–S5) ──
 
-/// Validate a video path is within the user's home directory or temp (S1: path traversal).
+/// Validate a video path blocks obvious traversal attacks but allows user-selected files.
+/// Files selected via native dialog can be anywhere on disk — we only reject paths that
+/// try to escape via `..` components or point at system-critical directories.
 fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
     let path = PathBuf::from(p);
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok();
-    let temp = std::env::temp_dir();
 
-    // Check existing paths via canonicalization
-    if let Ok(canonical) = std::fs::canonicalize(&path) {
-        if let Some(ref h) = home {
-            if canonical.starts_with(h) {
-                return Ok(canonical);
-            }
-        }
-        if canonical.starts_with(&temp) {
-            return Ok(canonical);
+    // Block raw ".." components (path traversal)
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return Err(NarratorError::ExportError(format!(
+                "Path contains '..': {p}"
+            )));
         }
     }
-    // Allow non-existent output paths if parent exists and is valid
-    if let Some(parent) = path.parent() {
-        if let Ok(canonical_parent) = std::fs::canonicalize(parent) {
-            if let Some(ref h) = home {
-                if canonical_parent.starts_with(h) {
-                    return Ok(path);
-                }
-            }
-            if canonical_parent.starts_with(&temp) {
-                return Ok(path);
+
+    // Block system-critical paths (Unix)
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(canonical) = std::fs::canonicalize(&path) {
+            let s = canonical.to_string_lossy();
+            if s.starts_with("/etc")
+                || s.starts_with("/bin")
+                || s.starts_with("/sbin")
+                || s.starts_with("/usr/bin")
+                || s.starts_with("/usr/sbin")
+                || s.starts_with("/System")
+            {
+                return Err(NarratorError::ExportError(format!(
+                    "Path not allowed: {p}"
+                )));
             }
         }
     }
-    Err(NarratorError::ExportError(format!("Path not allowed: {p}")))
+
+    Ok(path)
 }
 
 /// Validate clip parameters (S2: DoS, F4: bounds).
@@ -321,7 +322,7 @@ pub async fn extract_single_frame(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NarratorError::FfmpegFailed(format!(
             "Frame extraction failed: {}",
-            &stderr[..stderr.len().min(300)]
+            &stderr[stderr.len().saturating_sub(500)..]
         )));
     }
 
@@ -368,7 +369,7 @@ async fn process_freeze_clip(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NarratorError::FfmpegFailed(format!(
             "Freeze frame extraction failed: {}",
-            &stderr[..stderr.len().min(300)]
+            &stderr[stderr.len().saturating_sub(500)..]
         )));
     }
 
@@ -416,7 +417,7 @@ async fn process_freeze_clip(
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(NarratorError::FfmpegFailed(format!(
             "Freeze clip creation failed: {}",
-            &stderr[..stderr.len().min(300)]
+            &stderr[stderr.len().saturating_sub(500)..]
         )));
     }
 
@@ -474,6 +475,55 @@ fn build_zoompan_filter(
         w = width,
         h = height,
         fps = fps.min(MAX_OUTPUT_FPS).round() as u32,
+    )
+}
+
+/// Build a crop+scale filter for zoom/pan on VIDEO clips (not stills).
+/// Uses ffmpeg's `crop` filter with expression-based animated parameters
+/// and `n` (frame number) for interpolation. This avoids the zoompan filter
+/// issues with video input (zoompan is designed for still images).
+/// Build a crop+scale filter for zoom/pan on VIDEO clips.
+/// Uses ffmpeg's `crop` filter with expression-based animated parameters.
+/// All values are clamped to valid ranges using min/max to prevent ffmpeg errors.
+fn build_zoompan_filter_for_video(
+    effect: &ZoomPanEffect,
+    width: u32,
+    height: u32,
+    total_frames: f64,
+) -> String {
+    let w = width as f64;
+    let h = height as f64;
+
+    let sx = effect.start_region.x.clamp(0.0, 0.99);
+    let sy = effect.start_region.y.clamp(0.0, 0.99);
+    let sw = effect.start_region.width.clamp(0.05, 1.0);
+    let sh = effect.start_region.height.clamp(0.05, 1.0);
+    let ex = effect.end_region.x.clamp(0.0, 0.99);
+    let ey = effect.end_region.y.clamp(0.0, 0.99);
+    let ew = effect.end_region.width.clamp(0.05, 1.0);
+    let eh = effect.end_region.height.clamp(0.05, 1.0);
+
+    let tf = total_frames.max(1.0);
+
+    let progress = match effect.easing {
+        EasingPreset::Linear => format!("min(n/{tf},1)"),
+        EasingPreset::EaseIn => format!("min(n/{tf},1)*min(n/{tf},1)"),
+        EasingPreset::EaseOut => format!("min(n/{tf},1)*(2-min(n/{tf},1))"),
+        EasingPreset::EaseInOut => format!(
+            "if(lt(n/{tf},0.5),2*min(n/{tf},1)*min(n/{tf},1),-1+(4-2*min(n/{tf},1))*min(n/{tf},1))"
+        ),
+    };
+
+    // Crop dimensions — clamped to at least 2px and at most iw/ih
+    let crop_w = format!("max(2,min(iw,({sw}+({ew}-{sw})*({progress}))*{w}))");
+    let crop_h = format!("max(2,min(ih,({sh}+({eh}-{sh})*({progress}))*{h}))");
+    // Crop position — clamped so crop doesn't extend past frame edge
+    let crop_x = format!("max(0,min(iw-out_w,({sx}+({ex}-{sx})*({progress}))*{w}))");
+    let crop_y = format!("max(0,min(ih-out_h,({sy}+({ey}-{sy})*({progress}))*{h}))");
+
+    // Ensure even dimensions for h264 compatibility
+    format!(
+        "crop='{crop_w}':'{crop_h}':'{crop_x}':'{crop_y}',scale={width}:{height}:flags=lanczos,setsar=1"
     )
 }
 
@@ -581,16 +631,18 @@ pub async fn apply_edits(
 
         // Build video filter chain
         let mut vfilters = Vec::new();
+        let mut afilters = Vec::new();
         let needs_speed = (clip.speed - 1.0).abs() > 0.01;
+        let has_zoom = clip.zoom_pan.is_some();
 
-        // Zoom/Pan effect (must come before speed adjustment)
+        // Zoom/Pan effect — animated crop+scale for video clips
         if let Some(ref zp) = clip.zoom_pan {
-            let clip_duration = (clip.end_seconds - clip.start_seconds) / clip.speed;
-            let zp_filter =
-                build_zoompan_filter(zp, meta.width, meta.height, meta.fps, clip_duration);
+            let clip_duration = clip.end_seconds - clip.start_seconds;
+            let total_frames = (clip_duration * meta.fps.min(MAX_OUTPUT_FPS)).round().max(1.0);
+            let zp_filter = build_zoompan_filter_for_video(
+                zp, meta.width, meta.height, total_frames,
+            );
             vfilters.push(zp_filter);
-            // zoompan outputs at its own resolution, add scale to ensure consistency
-            vfilters.push(format!("scale={}:{}", meta.width, meta.height));
         }
 
         if let Some(fps) = clip.fps_override {
@@ -599,29 +651,17 @@ pub async fn apply_edits(
 
         if needs_speed {
             if clip.skip_frames {
-                // Frame dropping mode: select every Nth frame, adjust timestamps
-                // This produces clean jump cuts instead of fast-forward jitter
-                // e.g., at 2x speed, keep every 2nd frame; at 3x, every 3rd
                 let n = clip.speed.round().max(2.0) as u32;
                 vfilters.push(format!("select='not(mod(n\\,{}))'", n));
                 vfilters.push("setpts=N/FRAME_RATE/TB".to_string());
             } else {
-                // Normal speed mode: play all frames faster
                 vfilters.push(format!("setpts={:.4}*PTS", 1.0 / clip.speed));
             }
         }
 
-        if !vfilters.is_empty() {
-            args.extend(["-vf".into(), vfilters.join(",")]);
-        }
-
-        // Audio handling for speed changes
-        if needs_speed && clip.skip_frames {
-            // Skip frames mode: drop audio entirely (it would be choppy)
-            args.extend(["-an".into()]);
-        } else if needs_speed {
-            // ffmpeg atempo supports 0.5-100.0 in a single filter since v4.0
-            // Chain only if below 0.5
+        // Audio filter handling (actual -an or -c:a is added below with the encoder args)
+        let drop_audio = needs_speed && clip.skip_frames;
+        if needs_speed && !clip.skip_frames {
             let mut atempo_chain = Vec::new();
             let mut remaining = clip.speed;
             while remaining < 0.5 {
@@ -629,13 +669,30 @@ pub async fn apply_edits(
                 remaining /= 0.5;
             }
             atempo_chain.push(format!("atempo={:.4}", remaining));
-            args.extend(["-af".into(), atempo_chain.join(",")]);
-        } else if vfilters.is_empty() {
-            // No filters needed, copy codecs
-            args.extend(["-c".into(), "copy".into()]);
+            afilters = atempo_chain;
         }
 
+        // Always re-encode every clip with identical settings for reliable concat.
+        // Stream copy mixing causes "no streams" errors due to format mismatches.
+        vfilters.push("format=yuv420p".to_string());
+        args.extend(["-vf".into(), vfilters.join(",")]);
+        args.extend([
+            "-c:v".into(), "libx264".into(),
+            "-preset".into(), "medium".into(),
+            "-crf".into(), "15".into(),
+        ]);
+        if !afilters.is_empty() {
+            args.extend(["-af".into(), afilters.join(",")]);
+        }
+        if !drop_audio {
+            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "256k".into()]);
+        } else {
+            args.extend(["-an".into()]);
+        }
+        args.extend(["-movflags".into(), "+faststart".into()]);
         args.push(clip_path.to_string_lossy().to_string());
+
+        tracing::info!("Clip {i}: zoom={has_zoom} speed={} filters={}", clip.speed, vfilters.len());
 
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
@@ -646,19 +703,45 @@ pub async fn apply_edits(
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!("Clip {} failed: {}", i, &stderr[..stderr.len().min(300)]);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
+            tracing::error!("Clip {i} stderr: {stderr}");
+            tracing::error!("Clip {i} stdout: {stdout}");
+            // Get the last meaningful part of stderr (skip the banner)
+            let err_tail = stderr[stderr.len().saturating_sub(800)..].trim();
+            // Find lines with actual errors (not the banner)
+            let meaningful: String = err_tail
+                .lines()
+                .filter(|l| {
+                    let ll = l.to_lowercase();
+                    ll.contains("error") || ll.contains("invalid") || ll.contains("no such")
+                        || ll.contains("not found") || ll.contains("failed") || ll.contains("unknown")
+                        || ll.contains("unrecognized") || ll.contains("does not")
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let detail = if meaningful.is_empty() { err_tail.to_string() } else { meaningful };
             return Err(NarratorError::FfmpegFailed(format!(
-                "Clip {i} failed: {}",
-                &stderr[..stderr.len().min(200)]
+                "Clip {i} failed: {detail}"
             )));
         }
 
+        // Verify clip file was actually created and has content
+        let clip_size = tokio::fs::metadata(&clip_path).await.map(|m| m.len()).unwrap_or(0);
+        if clip_size == 0 {
+            tracing::error!("Clip {i} produced empty file: {}", clip_path.display());
+            tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
+            return Err(NarratorError::FfmpegFailed(format!(
+                "Clip {i} produced empty output. Try removing zoom/pan effects or simplifying edits on this clip."
+            )));
+        }
+        tracing::info!("Clip {i} OK: {} bytes", clip_size);
         clip_files.push(clip_path);
     }
 
     on_progress(85.0);
 
-    // Concat all clips
+    // Concat all clips — all clips are re-encoded with identical h264 settings
     if clip_files.len() == 1 {
         tokio::fs::rename(&clip_files[0], output_path).await?;
     } else {
@@ -677,17 +760,19 @@ pub async fn apply_edits(
             .join("\n");
         tokio::fs::write(&concat_list, &list_content).await?;
 
+        tracing::info!("Concat: {} clips", clip_files.len());
+
+        // All clips are identically encoded (h264/aac), so stream-copy concat should work
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args(["-y", "-f", "concat", "-safe", "0", "-i"])
             .arg(concat_list.as_os_str())
-            .args(["-c", "copy", output_path])
+            .args(["-c", "copy", "-movflags", "+faststart", output_path])
             .output()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
         if !output.status.success() {
-            // Fallback: re-encode concat
             tracing::warn!("Stream-copy concat failed, falling back to re-encode");
             let output2 = Command::new(ffmpeg.as_os_str())
                 .no_window()
@@ -699,11 +784,15 @@ pub async fn apply_edits(
                     "-preset",
                     "medium",
                     "-crf",
-                    "18",
+                    "15",
+                    "-pix_fmt",
+                    "yuv420p",
                     "-c:a",
                     "aac",
                     "-b:a",
-                    "192k",
+                    "256k",
+                    "-movflags",
+                    "+faststart",
                     output_path,
                 ])
                 .output()
@@ -714,7 +803,7 @@ pub async fn apply_edits(
                 let stderr = String::from_utf8_lossy(&output2.stderr);
                 return Err(NarratorError::FfmpegFailed(format!(
                     "Concat failed: {}",
-                    &stderr[..stderr.len().min(300)]
+                    &stderr[stderr.len().saturating_sub(500)..]
                 )));
             }
         }
@@ -769,7 +858,7 @@ pub async fn merge_audio_video(
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NarratorError::FfmpegFailed(format!(
                 "Audio merge failed: {}",
-                &stderr[..stderr.len().min(300)]
+                &stderr[stderr.len().saturating_sub(500)..]
             )));
         }
 
@@ -836,7 +925,7 @@ pub async fn merge_audio_video(
             let stderr = String::from_utf8_lossy(&fallback.stderr);
             return Err(NarratorError::FfmpegFailed(format!(
                 "Audio merge failed: {}",
-                &stderr[..stderr.len().min(300)]
+                &stderr[stderr.len().saturating_sub(500)..]
             )));
         }
     }

@@ -489,6 +489,41 @@ pub fn build_user_message(
     Ok(serde_json::Value::Array(content))
 }
 
+/// Check if an error is a rate limit (429) that should be retried.
+fn is_rate_limit_error(err: &NarratorError) -> bool {
+    let msg = err.to_string().to_lowercase();
+    msg.contains("429") || msg.contains("rate limit") || msg.contains("too many requests")
+        || msg.contains("rate_limit") || msg.contains("overloaded")
+}
+
+/// Call an AI provider with exponential backoff on rate limit errors.
+async fn generate_with_retry(
+    provider: &dyn AiProvider,
+    system_prompt: &str,
+    user_message: serde_json::Value,
+) -> Result<String, NarratorError> {
+    let max_retries = 3;
+    let mut result = Err(NarratorError::ApiError("No attempts made".into()));
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let delay_secs = 2u64.pow(attempt as u32);
+            tracing::warn!(
+                "Rate limited, retrying in {delay_secs}s (attempt {attempt}/{max_retries})"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+        }
+        match provider.generate(system_prompt, user_message.clone()).await {
+            Ok(text) => return Ok(text),
+            Err(e) if is_rate_limit_error(&e) && attempt < max_retries => {
+                result = Err(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    result
+}
+
 pub async fn generate_narration(
     provider: &dyn AiProvider,
     system_prompt: &str,
@@ -496,7 +531,7 @@ pub async fn generate_narration(
     _style: &str,
     _language: &str,
 ) -> Result<NarrationScript, NarratorError> {
-    let response_text = provider.generate(system_prompt, user_message).await?;
+    let response_text = generate_with_retry(provider, system_prompt, user_message).await?;
 
     // Try to parse the JSON response
     // Strip markdown code fences if present
@@ -600,7 +635,7 @@ pub async fn translate_script(
 
     let user_message = json!(script_json);
 
-    let response_text = provider.generate(&system_prompt, user_message).await?;
+    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
 
     let json_text = response_text
         .trim()
@@ -640,7 +675,7 @@ pub async fn refine_segment(
         Instruction: {instruction}"
     ));
 
-    let response = provider.generate(system_prompt, user_message).await?;
+    let response = generate_with_retry(provider, system_prompt, user_message).await?;
 
     // Clean up: remove any accidental quotes, markdown, or explanations
     let refined = response
