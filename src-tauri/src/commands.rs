@@ -594,13 +594,20 @@ pub async fn generate_narration(
         })
         .ok();
 
-    // Auto-save project
+    // Auto-save project — preserve existing edits and original video path.
+    // Load the current project config first so we don't overwrite edit_clips/effects.
+    let existing_config = project_store::load_project(&project_id).ok();
+    let original_video_path = existing_config
+        .as_ref()
+        .map(|c| c.video_path.clone())
+        .unwrap_or_else(|| params.video_path.clone());
     let project_config = ProjectConfig {
         schema_version: 1,
         id: project_id.clone(),
         title: params.title.clone(),
         description: params.description.clone(),
-        video_path: params.video_path.clone(),
+        // Always save the ORIGINAL video path, not the edited one
+        video_path: original_video_path,
         style: params.style.clone(),
         languages: {
             let mut l = vec![params.primary_language.clone()];
@@ -611,11 +618,19 @@ pub async fn generate_narration(
         frame_config: params.frame_config.clone(),
         ai_config: params.ai_config.clone(),
         custom_prompt: params.custom_prompt.clone(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: existing_config
+            .as_ref()
+            .map(|c| c.created_at.clone())
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         updated_at: chrono::Utc::now().to_rfc3339(),
-        edit_clips: None,
-        timeline_effects: None,
-        video_metadata: None,
+        // Preserve existing edits — never wipe them during generation
+        edit_clips: existing_config.as_ref().and_then(|c| c.edit_clips.clone()),
+        timeline_effects: existing_config
+            .as_ref()
+            .and_then(|c| c.timeline_effects.clone()),
+        video_metadata: existing_config
+            .as_ref()
+            .and_then(|c| c.video_metadata.clone()),
     };
     if let Err(e) = project_store::create_project(&project_config) {
         tracing::warn!("Failed to auto-save project: {e}");
