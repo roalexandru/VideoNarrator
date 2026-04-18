@@ -251,6 +251,9 @@ export function setupDefaultMocks() {
       case "extract_single_frame":
         return "/tmp/frame.jpg";
 
+      case "save_script":
+        return "/tmp/script.json";
+
       case "apply_video_edits":
         return "/tmp/edited.mp4";
 

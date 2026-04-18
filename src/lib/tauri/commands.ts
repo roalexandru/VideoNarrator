@@ -173,6 +173,9 @@ export const extractEditThumbnails = (videoPath: string, outputDir: string, coun
 export const extractSingleFrame = (videoPath: string, timestamp: number, outputPath: string) =>
   invoke<string>("extract_single_frame", { videoPath, timestamp, outputPath });
 
+export const saveScript = (projectId: string, language: string, script: import("../../types/script").NarrationScript) =>
+  invoke<string>("save_script", { projectId, language, script });
+
 export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel });
 

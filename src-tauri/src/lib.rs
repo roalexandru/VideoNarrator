@@ -140,6 +140,7 @@ pub fn run() {
             commands::apply_video_edits,
             commands::extract_edit_thumbnails,
             commands::extract_single_frame,
+            commands::save_script,
             commands::merge_audio_video,
             commands::open_folder,
             commands::list_project_frames,

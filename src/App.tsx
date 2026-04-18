@@ -301,6 +301,29 @@ export default function App() {
     };
   }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel, editClips, editEffects, buildSavePayload]);
 
+  // ── Auto-save scripts (narration edits) whenever they change ──
+  const scripts = useScriptStore((s) => s.scripts);
+  const scriptsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (view !== "editor" || !projectId) return;
+    if (Object.keys(scripts).length === 0) return;
+    if (scriptsSaveTimer.current) clearTimeout(scriptsSaveTimer.current);
+    scriptsSaveTimer.current = setTimeout(async () => {
+      try {
+        const { saveScript } = await import("./lib/tauri/commands");
+        for (const [lang, script] of Object.entries(scripts)) {
+          await saveScript(projectId, lang, script);
+        }
+      } catch (err: unknown) {
+        console.error("Script auto-save failed:", err);
+        trackError("script_auto_save", err);
+      }
+    }, 2000);
+    return () => {
+      if (scriptsSaveTimer.current) clearTimeout(scriptsSaveTimer.current);
+    };
+  }, [view, projectId, scripts]);
+
   // ── Listen for native menu events from the Rust backend ──
   useEffect(() => {
     const unlisten = listen<string>("menu-event", async (event) => {

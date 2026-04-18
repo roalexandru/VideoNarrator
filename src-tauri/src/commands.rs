@@ -1602,6 +1602,15 @@ pub async fn extract_single_frame(
 }
 
 #[tauri::command]
+pub fn save_script(
+    project_id: String,
+    language: String,
+    script: crate::models::NarrationScript,
+) -> Result<String, NarratorError> {
+    project_store::save_script(&project_id, &language, &script)
+}
+
+#[tauri::command]
 pub async fn merge_audio_video(
     video_path: String,
     audio_path: String,
