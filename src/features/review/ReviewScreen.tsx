@@ -3,6 +3,7 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore } from "../../stores/editStore";
 import { useConfigStore } from "../../stores/configStore";
+import { useWizardStore } from "../../hooks/useWizardNavigation";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
@@ -33,6 +34,7 @@ const REFINE_PRESETS = [
 
 export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
+  const currentStep = useWizardStore((s) => s.currentStep);
   const editedVideoPath = useEditStore((s) => s.editedVideoPath);
   const projectId = useProjectStore((s) => s.projectId);
   const configLanguages = useConfigStore((s) => s.languages);
@@ -297,7 +299,11 @@ export function ReviewScreen() {
   }, [segments, setActiveSegment]);
 
   const handlePreview = useCallback(async (segmentIndex: number) => {
-    // Stop any currently playing preview
+    // Stop the full preview if it's running — prevents parallel audio playback
+    if (previewMode) {
+      stopFullPreview();
+    }
+    // Stop any currently playing individual preview
     if (previewAudioRef.current) {
       previewAudioRef.current.pause();
       previewAudioRef.current = null;
@@ -356,17 +362,42 @@ export function ReviewScreen() {
       console.error("Preview failed:", err);
       setPreviewingIdx(null);
     }
-  }, [segments, previewingIdx, previewVoice]);
+  }, [segments, previewingIdx, previewVoice, previewMode, stopFullPreview]);
 
-  // Cleanup preview audio on unmount
+  // Cleanup all preview audio on unmount
   useEffect(() => {
     return () => {
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current = null;
       }
+      // Stop full preview loop
+      previewAbortRef.current = true;
+      if (fullPreviewAudioRef.current) {
+        fullPreviewAudioRef.current.pause();
+        fullPreviewAudioRef.current = null;
+      }
     };
   }, []);
+
+  // Stop all audio when user navigates to a different wizard step
+  // (Review is step 4; any other step should stop playback since the component may stay mounted)
+  useEffect(() => {
+    if (currentStep !== 4) {
+      previewAbortRef.current = true;
+      if (fullPreviewAudioRef.current) {
+        fullPreviewAudioRef.current.pause();
+        fullPreviewAudioRef.current = null;
+      }
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+      setPreviewMode(false);
+      setPreviewSegIdx(-1);
+      setPreviewingIdx(null);
+    }
+  }, [currentStep]);
 
   // Load video
   useEffect(() => {
