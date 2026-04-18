@@ -273,6 +273,16 @@ pub struct ProjectConfig {
     /// narration prompt can be regenerated with the same inputs after load.
     #[serde(default)]
     pub context_documents: Option<serde_json::Value>,
+    /// Absolute path to the cached edited video (produced by apply_video_edits).
+    /// Exporting uses this file so the final render includes all clip + effect
+    /// edits. Invalidated by a hash mismatch against edit_clips + timeline_effects.
+    #[serde(default)]
+    pub edited_video_path: Option<String>,
+    /// Hash of the edit_clips + timeline_effects used to produce
+    /// `edited_video_path`. If the current edits hash differently, the cached
+    /// video is stale and Export will regenerate it.
+    #[serde(default)]
+    pub edited_video_plan_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

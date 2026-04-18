@@ -861,6 +861,104 @@ pub fn normalize_timeline(
     fixed
 }
 
+/// Merge adjacent segments that are shorter than a natural-speech floor.
+///
+/// Background: the AI sometimes returns many very-short segments (0.5-1.0s
+/// each) which are below what a human can naturally speak and produce
+/// unnaturally choppy narration. TTS for a 0.5s slot with 10 words of text
+/// either speeds up unnaturally or overruns the slot, desynchronizing audio.
+///
+/// This algorithmic post-pass walks the script and merges any segment whose
+/// duration falls below `min_duration` into its neighbor, preferring the
+/// next segment (so the timeline extends forward rather than backward).
+/// Runs AFTER `normalize_timeline` which already guarantees monotonic,
+/// non-overlapping segments.
+pub fn merge_short_segments(
+    segments: Vec<Segment>,
+    min_duration: f64,
+) -> Vec<Segment> {
+    if segments.len() < 2 {
+        return segments;
+    }
+
+    let mut out: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut merged_count = 0usize;
+
+    for seg in segments {
+        let seg_dur = seg.end_seconds - seg.start_seconds;
+        if seg_dur < min_duration {
+            if let Some(last) = out.last_mut() {
+                // Merge into the previous segment: extend end, concatenate text.
+                let combined_text = if last.text.trim().is_empty() {
+                    seg.text.trim().to_string()
+                } else if seg.text.trim().is_empty() {
+                    last.text.clone()
+                } else {
+                    format!("{} {}", last.text.trim(), seg.text.trim())
+                };
+                last.end_seconds = seg.end_seconds;
+                last.text = combined_text;
+                // Inherit the longer pause so we don't accidentally clip a gap.
+                if seg.pause_after_ms > last.pause_after_ms {
+                    last.pause_after_ms = seg.pause_after_ms;
+                }
+                // Merge frame refs, dedup.
+                last.frame_refs.extend(seg.frame_refs.iter());
+                last.frame_refs.sort_unstable();
+                last.frame_refs.dedup();
+                merged_count += 1;
+                continue;
+            }
+        }
+        out.push(seg);
+    }
+
+    // After merging, tail segment might still be short (no successor to merge
+    // into). Fold it back into its predecessor if so.
+    if out.len() >= 2 {
+        let tail_dur = out
+            .last()
+            .map(|s| s.end_seconds - s.start_seconds)
+            .unwrap_or(0.0);
+        if tail_dur < min_duration {
+            let tail = out.pop().unwrap();
+            let prev = out.last_mut().unwrap();
+            let combined = if prev.text.trim().is_empty() {
+                tail.text.trim().to_string()
+            } else if tail.text.trim().is_empty() {
+                prev.text.clone()
+            } else {
+                format!("{} {}", prev.text.trim(), tail.text.trim())
+            };
+            prev.end_seconds = tail.end_seconds;
+            prev.text = combined;
+            if tail.pause_after_ms > prev.pause_after_ms {
+                prev.pause_after_ms = tail.pause_after_ms;
+            }
+            prev.frame_refs.extend(tail.frame_refs.iter());
+            prev.frame_refs.sort_unstable();
+            prev.frame_refs.dedup();
+            merged_count += 1;
+        }
+    }
+
+    // Re-index after merges.
+    for (i, s) in out.iter_mut().enumerate() {
+        s.index = i;
+    }
+
+    if merged_count > 0 {
+        tracing::info!(
+            "merge_short_segments: merged {} short (<{:.2}s) segments → {} segments",
+            merged_count,
+            min_duration,
+            out.len()
+        );
+    }
+
+    out
+}
+
 /// Check if an error is a rate limit (429) that should be retried.
 fn is_rate_limit_error(err: &NarratorError) -> bool {
     let msg = err.to_string().to_lowercase();
@@ -918,8 +1016,9 @@ pub async fn generate_narration(
     let image_count = parts
         .map(|p| p.iter().filter(|v| v["type"] == "image").count())
         .unwrap_or(0);
+    let was_chunked = image_count > MAX_FRAMES_PER_CALL;
 
-    let response_text = if image_count > MAX_FRAMES_PER_CALL {
+    let response_text = if was_chunked {
         generate_chunked(provider, system_prompt, &user_message, image_count).await?
     } else {
         generate_with_retry(provider, system_prompt, user_message).await?
@@ -966,6 +1065,40 @@ pub async fn generate_narration(
             + 60.0
     };
     script.segments = normalize_timeline(std::mem::take(&mut script.segments), duration);
+
+    // Merge sub-2.5s fragments into their neighbors. Humans can't comfortably
+    // speak more than a few words in under 2.5 seconds, and TTS either
+    // speeds up unnaturally or overruns when a slot is this short. Merging
+    // upfront avoids the audio/video desync downstream.
+    script.segments = merge_short_segments(std::mem::take(&mut script.segments), 2.5);
+
+    // Chunked generation is prone to producing a choppy, fragmented script
+    // because each chunk only sees a 10-frame window. A single polish pass
+    // gives the AI the whole script at once to dedupe, merge, and smooth.
+    // Best-effort: if the polish call fails or returns unparseable output we
+    // keep the unpolished script rather than breaking generation entirely.
+    if was_chunked && script.segments.len() > 3 {
+        match polish_script(provider, &script, 2.5).await {
+            Ok(polished) => {
+                tracing::info!(
+                    "AI polish: {} → {} segments",
+                    script.segments.len(),
+                    polished.segments.len()
+                );
+                // Re-run normalize + short-merge on the polished output so we
+                // guarantee monotonic ordering even if the AI slipped up.
+                let mut polished = polished;
+                polished.segments =
+                    normalize_timeline(std::mem::take(&mut polished.segments), duration);
+                polished.segments =
+                    merge_short_segments(std::mem::take(&mut polished.segments), 2.5);
+                script = polished;
+            }
+            Err(e) => {
+                tracing::warn!("AI polish pass failed, keeping unpolished script: {e}");
+            }
+        }
+    }
 
     // Post-process: ensure segments cover the full video duration
     // If AI stopped early, stretch the timeline proportionally
@@ -1024,6 +1157,82 @@ pub async fn generate_narration(
     }
 
     Ok(script)
+}
+
+/// AI polish pass: send the full merged script back to the AI for a
+/// holistic review. The model is instructed to:
+///   - Remove duplicate or near-duplicate segments
+///   - Merge fragmented segments into complete, natural-sounding sentences
+///   - Smooth narrative flow (transitions, repetition, word choice)
+///   - Flag anomalies (timestamps, contradictions) via re-ordering
+///   - Enforce a minimum viable segment duration (caller-specified)
+///
+/// Returns the polished script on success. Preserves the original metadata
+/// (language, provider, generated_at) — those don't need to change.
+///
+/// Safety: if the AI returns garbage (non-JSON or structurally invalid),
+/// the caller is expected to fall back to the unpolished script rather
+/// than failing the whole generation.
+pub async fn polish_script(
+    provider: &dyn AiProvider,
+    script: &NarrationScript,
+    min_segment_duration: f64,
+) -> Result<NarrationScript, NarratorError> {
+    let system_prompt = format!(
+        "You are a narration script editor performing a holistic polish pass \
+         over a complete timed narration. The script was assembled from \
+         multiple AI-generated chunks and may contain:\n\
+         - Duplicate or near-duplicate segments describing the same thing\n\
+         - Fragmented segments that should be one sentence\n\
+         - Awkward transitions or repetitive phrasing\n\
+         - Segments that are too short for natural speech\n\
+         \n\
+         Your task:\n\
+         1. Keep the overall narrative intact and faithful to the visual content.\n\
+         2. Merge adjacent fragmented segments into complete, natural sentences.\n\
+         3. Remove duplicate/redundant segments; extend the surviving segment's \
+         end_seconds to cover the removed slot.\n\
+         4. Ensure every segment has duration >= {min_segment_duration:.1} seconds.\n\
+         5. Polish word choice and transitions for a smooth listen — but do NOT \
+         rewrite content or add information that wasn't there.\n\
+         6. Preserve segment timestamps as much as possible. When merging, use \
+         the earliest start_seconds and the latest end_seconds of the merged set.\n\
+         7. Segments must remain in strictly ascending time order, non-overlapping.\n\
+         \n\
+         Respond with ONLY a valid JSON object in the exact same schema as the \
+         input (top-level: title, total_duration_seconds, segments, metadata). \
+         No markdown code fences, no prose, no explanation."
+    );
+
+    let script_json = serde_json::to_string(script)
+        .map_err(|e| NarratorError::SerializationError(e.to_string()))?;
+    let user_message = json!(script_json);
+
+    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
+    let json_text = response_text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let mut polished: NarrationScript = serde_json::from_str(json_text).map_err(|e| {
+        NarratorError::ApiError(format!(
+            "Polish pass returned invalid JSON: {e}\nResponse: {}",
+            truncate_chars(json_text, 500)
+        ))
+    })?;
+
+    // Preserve metadata identity. The polish pass shouldn't change these.
+    polished.metadata = script.metadata.clone();
+    if polished.total_duration_seconds <= 0.0 {
+        polished.total_duration_seconds = script.total_duration_seconds;
+    }
+    if polished.title.is_empty() {
+        polished.title = script.title.clone();
+    }
+
+    Ok(polished)
 }
 
 pub async fn translate_script(
@@ -1527,6 +1736,95 @@ mod tests {
         assert_eq!(out[0].text, "first");
     }
 
+    // ── merge_short_segments ──────────────────────────────────────────
+
+    #[test]
+    fn test_merge_short_segments_merges_adjacent_fragment() {
+        // The exact bug the user reported: many 0.5s segments. Anything
+        // shorter than the min-duration floor should fold into its neighbor.
+        let segs = vec![
+            seg(0, 0.0, 3.0, "First full sentence."),
+            seg(1, 3.0, 3.5, "fragment one."),
+            seg(2, 3.5, 4.0, "fragment two."),
+            seg(3, 4.0, 8.0, "Second full sentence."),
+        ];
+        let out = merge_short_segments(segs, 2.5);
+        // Fragments (0.5s each) should have been merged into the first full
+        // segment, which now covers 0.0-4.0s.
+        assert_eq!(out.len(), 2, "got {:?}", out.iter().map(|s| (s.start_seconds, s.end_seconds, s.text.clone())).collect::<Vec<_>>());
+        assert_eq!(out[0].start_seconds, 0.0);
+        assert_eq!(out[0].end_seconds, 4.0);
+        assert!(out[0].text.contains("First full sentence"));
+        assert!(out[0].text.contains("fragment one"));
+        assert!(out[0].text.contains("fragment two"));
+        assert_eq!(out[1].text, "Second full sentence.");
+    }
+
+    #[test]
+    fn test_merge_short_segments_tail_fragment() {
+        // Short segment at the tail has no successor; fold into predecessor.
+        let segs = vec![
+            seg(0, 0.0, 3.0, "Main."),
+            seg(1, 3.0, 3.5, "tail fragment."),
+        ];
+        let out = merge_short_segments(segs, 2.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].end_seconds, 3.5);
+        assert!(out[0].text.contains("tail fragment"));
+    }
+
+    #[test]
+    fn test_merge_short_segments_preserves_reindex() {
+        let segs = vec![
+            seg(0, 0.0, 0.5, "frag"),
+            seg(1, 0.5, 3.5, "longer"),
+            seg(2, 3.5, 6.5, "another long"),
+        ];
+        let out = merge_short_segments(segs, 2.5);
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(s.index, i);
+        }
+    }
+
+    #[test]
+    fn test_merge_short_segments_noop_when_all_long_enough() {
+        let segs = vec![
+            seg(0, 0.0, 3.0, "a"),
+            seg(1, 3.0, 6.0, "b"),
+            seg(2, 6.0, 10.0, "c"),
+        ];
+        let out = merge_short_segments(segs.clone(), 2.5);
+        assert_eq!(out.len(), segs.len());
+    }
+
+    #[test]
+    fn test_merge_short_segments_single_segment_untouched() {
+        let segs = vec![seg(0, 0.0, 1.0, "too short but alone")];
+        let out = merge_short_segments(segs, 2.5);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_short_segments_consolidates_frame_refs() {
+        let mut a = seg(0, 0.0, 3.0, "a");
+        a.frame_refs = vec![1, 2];
+        let mut b = seg(1, 3.0, 3.5, "b");
+        b.frame_refs = vec![2, 3];
+        let out = merge_short_segments(vec![a, b], 2.5);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].frame_refs, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_merge_short_segments_keeps_longer_pause() {
+        let mut a = seg(0, 0.0, 3.0, "a");
+        a.pause_after_ms = 100;
+        let mut b = seg(1, 3.0, 3.5, "b");
+        b.pause_after_ms = 500;
+        let out = merge_short_segments(vec![a, b], 2.5);
+        assert_eq!(out[0].pause_after_ms, 500);
+    }
+
     // ── clamp_chunk_segments ─────────────────────────────────────────────
 
     #[test]
@@ -1665,14 +1963,28 @@ mod tests {
             &[(10.0, 15.0, "chunk2 first"), (15.0, 20.0, "chunk2 second")],
         );
         let r3 = chunk_response_json("T", 25.0, &[(20.0, 25.0, "chunk3")]);
-        let provider = ScriptedProvider::new(vec![&r1, &r2, &r3]);
+        // With > 3 merged segments the pipeline runs an AI polish pass too,
+        // so 4 provider calls total.
+        let polish_response = chunk_response_json(
+            "T",
+            25.0,
+            &[
+                (0.0, 5.0, "chunk1 first"),
+                (5.0, 10.0, "chunk1 second"),
+                (10.0, 15.0, "chunk2 first"),
+                (15.0, 20.0, "chunk2 second"),
+                (20.0, 25.0, "chunk3"),
+            ],
+        );
+        let provider =
+            ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
 
         let msg = user_msg_with_frames(25, 1.0);
         let result =
             generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
 
-        // Provider was called exactly 3 times (one per chunk)
-        assert_eq!(provider.captured().len(), 3);
+        // 3 chunk calls + 1 polish call
+        assert_eq!(provider.captured().len(), 4);
         // Merged script has 5 segments (2+2+1)
         assert_eq!(result.segments.len(), 5);
         // Segments must be in strictly ascending order
@@ -2194,5 +2506,87 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "精緻化されたセグメント 🎬");
+    }
+
+    // ── polish_script ────────────────────────────────────────────────
+
+    fn sample_script() -> NarrationScript {
+        NarrationScript {
+            title: "Test".into(),
+            total_duration_seconds: 30.0,
+            segments: vec![
+                seg(0, 0.0, 3.0, "first"),
+                seg(1, 3.0, 3.5, "frag"),
+                seg(2, 3.5, 10.0, "second"),
+            ],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+                generated_at: "2026-01-01T00:00:00Z".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_polish_script_applies_ai_changes() {
+        // AI merges the fragment into the first segment
+        let resp = chunk_response_json(
+            "Test",
+            30.0,
+            &[(0.0, 3.5, "first frag"), (3.5, 10.0, "second")],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let result = polish_script(&provider, &sample_script(), 2.5)
+            .await
+            .unwrap();
+        assert_eq!(result.segments.len(), 2);
+        assert!(result.segments[0].text.contains("first frag"));
+    }
+
+    #[tokio::test]
+    async fn test_polish_script_preserves_metadata() {
+        let resp = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "one")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let original = sample_script();
+        let result = polish_script(&provider, &original, 2.5).await.unwrap();
+        // Metadata identity preserved from input, not from AI response
+        assert_eq!(result.metadata.language, original.metadata.language);
+        assert_eq!(result.metadata.provider, original.metadata.provider);
+        assert_eq!(result.metadata.generated_at, original.metadata.generated_at);
+    }
+
+    #[tokio::test]
+    async fn test_polish_script_invalid_json_errors() {
+        let provider = ScriptedProvider::new(vec!["definitely not json"]);
+        let err = polish_script(&provider, &sample_script(), 2.5)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("polish"));
+    }
+
+    #[tokio::test]
+    async fn test_polish_script_strips_code_fences() {
+        let inner = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "one")]);
+        let fenced = format!("```json\n{inner}\n```");
+        let provider = ScriptedProvider::new(vec![&fenced]);
+        let result = polish_script(&provider, &sample_script(), 2.5).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_polish_script_falls_back_title_and_duration() {
+        // AI returned empty title and zero total_duration → fall back to input
+        let resp = r#"{
+            "title": "",
+            "total_duration_seconds": 0,
+            "segments": [{"index":0,"start_seconds":0,"end_seconds":10,"text":"ok","visual_description":"","emphasis":[],"pace":"medium","pause_after_ms":0,"frame_refs":[]}],
+            "metadata": {"style":"","language":"","provider":"","model":"","generated_at":""}
+        }"#;
+        let provider = ScriptedProvider::new(vec![resp]);
+        let result = polish_script(&provider, &sample_script(), 2.5).await.unwrap();
+        assert_eq!(result.title, "Test");
+        assert_eq!(result.total_duration_seconds, 30.0);
     }
 }

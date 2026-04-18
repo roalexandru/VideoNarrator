@@ -83,6 +83,9 @@ interface EditStore {
   selectedClipIndex: number | null;
   selectedEffectId: string | null;
   editedVideoPath: string | null;
+  /** Hash of the edit plan (clips + effects) as it was when editedVideoPath
+   *  was produced. Used by Export to detect a stale cache and regenerate. */
+  editedVideoPlanHash: string | null;
   sourceDuration: number;
 
   // Undo/Redo
@@ -108,6 +111,7 @@ interface EditStore {
   addClip: (sourceFile: string, sourceStart: number, sourceEnd: number) => void;
   selectClip: (index: number | null) => void;
   setEditedVideoPath: (path: string | null) => void;
+  setEditedVideoPlanHash: (hash: string | null) => void;
   getOutputDuration: () => number;
   getClipOutputStart: (index: number) => number;
   outputTimeToSource: (outputTime: number) => number;
@@ -161,6 +165,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
   selectedClipIndex: null,
   selectedEffectId: null,
   editedVideoPath: null,
+  editedVideoPlanHash: null,
   sourceDuration: 0,
   undoStack: [],
   redoStack: [],
@@ -196,6 +201,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
       selectedClipIndex: 0,
       selectedEffectId: null,
       editedVideoPath: null,
+      editedVideoPlanHash: null,
       sourceDuration: duration,
       undoStack: [],
       redoStack: [],
@@ -301,6 +307,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
   selectClip: (index) => set({ selectedClipIndex: index, selectedEffectId: null }),
   setEditedVideoPath: (path) => set({ editedVideoPath: path }),
+  setEditedVideoPlanHash: (hash) => set({ editedVideoPlanHash: hash }),
 
   getOutputDuration: () => get().clips.reduce((sum, c) => sum + clipOutputDuration(c), 0),
 
@@ -487,5 +494,5 @@ export const useEditStore = create<EditStore>((set, get) => ({
   // Half-open interval [start, end) — avoids double-triggering at seams between adjacent effects
   getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime < e.endTime),
 
-  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
+  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, editedVideoPlanHash: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
 }));

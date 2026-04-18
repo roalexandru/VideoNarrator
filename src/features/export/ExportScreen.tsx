@@ -9,9 +9,11 @@ import { useEditStore } from "../../stores/editStore";
 import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
-  getAzureTtsConfig, saveAzureTtsConfig,
+  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits, fileExists,
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
+import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { EXPORT_FORMATS } from "../../lib/constants";
 import { useOpenSettings } from "../../contexts/SettingsContext";
 import { trackError } from "../telemetry/analytics";
@@ -146,7 +148,7 @@ export function ExportScreen() {
   })();
 
   // Video export pipeline
-  const [videoPhase, setVideoPhase] = useState<"idle" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
+  const [videoPhase, setVideoPhase] = useState<"idle" | "rendering" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [, setVideoOutputPath] = useState<string | null>(null);
@@ -214,18 +216,60 @@ export function ExportScreen() {
     const dir = exp.outputDirectory;
     const base = exp.basename;
 
-    setVideoPhase("audio");
+    setVideoPhase("idle");
     setVideoProgress(0);
     setVideoError(null);
     setVideoOutputPath(null);
     const exportStart = Date.now();
 
     try {
+      // ── Phase 0: ensure the edited video is present and up-to-date ──
+      // The source for the final export is the EDITED video (with clips,
+      // zoom/pan, spotlight, blur, text, fade baked in). If the cache is
+      // missing or stale, regenerate it here before muxing the audio.
+      const editState = useEditStore.getState();
+      const needsEdit = planRequiresRender(editState.clips, editState.effects);
+      let sourceVideoPath = videoPath;
+      if (needsEdit && originalVideoPath) {
+        const currentHash = computeEditPlanHash(editState.clips, editState.effects);
+        const cacheMatches =
+          editState.editedVideoPath &&
+          editState.editedVideoPlanHash === currentHash &&
+          (await fileExists(editState.editedVideoPath));
+
+        if (!cacheMatches) {
+          setVideoPhase("rendering");
+          setVideoProgress(0);
+          const home = await getHomeDir();
+          const projectId = useProjectStore.getState().projectId;
+          const srcExt = originalVideoPath.split(".").pop() || "mp4";
+          const editedPath = `${home}/.narrator/projects/${projectId}/edited.${srcExt}`;
+          const plan = buildEditPlan(editState.clips, editState.effects);
+          const renderCh = new Channel<ProgressEvent>();
+          renderCh.onmessage = (e: ProgressEvent) => {
+            if (e.kind === "progress") setVideoProgress(e.percent * 0.25); // 0-25%
+          };
+          const rendered = await applyVideoEdits(
+            originalVideoPath,
+            editedPath,
+            plan,
+            renderCh,
+          );
+          editState.setEditedVideoPath(rendered);
+          editState.setEditedVideoPlanHash(currentHash);
+          sourceVideoPath = rendered;
+        } else {
+          sourceVideoPath = editState.editedVideoPath!;
+        }
+      }
+
+      setVideoPhase("audio");
+      setVideoProgress(25);
       // Ensure directory exists
       // Phase 1: Generate TTS audio
       const ch = new Channel<ProgressEvent>();
       ch.onmessage = (e: ProgressEvent) => {
-        if (e.kind === "progress") setVideoProgress(e.percent * 0.6); // 0-60%
+        if (e.kind === "progress") setVideoProgress(25 + e.percent * 0.35); // 25-60%
       };
 
       const audioDir = `${dir}/audio`;
@@ -255,7 +299,7 @@ export function ExportScreen() {
         mergeChannel.onmessage = (e: ProgressEvent) => {
           if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.15); // 65-80%
         };
-        await mergeAudioVideo(videoPath, audioFile, mergedPath, exp.replaceAudio, mergeChannel);
+        await mergeAudioVideo(sourceVideoPath, audioFile, mergedPath, exp.replaceAudio, mergeChannel);
         setVideoProgress(80);
 
         setVideoPhase("subtitles");
@@ -278,7 +322,7 @@ export function ExportScreen() {
         mergeChannel.onmessage = (e: ProgressEvent) => {
           if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.35); // 65-100%
         };
-        await mergeAudioVideo(videoPath, audioFile, finalPath, exp.replaceAudio, mergeChannel);
+        await mergeAudioVideo(sourceVideoPath, audioFile, finalPath, exp.replaceAudio, mergeChannel);
       }
 
       setVideoProgress(100);
@@ -375,6 +419,7 @@ export function ExportScreen() {
 
   const scriptSuccessCount = scriptResults.filter((r) => r.success).length;
   const phaseLabels: Record<string, string> = {
+    rendering: "Rendering edited video (applying effects)...",
     audio: "Generating audio...",
     merge: "Merging audio with video...",
     subtitles: "Burning subtitles...",
@@ -604,10 +649,10 @@ export function ExportScreen() {
             {/* Export button */}
             <Button
               onClick={doExportVideo}
-              disabled={videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles" || !videoPath || segCount === 0}
+              disabled={videoPhase === "rendering" || videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles" || !videoPath || segCount === 0}
               style={{ width: "100%", fontSize: 13 }}
             >
-              {videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles"
+              {videoPhase === "rendering" || videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles"
                 ? `${Math.round(videoProgress)}% — ${phaseLabels[videoPhase]}`
                 : "Export Video"}
             </Button>

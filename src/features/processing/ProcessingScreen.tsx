@@ -6,6 +6,8 @@ import { useConfigStore } from "../../stores/configStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useEditStore } from "../../stores/editStore";
 import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProviderStatus } from "../../lib/tauri/commands";
+import { computeEditPlanHash } from "../../lib/editPlanHash";
+import { buildEditPlan } from "../../lib/buildEditPlan";
 import { trackEvent, trackError, resetErrorCount } from "../telemetry/analytics";
 import { toUserMessage } from "../../lib/errorMessages";
 import { Button } from "../../components/ui/Button";
@@ -85,62 +87,17 @@ export function ProcessingScreen() {
         const homeDir = await getHomeDir();
         const ext = videoPath.split(".").pop() || "mp4";
         const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
-        // Map effects from the effects track onto clips for the Rust backend.
-        // The Rust pipeline processes zoom_pan per-clip, so we find which effect overlaps each clip.
-        const effectsTrack = editSnapshot.effects || [];
-        let cumOutTime = 0;
-        const editPlan = {
-          clips: editSnapshot.clips.map((c) => {
-            const clipDur = c.type === 'freeze' ? (c.freezeDuration ?? 3) : (c.sourceEnd - c.sourceStart) / c.speed;
-            const clipStart = cumOutTime;
-            const clipEnd = cumOutTime + clipDur;
-            cumOutTime = clipEnd;
-            // Find the first zoom-pan effect that overlaps this clip
-            const overlapping = effectsTrack.find((e) =>
-              e.type === 'zoom-pan' && e.zoomPan && e.startTime < clipEnd && e.endTime > clipStart
-            );
-            // Use effect's zoom_pan if found, otherwise fall back to clip-level zoom_pan
-            const zoomPan = overlapping?.zoomPan ?? c.zoomPan;
-            return {
-              start_seconds: c.sourceStart,
-              end_seconds: c.sourceEnd,
-              speed: c.speed,
-              fps_override: c.fpsOverride,
-              clip_type: c.type ?? 'normal',
-              freeze_source_time: c.freezeSourceTime,
-              freeze_duration: c.freezeDuration,
-              zoom_pan: zoomPan ? {
-                startRegion: zoomPan.startRegion,
-                endRegion: zoomPan.endRegion,
-                easing: zoomPan.easing,
-              } : null,
-            };
-          }),
-          // Overlay effects (spotlight, blur, text, fade) — applied post-concat in output time.
-          // Zoom-pan is excluded because it's handled per-clip above.
-          // Rust's OverlayEffect / SpotlightData / BlurData / TextData / FadeData
-          // all use #[serde(rename_all = "camelCase")] so JSON keys MUST be camelCase.
-          effects: effectsTrack
-            .filter((e) => e.type !== 'zoom-pan')
-            .map((e) => ({
-              type: e.type,
-              startTime: e.startTime,
-              endTime: e.endTime,
-              transitionIn: e.transitionIn,
-              transitionOut: e.transitionOut,
-              reverse: e.reverse,
-              spotlight: e.spotlight ? { x: e.spotlight.x, y: e.spotlight.y, radius: e.spotlight.radius, dimOpacity: e.spotlight.dimOpacity } : undefined,
-              blur: e.blur ? { x: e.blur.x, y: e.blur.y, width: e.blur.width, height: e.blur.height, radius: e.blur.radius, invert: e.blur.invert } : undefined,
-              text: e.text ? { content: e.text.content, x: e.text.x, y: e.text.y, fontSize: e.text.fontSize, color: e.text.color, fontFamily: e.text.fontFamily, bold: e.text.bold, italic: e.text.italic, underline: e.text.underline, background: e.text.background, align: e.text.align, opacity: e.text.opacity } : undefined,
-              fade: e.fade ? { color: e.fade.color, opacity: e.fade.opacity } : undefined,
-            })),
-        };
+        const editPlan = buildEditPlan(editSnapshot.clips, editSnapshot.effects);
         const editCh = new Channel<ProgressEvent>();
         editCh.onmessage = (e: ProgressEvent) => {
           if (e.kind === "progress") proc.setProgress(e.percent * 0.3); // 0-30% for edits
         };
         videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
         editSnapshot.setEditedVideoPath(videoPath);
+        // Record the plan hash so Export can detect stale caches later.
+        editSnapshot.setEditedVideoPlanHash(
+          computeEditPlanHash(editSnapshot.clips, editSnapshot.effects),
+        );
       } catch (err: unknown) {
         console.error("apply_video_edits failed:", err);
         trackError("apply_video_edits", err);

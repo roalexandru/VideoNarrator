@@ -745,6 +745,8 @@ mod tests {
             timeline_effects: None,
             video_metadata: None,
             context_documents: None,
+            edited_video_path: None,
+            edited_video_plan_hash: None,
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
@@ -1011,6 +1013,8 @@ mod tests {
             timeline_effects: None,
             video_metadata: None,
             context_documents: None,
+            edited_video_path: None,
+            edited_video_plan_hash: None,
         }
     }
 

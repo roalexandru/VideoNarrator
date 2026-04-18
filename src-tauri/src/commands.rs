@@ -385,6 +385,13 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     video_engine::probe_video(&resolved).await
 }
 
+/// Return whether a file exists at the given path. Used by Export to detect
+/// a missing cached edited video and trigger regeneration.
+#[tauri::command]
+pub fn file_exists(path: String) -> bool {
+    std::path::Path::new(&path).is_file()
+}
+
 /// Check whether the app can actually read the given file path. On macOS,
 /// this surfaces TCC denials (Documents/Desktop/Downloads folder permissions)
 /// as a clear error instead of a silent black video preview.
@@ -708,6 +715,13 @@ pub async fn generate_narration(
         context_documents: existing_config
             .as_ref()
             .and_then(|c| c.context_documents.clone()),
+        // Preserve the cached-edited-video path + its hash
+        edited_video_path: existing_config
+            .as_ref()
+            .and_then(|c| c.edited_video_path.clone()),
+        edited_video_plan_hash: existing_config
+            .as_ref()
+            .and_then(|c| c.edited_video_plan_hash.clone()),
     };
     if let Err(e) = project_store::create_project(&project_config) {
         tracing::warn!("Failed to auto-save project: {e}");

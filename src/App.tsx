@@ -258,6 +258,10 @@ export default function App() {
       // Persist context documents so they survive reload and stay wired to
       // the next AI generation.
       context_documents: ps.contextDocuments.length > 0 ? ps.contextDocuments : null,
+      // Persist the path to the cached edited video + its edit-plan hash so
+      // Export can detect stale cache and regenerate before muxing audio.
+      edited_video_path: es.editedVideoPath,
+      edited_video_plan_hash: es.editedVideoPlanHash,
     };
   }, []);
 
@@ -503,6 +507,26 @@ export default function App() {
           return true;
         });
         useEditStore.setState({ effects: validated });
+      }
+
+      // Restore cached edited video path + plan hash so Export can reuse the
+      // rendered file. We only restore the path if the file still exists on
+      // disk; otherwise Export will detect the miss and regenerate.
+      if (cfg.edited_video_path) {
+        try {
+          const { fileExists } = await import("./lib/tauri/commands");
+          const stillOnDisk = await fileExists(cfg.edited_video_path);
+          if (stillOnDisk) {
+            useEditStore.setState({
+              editedVideoPath: cfg.edited_video_path,
+              editedVideoPlanHash: cfg.edited_video_plan_hash ?? null,
+            });
+          } else {
+            console.log("[load] cached edited video missing on disk, will regenerate on export");
+          }
+        } catch (err) {
+          console.warn("[load] failed to check edited video:", err);
+        }
       }
 
       const ss = useScriptStore.getState();

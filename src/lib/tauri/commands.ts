@@ -35,6 +35,11 @@ export const probeVideo = (path: string) =>
 export const checkFileReadable = (path: string) =>
   invoke<boolean>("check_file_readable", { path });
 
+/** Cheap existence check. Used by Export to decide whether the cached
+ *  edited video needs regenerating. */
+export const fileExists = (path: string) =>
+  invoke<boolean>("file_exists", { path });
+
 // Documents
 export const processDocuments = (paths: string[]) =>
   invoke<{ name: string; content: string; token_estimate: number }[]>(
@@ -143,6 +148,13 @@ export interface LoadedProject {
     timeline_effects?: unknown[];
     video_metadata?: VideoMetadata;
     context_documents?: { id: string; path: string; name: string; size: number; type: string; tokenCount?: number }[];
+    /**
+     * Path to the cached edited video produced by the last applyVideoEdits call.
+     * Export uses this as the source; if missing or the hash doesn't match
+     * the current edit plan, Export regenerates it.
+     */
+    edited_video_path?: string;
+    edited_video_plan_hash?: string;
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
 }

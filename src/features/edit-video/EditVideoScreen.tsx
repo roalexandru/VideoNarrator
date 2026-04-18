@@ -2,7 +2,12 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
-import { extractEditThumbnails } from "../../lib/tauri/commands";
+import { extractEditThumbnails, applyVideoEdits, openFolder } from "../../lib/tauri/commands";
+import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { computeEditPlanHash } from "../../lib/editPlanHash";
+import { Channel } from "@tauri-apps/api/core";
+import { save as saveDialog, message as showMessage } from "@tauri-apps/plugin-dialog";
+import type { ProgressEvent } from "../../types/processing";
 import { Button } from "../../components/ui/Button";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -149,6 +154,49 @@ export function EditVideoScreen() {
   }, [dragging, clips]);
 
   const [thumbsLoading, setThumbsLoading] = useState(false);
+
+  // Render-edited-video action (secondary "Export video only" button).
+  // This lets the user save the cut+effects video standalone, without going
+  // through narration generation.
+  const [renderProgress, setRenderProgress] = useState<number | null>(null);
+  const handleRenderVideo = useCallback(async () => {
+    if (!videoFile?.path) return;
+    const defaultName = (videoFile.name || "edited").replace(/\.[^.]+$/, "") + "_edited.mp4";
+    const outPath = await saveDialog({
+      defaultPath: defaultName,
+      filters: [{ name: "MP4 Video", extensions: ["mp4"] }],
+    });
+    if (!outPath) return;
+
+    const es = useEditStore.getState();
+    const plan = buildEditPlan(es.clips, es.effects);
+    const ch = new Channel<ProgressEvent>();
+    ch.onmessage = (e: ProgressEvent) => {
+      if (e.kind === "progress") setRenderProgress(e.percent);
+    };
+
+    setRenderProgress(0);
+    try {
+      const result = await applyVideoEdits(videoFile.path, outPath as string, plan, ch);
+      // Also populate the cache so a subsequent Export skips the render.
+      es.setEditedVideoPath(result);
+      es.setEditedVideoPlanHash(computeEditPlanHash(es.clips, es.effects));
+      setRenderProgress(null);
+      // Offer to reveal the file — on macOS this opens Finder to the folder.
+      try {
+        const parent = (outPath as string).split("/").slice(0, -1).join("/");
+        await openFolder(parent);
+      } catch {/* non-critical */}
+      await showMessage(`Rendered: ${outPath}`, { title: "Edited video saved", kind: "info" });
+    } catch (err) {
+      console.error("render video failed:", err);
+      trackError("render_edited_video", err);
+      setRenderProgress(null);
+      await showMessage(String(err).replace(/^(Error: )?/, ""), { title: "Render failed", kind: "error" });
+    }
+  }, [videoFile?.path, videoFile?.name]);
+  const canRender = !!videoFile?.path && (planRequiresRender(clips, effects) ||
+    (clips[0] && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) > 0.5));
 
   // Extract thumbnails
   useEffect(() => {
@@ -646,6 +694,19 @@ export function EditVideoScreen() {
         <Button variant="secondary" size="sm"
           disabled={clips.length === 1 && clips[0].speed === 1.0 && !clips[0].skipFrames && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) < 0.5}
           onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Revert to Original</Button>
+        {/* Secondary: render the edited video on its own (without narration).
+            Useful for users who just want the cut+effects version. */}
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={!canRender || renderProgress !== null}
+          onClick={handleRenderVideo}
+          title="Render the edited video (cuts + effects) without narration"
+        >
+          {renderProgress !== null
+            ? `Rendering… ${Math.round(renderProgress)}%`
+            : "Render Video"}
+        </Button>
       </div>
 
       {/* RESIZE HANDLE */}
