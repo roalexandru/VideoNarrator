@@ -1311,6 +1311,131 @@ pub async fn refine_segment(
     Ok(refined.to_string())
 }
 
+/// Whole-script AI refinement driven by a user instruction.
+///
+/// Where `refine_segment` edits one segment in isolation and `polish_script`
+/// is an unattended quality pass, this is the user-driven version: the editor
+/// asks for something specific ("make it more technical", "cut 30%", "use
+/// second person") and the model rewrites the ENTIRE script while respecting:
+///   - The user's instruction as the primary directive
+///   - The project's narration style (professional voice, pacing)
+///   - The target language (localization stays consistent)
+///   - Visual descriptions and frame references (so the narrative stays
+///     grounded in what's actually on screen)
+///   - Timestamps (don't drift the timeline — segments keep their slots)
+///   - The optional project-wide custom prompt (user's global steering)
+pub async fn refine_script(
+    provider: &dyn AiProvider,
+    script: &NarrationScript,
+    instruction: &str,
+    style_hint: &str,
+    custom_prompt: Option<&str>,
+) -> Result<NarrationScript, NarratorError> {
+    if instruction.trim().is_empty() {
+        return Err(NarratorError::ApiError(
+            "Instruction is required for whole-script refinement".into(),
+        ));
+    }
+
+    let language = if script.metadata.language.is_empty() {
+        "the script's current language"
+    } else {
+        script.metadata.language.as_str()
+    };
+
+    let mut system_prompt = format!(
+        "You are a professional narration script editor. You are given an ENTIRE \
+         timed narration script as JSON plus a user instruction describing how \
+         to rewrite it. Rewrite the script holistically to satisfy the instruction \
+         while respecting these invariants:\n\
+         \n\
+         TIMELINE\n\
+         - Keep the same number of segments unless the instruction explicitly \
+           asks you to merge, split, or remove some.\n\
+         - Preserve each segment's start_seconds and end_seconds so the narration \
+           stays synchronized with the video. Only change timestamps when merging \
+           or splitting, and do so by combining/dividing the original ranges.\n\
+         - Segments must remain in strictly ascending time order with no overlap.\n\
+         \n\
+         CONTENT\n\
+         - Rewrite `text` to follow the user instruction.\n\
+         - Stay grounded in what the video shows — each segment's \
+           `visual_description` and `frame_refs` describe what is on screen \
+           during that slot. Do not invent content not supported by the visuals.\n\
+         - Keep factual claims, product names, and API/command/code snippets \
+           accurate; only change phrasing, tone, or structure as instructed.\n\
+         - Preserve [pause] markers unless removing them is part of the instruction.\n\
+         \n\
+         STYLE\n\
+         - Narration style: {style_hint}\n\
+         - Target language: {language}. Respond in the SAME language as the input \
+           text. Do not translate unless the instruction explicitly asks for translation.\n"
+    );
+    if let Some(p) = custom_prompt {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            system_prompt.push_str(&format!(
+                "\nPROJECT STEERING (applies to every pass)\n{}\n",
+                trimmed
+            ));
+        }
+    }
+    system_prompt.push_str(
+        "\nOUTPUT\n\
+         Respond with ONLY valid JSON in the exact same schema as the input \
+         (top-level keys: title, total_duration_seconds, segments, metadata). \
+         Each segment must retain its index, start_seconds, end_seconds, \
+         visual_description, emphasis, pace, pause_after_ms, and frame_refs fields. \
+         No markdown code fences. No prose. No explanation.",
+    );
+
+    // Serialize the input script compactly — no need for pretty-print inside
+    // the prompt.
+    let script_json = serde_json::to_string(script)
+        .map_err(|e| NarratorError::SerializationError(e.to_string()))?;
+    let user_message = json!(format!(
+        "INSTRUCTION:\n{}\n\nCURRENT SCRIPT (JSON):\n{}",
+        instruction.trim(),
+        script_json
+    ));
+
+    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
+    let json_text = response_text
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let mut refined: NarrationScript = serde_json::from_str(json_text).map_err(|e| {
+        NarratorError::ApiError(format!(
+            "Whole-script refinement returned invalid JSON: {e}\nResponse: {}",
+            truncate_chars(json_text, 500)
+        ))
+    })?;
+
+    // Preserve metadata identity (language, provider, generated_at) — a
+    // content refactor shouldn't relabel them.
+    refined.metadata = script.metadata.clone();
+    if refined.total_duration_seconds <= 0.0 {
+        refined.total_duration_seconds = script.total_duration_seconds;
+    }
+    if refined.title.is_empty() {
+        refined.title = script.title.clone();
+    }
+
+    // Normalize + ensure sane durations as a safety net — the AI occasionally
+    // returns overlapping or out-of-order ranges.
+    let duration = if refined.total_duration_seconds > 0.0 {
+        refined.total_duration_seconds
+    } else {
+        script.total_duration_seconds
+    };
+    refined.segments = normalize_timeline(std::mem::take(&mut refined.segments), duration);
+
+    Ok(refined)
+}
+
 pub async fn validate_api_key(provider: &AiProviderKind, key: &str) -> Result<bool, NarratorError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -2588,5 +2713,139 @@ mod tests {
         let result = polish_script(&provider, &sample_script(), 2.5).await.unwrap();
         assert_eq!(result.title, "Test");
         assert_eq!(result.total_duration_seconds, 30.0);
+    }
+
+    // ── refine_script ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_refine_script_rewrites_whole() {
+        let resp = chunk_response_json(
+            "Test",
+            30.0,
+            &[
+                (0.0, 3.0, "Tight first."),
+                (3.0, 10.0, "Tight second."),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+        // NOTE: input has 3 segments; AI returns 2 — intentional consolidation.
+        let result = refine_script(
+            &provider,
+            &sample_script(),
+            "Make it more concise.",
+            "professional narration",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.segments.len(), 2);
+        assert!(result.segments[0].text.contains("Tight"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_requires_instruction() {
+        let resp = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "x")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let err = refine_script(&provider, &sample_script(), "   ", "style", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("instruction"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_includes_instruction_and_style_in_prompt() {
+        let resp = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "x")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        refine_script(
+            &provider,
+            &sample_script(),
+            "Use second person",
+            "technical tutorial",
+            None,
+        )
+        .await
+        .unwrap();
+        let call = provider.captured();
+        assert_eq!(call.len(), 1);
+        let user_text = call[0].as_str().unwrap_or("");
+        assert!(user_text.contains("Use second person"), "user message missing instruction: {user_text}");
+        // Style hint flows through the system prompt — we can't observe the
+        // system prompt directly (mock only records user_message), but we
+        // ensure the instruction + current script JSON are packaged together.
+        assert!(user_text.contains("CURRENT SCRIPT"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_applies_custom_prompt() {
+        // Custom project prompt should be accepted without error and the
+        // call should succeed with a valid AI response.
+        let resp = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "polished")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let result = refine_script(
+            &provider,
+            &sample_script(),
+            "Refine",
+            "style",
+            Some("Always use UiPath product voice"),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_preserves_metadata_identity() {
+        let resp = chunk_response_json("NewTitle", 30.0, &[(0.0, 10.0, "one")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let original = sample_script();
+        let result = refine_script(&provider, &original, "do it", "style", None)
+            .await
+            .unwrap();
+        // AI returned "NewTitle" but we preserve metadata from input
+        assert_eq!(result.metadata.language, original.metadata.language);
+        assert_eq!(result.metadata.provider, original.metadata.provider);
+        assert_eq!(result.metadata.generated_at, original.metadata.generated_at);
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_normalizes_on_out_of_order_response() {
+        // AI returns segments out of order → refine_script must sort them.
+        let resp = chunk_response_json(
+            "Test",
+            30.0,
+            &[
+                (20.0, 28.0, "c (last)"),
+                (0.0, 8.0, "a (first)"),
+                (10.0, 18.0, "b (middle)"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let result = refine_script(&provider, &sample_script(), "sort me", "style", None)
+            .await
+            .unwrap();
+        assert_eq!(result.segments.len(), 3);
+        assert!(result.segments[0].text.contains("a (first)"));
+        assert!(result.segments[2].text.contains("c (last)"));
+        for w in result.segments.windows(2) {
+            assert!(w[0].end_seconds <= w[1].start_seconds + 0.01);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_invalid_json_errors() {
+        let provider = ScriptedProvider::new(vec!["not json"]);
+        let err = refine_script(&provider, &sample_script(), "inst", "style", None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_script_strips_code_fences() {
+        let inner = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "ok")]);
+        let fenced = format!("```json\n{inner}\n```");
+        let provider = ScriptedProvider::new(vec![&fenced]);
+        assert!(refine_script(&provider, &sample_script(), "inst", "style", None)
+            .await
+            .is_ok());
     }
 }

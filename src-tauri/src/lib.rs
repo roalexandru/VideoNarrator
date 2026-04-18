@@ -110,6 +110,7 @@ pub fn run() {
             commands::generate_narration,
             commands::translate_script,
             commands::refine_segment,
+            commands::refine_script,
             commands::cancel_generation,
             commands::save_project,
             commands::load_project,

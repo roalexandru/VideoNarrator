@@ -768,6 +768,35 @@ pub async fn refine_segment(
     ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await
 }
 
+/// Whole-script AI refinement. Rewrites the entire narration to satisfy a
+/// user instruction while preserving timeline structure and style.
+#[tauri::command]
+pub async fn refine_script(
+    state: tauri::State<'_, AppState>,
+    script: NarrationScript,
+    instruction: String,
+    ai_config: AiConfig,
+    style_hint: Option<String>,
+    custom_prompt: Option<String>,
+) -> Result<NarrationScript, NarratorError> {
+    let keys = state.api_keys.lock().await;
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
+    drop(keys);
+    let provider = ai_client::create_provider(&ai_config, api_key);
+    let style = style_hint.as_deref().unwrap_or("professional narration");
+    ai_client::refine_script(
+        provider.as_ref(),
+        &script,
+        &instruction,
+        style,
+        custom_prompt.as_deref(),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn cancel_generation(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);

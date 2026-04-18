@@ -310,6 +310,17 @@ export function setupDefaultMocks() {
       case "refine_segment":
         return "This is the refined segment text.";
 
+      case "refine_script":
+        return {
+          title: "Refined Narration",
+          total_duration_seconds: 30,
+          segments: [
+            { index: 0, start_seconds: 0, end_seconds: 15, text: "Refined opener.", visual_description: "Title screen", emphasis: [], pace: "medium", pause_after_ms: 500, frame_refs: [0, 1] },
+            { index: 1, start_seconds: 15, end_seconds: 30, text: "Refined close.", visual_description: "Feature overview", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [2, 3] },
+          ],
+          metadata: { style: "product_demo", language: "en", provider: "claude", model: "claude-sonnet-4-20250514", generated_at: "2026-04-03T14:00:00Z" },
+        };
+
       case "export_project":
         return null;
 

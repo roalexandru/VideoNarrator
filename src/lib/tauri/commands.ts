@@ -79,6 +79,23 @@ export const refineSegment = (
     aiConfig,
   });
 
+/** Rewrite the entire narration script with a user instruction.
+ *  Preserves timestamps + style; stays grounded in visual descriptions. */
+export const refineScript = (
+  script: NarrationScript,
+  instruction: string,
+  aiConfig: AiConfig,
+  styleHint?: string,
+  customPrompt?: string,
+) =>
+  invoke<NarrationScript>("refine_script", {
+    script,
+    instruction,
+    aiConfig,
+    styleHint,
+    customPrompt,
+  });
+
 // Projects
 export const saveProject = (config: unknown) =>
   invoke<string>("save_project", { config });
