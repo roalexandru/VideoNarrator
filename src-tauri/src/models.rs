@@ -269,6 +269,10 @@ pub struct ProjectConfig {
     pub timeline_effects: Option<serde_json::Value>,
     #[serde(default)]
     pub video_metadata: Option<VideoMetadata>,
+    /// Persisted context documents (PDF/MD/TXT paths + metadata) so the AI
+    /// narration prompt can be regenerated with the same inputs after load.
+    #[serde(default)]
+    pub context_documents: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

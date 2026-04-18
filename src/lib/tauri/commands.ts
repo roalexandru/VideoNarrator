@@ -28,6 +28,13 @@ export const validateApiKey = (provider: AiProvider, key: string) =>
 export const probeVideo = (path: string) =>
   invoke<VideoMetadata>("probe_video", { path });
 
+/**
+ * Verify the app can actually read the file (surfaces macOS TCC denials
+ * which otherwise manifest as a silent black preview).
+ */
+export const checkFileReadable = (path: string) =>
+  invoke<boolean>("check_file_readable", { path });
+
 // Documents
 export const processDocuments = (paths: string[]) =>
   invoke<{ name: string; content: string; token_estimate: number }[]>(
@@ -135,6 +142,7 @@ export interface LoadedProject {
     }[];
     timeline_effects?: unknown[];
     video_metadata?: VideoMetadata;
+    context_documents?: { id: string; path: string; name: string; size: number; type: string; tokenCount?: number }[];
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
 }
@@ -162,6 +170,20 @@ export interface VideoEditPlan {
     start_seconds: number; end_seconds: number; speed: number; fps_override: number | null;
     clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
     zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
+  }[];
+  // Rust overlay effect structs use #[serde(rename_all = "camelCase")] so
+  // these keys MUST be camelCase. Keep in sync with OverlayEffect in video_edit.rs.
+  effects?: {
+    type: string;
+    startTime: number;
+    endTime: number;
+    transitionIn?: number;
+    transitionOut?: number;
+    reverse?: boolean;
+    spotlight?: { x: number; y: number; radius: number; dimOpacity: number };
+    blur?: { x: number; y: number; width: number; height: number; radius: number; invert?: boolean };
+    text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string; opacity?: number };
+    fade?: { color: string; opacity: number };
   }[];
 }
 export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>

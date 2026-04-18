@@ -12,6 +12,7 @@ interface ProjectStore {
   setVideoFile: (file: VideoFile | null) => void;
   setCreatedAt: (ts: string) => void;
   addDocuments: (docs: ContextDocument[]) => void;
+  setDocuments: (docs: ContextDocument[]) => void;
   removeDocument: (id: string) => void;
   reorderDocuments: (fromIndex: number, toIndex: number) => void;
   setTitle: (title: string) => void;
@@ -35,6 +36,8 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set((state) => ({
       contextDocuments: [...state.contextDocuments, ...docs],
     })),
+
+  setDocuments: (docs) => set({ contextDocuments: docs }),
 
   removeDocument: (id) =>
     set((state) => ({

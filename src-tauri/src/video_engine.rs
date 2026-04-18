@@ -405,9 +405,7 @@ mod tests {
     #[test]
     fn test_detect_ffmpeg() {
         // This test will pass if ffmpeg is installed
-        let result = detect_ffmpeg();
-        if result.is_ok() {
-            let path = result.unwrap();
+        if let Ok(path) = detect_ffmpeg() {
             assert!(path.to_string_lossy().contains("ffmpeg"));
         }
     }

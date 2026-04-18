@@ -33,7 +33,7 @@ export interface TimelineEffect {
   zoomPan?: ZoomPanEffect;
   spotlight?: { x: number; y: number; radius: number; dimOpacity: number };
   blur?: { x: number; y: number; width: number; height: number; radius: number; invert?: boolean };
-  text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: 'left' | 'center' | 'right' };
+  text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: 'left' | 'center' | 'right'; opacity?: number };
   fade?: { color: string; opacity: number };
 }
 

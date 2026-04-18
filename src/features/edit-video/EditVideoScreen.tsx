@@ -65,6 +65,44 @@ export function EditVideoScreen() {
   const selClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
   const outputDuration = store.getOutputDuration();
 
+  // Debug state — visible in dev builds only, toggled via the "D" key.
+  // Surfaces <video> element diagnostics since WebView devtools is clunky.
+  const [debugPanel, setDebugPanel] = useState(() => {
+    try { return localStorage.getItem("narrator_debug_panel") === "1"; } catch { return false; }
+  });
+  const [videoDiag, setVideoDiag] = useState<{ readyState: number; networkState: number; videoWidth: number; videoHeight: number; currentSrc: string; error: string | null; paused: boolean } | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "d" && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+        e.preventDefault();
+        setDebugPanel((d) => {
+          const next = !d;
+          try { localStorage.setItem("narrator_debug_panel", next ? "1" : "0"); } catch { /* empty */ }
+          return next;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (!debugPanel) return;
+    const id = setInterval(() => {
+      const v = videoRef.current;
+      if (!v) return;
+      setVideoDiag({
+        readyState: v.readyState,
+        networkState: v.networkState,
+        videoWidth: v.videoWidth,
+        videoHeight: v.videoHeight,
+        currentSrc: v.currentSrc || "",
+        error: v.error ? `code=${v.error.code} ${v.error.message}` : null,
+        paused: v.paused,
+      });
+    }, 250);
+    return () => clearInterval(id);
+  }, [debugPanel]);
+
   // Init clips only when no edits exist — preserves edits on navigation
   useEffect(() => {
     if (videoDuration > 0 && clips.length === 0) {
@@ -485,6 +523,37 @@ export function EditVideoScreen() {
         }}>
           <video ref={videoRef} playsInline style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
         </div>
+        {debugPanel && (
+          <div style={{
+            position: "absolute", top: 8, left: 8, zIndex: 20,
+            background: "rgba(0,0,0,0.85)", color: "#0f0",
+            fontFamily: "ui-monospace, SFMono-Regular, monospace",
+            fontSize: 11, padding: "8px 10px", borderRadius: 6,
+            maxWidth: 520, lineHeight: 1.5, pointerEvents: "none",
+            border: "1px solid #0f0",
+          }}>
+            <div style={{ color: "#ff0", fontWeight: 700, marginBottom: 4 }}>
+              VIDEO DEBUG (⌘⇧D to toggle)
+            </div>
+            <div>src: <span style={{ color: "#9ff" }}>{src?.slice(0, 80) || "(none)"}</span></div>
+            <div>videoFile.path: <span style={{ color: "#9ff" }}>{videoFile?.path?.slice(0, 80) || "(none)"}</span></div>
+            {videoDiag && (
+              <>
+                <div>readyState: <span style={{ color: videoDiag.readyState >= 2 ? "#0f0" : "#f55" }}>{videoDiag.readyState}</span> (want ≥2)</div>
+                <div>networkState: {videoDiag.networkState}</div>
+                <div>videoWidth × videoHeight: <span style={{ color: videoDiag.videoWidth > 0 ? "#0f0" : "#f55" }}>{videoDiag.videoWidth} × {videoDiag.videoHeight}</span></div>
+                <div>paused: {String(videoDiag.paused)}</div>
+                <div>currentSrc: <span style={{ color: "#9ff" }}>{videoDiag.currentSrc.slice(0, 80) || "(none)"}</span></div>
+                {videoDiag.error && <div style={{ color: "#f55" }}>ERROR: {videoDiag.error}</div>}
+              </>
+            )}
+            <div style={{ marginTop: 6, borderTop: "1px dashed #0f0", paddingTop: 6 }}>
+              transform.scale: {zoomTransform.scale.toFixed(3)}
+            </div>
+            <div>transform.tx: {zoomTransform.tx.toFixed(1)}  ty: {zoomTransform.ty.toFixed(1)}</div>
+            <div>effects: {effects.length} (clip-level zoomPan: {selClip?.zoomPan ? "yes" : "no"})</div>
+          </div>
+        )}
         {!src && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.muted, gap: 8 }}>
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5, marginBottom: 4 }}>

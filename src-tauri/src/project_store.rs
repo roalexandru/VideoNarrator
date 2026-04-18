@@ -11,7 +11,57 @@ pub fn validate_project_id(id: &str) -> Result<(), NarratorError> {
     Ok(())
 }
 
+/// Atomically write `contents` to `path` by writing to a sibling temp file and
+/// renaming it over the target. If the process is killed mid-write, the target
+/// is either the old version or the new version — never a truncated file.
+///
+/// This is critical for `project.json` and script files: a crash during a
+/// non-atomic write leaves the user with empty or corrupt JSON and loses edits.
+pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
+    })?;
+    // Build a unique sibling temp path so concurrent writes don't collide.
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("tmp");
+    let nonce = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp = parent.join(format!(".{file_name}.tmp.{nonce}"));
+
+    // Write + sync + rename. On POSIX, rename over an existing file is atomic.
+    // On Windows, it's atomic since Windows 10 build 10586 for NTFS.
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+
+    if write_result.is_err() {
+        // Best-effort cleanup of the temp file
+        let _ = std::fs::remove_file(&tmp);
+    }
+    write_result
+}
+
 pub fn get_narrator_dir() -> PathBuf {
+    // Test/dev override: NARRATOR_DIR lets integration tests and scripts
+    // point the store at a sandboxed directory instead of ~/.narrator.
+    if let Ok(override_dir) = std::env::var("NARRATOR_DIR") {
+        if !override_dir.is_empty() {
+            return PathBuf::from(override_dir);
+        }
+    }
     if let Some(home) = directories::UserDirs::new() {
         home.home_dir().join(".narrator")
     } else if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
@@ -53,7 +103,7 @@ pub fn create_project(config: &ProjectConfig) -> Result<String, NarratorError> {
         .map_err(|e| NarratorError::ProjectError(format!("Failed to create exports dir: {e}")))?;
 
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(project_dir.join("project.json"), json)
+    atomic_write(&project_dir.join("project.json"), json.as_bytes())
         .map_err(|e| NarratorError::ProjectError(format!("Failed to write project.json: {e}")))?;
 
     Ok(config.id.clone())
@@ -70,7 +120,7 @@ pub fn save_project(config: &ProjectConfig) -> Result<(), NarratorError> {
     }
 
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(project_dir.join("project.json"), json)
+    atomic_write(&project_dir.join("project.json"), json.as_bytes())
         .map_err(|e| NarratorError::ProjectError(format!("Failed to save project: {e}")))?;
 
     Ok(())
@@ -245,7 +295,7 @@ pub fn save_script(
     let filepath = scripts_dir.join(&filename);
 
     let json = serde_json::to_string_pretty(script)?;
-    std::fs::write(&filepath, json)
+    atomic_write(&filepath, json.as_bytes())
         .map_err(|e| NarratorError::ProjectError(format!("Failed to save script: {e}")))?;
 
     Ok(filepath.to_string_lossy().to_string())
@@ -285,7 +335,7 @@ pub fn save_template(template: &ProjectTemplate) -> Result<(), NarratorError> {
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.json", template.id));
     let json = serde_json::to_string_pretty(template)?;
-    std::fs::write(path, json)?;
+    atomic_write(&path, json.as_bytes())?;
     Ok(())
 }
 
@@ -432,7 +482,7 @@ pub fn import_project(archive_path: &Path) -> Result<String, NarratorError> {
 
     // Write updated project.json
     let json = serde_json::to_string_pretty(&config)?;
-    std::fs::write(project_dir.join("project.json"), json)?;
+    atomic_write(&project_dir.join("project.json"), json.as_bytes())?;
 
     // Extract scripts and frames
     for i in 0..archive.len() {
@@ -653,6 +703,16 @@ mod tests {
 
     #[test]
     fn test_get_narrator_dir() {
+        // Must acquire the store lock so no other test mutates NARRATOR_DIR
+        // while we probe it. Explicitly unset it first so the assertion
+        // against ".narrator" path segment holds.
+        let _lock = STORE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // SAFETY: lock held, no other test is touching env right now.
+        unsafe {
+            std::env::remove_var("NARRATOR_DIR");
+        }
         let dir = get_narrator_dir();
         assert!(dir.to_string_lossy().contains(".narrator"));
     }
@@ -684,6 +744,7 @@ mod tests {
             edit_clips: None,
             timeline_effects: None,
             video_metadata: None,
+            context_documents: None,
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();
@@ -793,5 +854,378 @@ mod tests {
         let ids: Vec<&str> = styles.iter().map(|s| s.id.as_str()).collect();
         let unique_ids: std::collections::HashSet<&str> = ids.iter().copied().collect();
         assert_eq!(ids.len(), unique_ids.len(), "Duplicate style IDs found");
+    }
+
+    // ── atomic_write ────────────────────────────────────────────────
+
+    #[test]
+    fn test_atomic_write_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        atomic_write(&path, b"hello world").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn test_atomic_write_overwrites_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, "old content").unwrap();
+        atomic_write(&path, b"new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+    }
+
+    #[test]
+    fn test_atomic_write_leaves_no_temp_file_on_success() {
+        // After a successful atomic_write, there should be no sibling .tmp file left.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.json");
+        atomic_write(&path, b"{}").unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        let tmps: Vec<_> = entries
+            .iter()
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(tmps.is_empty(), "leftover temp files: {tmps:?}");
+    }
+
+    #[test]
+    fn test_atomic_write_preserves_old_when_new_fails() {
+        // Writing to an invalid parent should fail without clobbering any file.
+        let result = atomic_write(
+            Path::new("/nonexistent-dir-for-narrator-tests/xyz/file.txt"),
+            b"data",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_atomic_write_binary_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binary.bin");
+        let data: Vec<u8> = (0..=255u8).collect();
+        atomic_write(&path, &data).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+    }
+
+    #[test]
+    fn test_atomic_write_empty_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.txt");
+        atomic_write(&path, b"").unwrap();
+        assert!(path.exists());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_atomic_write_large_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let data = vec![0xAB; 2 * 1024 * 1024]; // 2MB
+        atomic_write(&path, &data).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), data.len() as u64);
+    }
+
+    #[test]
+    fn test_atomic_write_unicode_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unicode.txt");
+        let text = "日本語 🎬 narration test";
+        atomic_write(&path, text.as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    // ── Project CRUD roundtrip ────────────────────────────────────────
+    //
+    // These tests override `NARRATOR_DIR` to a tempdir so the real
+    // `~/.narrator` is never touched. Env vars are process-wide, so we
+    // serialize store-touching tests with a mutex and clean up via Drop so
+    // a panicking test can't leak state to the next one.
+    use std::sync::Mutex;
+    static STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct NarratorDirGuard {
+        _tempdir: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl NarratorDirGuard {
+        fn new() -> Self {
+            // Tolerate poisoned locks (a panicking test just means env state
+            // was left dirty — we reset it below regardless).
+            let lock = STORE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let tempdir = tempfile::tempdir().unwrap();
+            // SAFETY: we hold the lock, so no other test mutates env.
+            unsafe {
+                std::env::set_var("NARRATOR_DIR", tempdir.path());
+            }
+            Self {
+                _tempdir: tempdir,
+                _lock: lock,
+            }
+        }
+
+        fn path(&self) -> &Path {
+            self._tempdir.path()
+        }
+    }
+
+    impl Drop for NarratorDirGuard {
+        fn drop(&mut self) {
+            // Always clear the env var, even on panic, before the lock
+            // releases. Otherwise tests that don't use the guard (e.g.
+            // `test_get_narrator_dir`) see a stale tempdir path.
+            unsafe {
+                std::env::remove_var("NARRATOR_DIR");
+            }
+        }
+    }
+
+    fn sample_config(id: &str, title: &str) -> ProjectConfig {
+        ProjectConfig {
+            schema_version: 1,
+            id: id.into(),
+            title: title.into(),
+            description: "desc".into(),
+            video_path: "/tmp/video.mp4".into(),
+            style: "product_demo".into(),
+            languages: vec!["en".into()],
+            primary_language: "en".into(),
+            frame_config: FrameConfig::default(),
+            ai_config: AiConfig {
+                provider: AiProviderKind::Claude,
+                model: "claude-sonnet-4-20250514".into(),
+                temperature: 0.7,
+            },
+            custom_prompt: String::new(),
+            created_at: "2026-04-01T00:00:00Z".into(),
+            updated_at: "2026-04-01T00:00:00Z".into(),
+            edit_clips: None,
+            timeline_effects: None,
+            video_metadata: None,
+            context_documents: None,
+        }
+    }
+
+    fn sample_template(id: &str, name: &str) -> ProjectTemplate {
+        ProjectTemplate {
+            id: id.into(),
+            name: name.into(),
+            style: "product_demo".into(),
+            languages: vec!["en".into()],
+            primary_language: "en".into(),
+            frame_config: FrameConfig::default(),
+            ai_config: AiConfig {
+                provider: AiProviderKind::Claude,
+                model: "claude-sonnet-4-20250514".into(),
+                temperature: 0.7,
+            },
+            custom_prompt: String::new(),
+            tts_provider: "builtin".into(),
+            created_at: "2026-04-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn test_project_create_load_list_roundtrip() {
+        let g = NarratorDirGuard::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let cfg = sample_config(&id, "Roundtrip Project");
+        create_project(&cfg).unwrap();
+
+        let loaded = load_project(&id).unwrap();
+        assert_eq!(loaded.title, "Roundtrip Project");
+        assert_eq!(loaded.id, id);
+
+        let list = list_projects().unwrap();
+        assert!(list
+            .iter()
+            .any(|p| p.id == id && p.title == "Roundtrip Project"));
+        drop(g);
+    }
+
+    #[test]
+    fn test_project_save_updates_title() {
+        let g = NarratorDirGuard::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut cfg = sample_config(&id, "Original");
+        create_project(&cfg).unwrap();
+
+        cfg.title = "Renamed".into();
+        save_project(&cfg).unwrap();
+
+        let loaded = load_project(&id).unwrap();
+        assert_eq!(loaded.title, "Renamed");
+        drop(g);
+    }
+
+    #[test]
+    fn test_project_invalid_id_rejected() {
+        let err = load_project("not-a-uuid").unwrap_err();
+        assert!(err.to_string().contains("Invalid project ID"));
+    }
+
+    #[test]
+    fn test_save_script_roundtrip_multi_version() {
+        let g = NarratorDirGuard::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let cfg = sample_config(&id, "Scripts Test");
+        create_project(&cfg).unwrap();
+
+        let script = NarrationScript {
+            title: "S1".into(),
+            total_duration_seconds: 30.0,
+            segments: vec![],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "m".into(),
+                generated_at: "2026-04-01T00:00:00Z".into(),
+            },
+        };
+
+        let path1 = save_script(&id, "en", &script).unwrap();
+        let path2 = save_script(&id, "en", &script).unwrap();
+        assert!(path1.contains("v1_en.json"));
+        assert!(path2.contains("v2_en.json"));
+        assert!(Path::new(&path1).exists());
+        assert!(Path::new(&path2).exists());
+        drop(g);
+    }
+
+    // ── Template CRUD ────────────────────────────────────────────────
+
+    #[test]
+    fn test_template_save_list_delete_cycle() {
+        let g = NarratorDirGuard::new();
+        let t1 = sample_template(&uuid::Uuid::new_v4().to_string(), "Template A");
+        let t2 = sample_template(&uuid::Uuid::new_v4().to_string(), "Template B");
+        save_template(&t1).unwrap();
+        save_template(&t2).unwrap();
+
+        let listed = list_templates().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|t| t.name == "Template A"));
+        assert!(listed.iter().any(|t| t.name == "Template B"));
+
+        delete_template(&t1.id).unwrap();
+        let after = list_templates().unwrap();
+        assert_eq!(after.len(), 1);
+        assert!(after.iter().all(|t| t.id != t1.id));
+        drop(g);
+    }
+
+    #[test]
+    fn test_default_styles_shape() {
+        let styles = default_styles();
+        assert!(!styles.is_empty());
+        for s in &styles {
+            assert!(!s.id.is_empty());
+            assert!(!s.label.is_empty());
+            assert!(!s.system_prompt.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_project_list_empty_when_no_projects() {
+        let g = NarratorDirGuard::new();
+        let list = list_projects().unwrap();
+        assert_eq!(list.len(), 0);
+        drop(g);
+    }
+
+    // ── Export/import (ZIP) round-trip ────────────────────────────────
+
+    #[test]
+    fn test_export_import_project_roundtrip() {
+        let g1 = NarratorDirGuard::new();
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let cfg = sample_config(&id, "Exportable");
+        create_project(&cfg).unwrap();
+
+        let script = NarrationScript {
+            title: "s".into(),
+            total_duration_seconds: 10.0,
+            segments: vec![Segment {
+                index: 0,
+                start_seconds: 0.0,
+                end_seconds: 5.0,
+                text: "テスト".into(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            }],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "m".into(),
+                generated_at: "2026-04-01T00:00:00Z".into(),
+            },
+        };
+        save_script(&id, "en", &script).unwrap();
+
+        // Write a fake frame so export includes the frames dir
+        let frames_dir = g1.path().join("projects").join(&id).join("frames");
+        std::fs::write(frames_dir.join("frame_0.jpg"), b"\xFF\xD8\xFF\xE0fake").unwrap();
+
+        let archive = g1.path().join("out.narrator");
+        export_project(&id, &archive).unwrap();
+        assert!(archive.exists());
+        assert!(std::fs::metadata(&archive).unwrap().len() > 0);
+
+        // Copy archive to a path outside g1's tempdir because we're about to
+        // drop g1 and create a new guard (new tempdir, different NARRATOR_DIR).
+        let shared_archive = std::env::temp_dir().join(format!(
+            "narrator-test-{}.narrator",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::copy(&archive, &shared_archive).unwrap();
+        drop(g1);
+
+        let g2 = NarratorDirGuard::new();
+        let new_id = import_project(&shared_archive).unwrap();
+        assert_ne!(new_id, id, "import should allocate a new id");
+
+        let loaded = load_project(&new_id).unwrap();
+        // import_project appends " (imported)" to the title to distinguish it
+        assert!(
+            loaded.title.starts_with("Exportable"),
+            "unexpected imported title: {}",
+            loaded.title
+        );
+
+        let full = load_project_full(&new_id).unwrap();
+        let en = full.scripts.get("en").expect("en script should be present");
+        assert_eq!(en.segments[0].text, "テスト");
+
+        let new_frames = g2.path().join("projects").join(&new_id).join("frames");
+        assert!(new_frames.join("frame_0.jpg").exists());
+        drop(g2);
+
+        // Clean up the shared archive outside tempdirs
+        let _ = std::fs::remove_file(&shared_archive);
+    }
+
+    #[test]
+    fn test_import_project_rejects_invalid_zip() {
+        let g = NarratorDirGuard::new();
+        let bogus = g.path().join("not-a-zip.narrator");
+        std::fs::write(&bogus, b"this is not a zip").unwrap();
+        let err = import_project(&bogus).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        drop(g);
     }
 }

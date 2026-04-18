@@ -14,6 +14,7 @@ export default defineConfig(async () => ({
 
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    __APP_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
   },
 
   build: {

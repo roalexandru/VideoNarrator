@@ -104,6 +104,7 @@ pub fn run() {
             commands::set_api_key,
             commands::validate_api_key_cmd,
             commands::probe_video,
+            commands::check_file_readable,
             commands::process_documents,
             commands::generate_narration,
             commands::translate_script,

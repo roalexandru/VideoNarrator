@@ -79,7 +79,7 @@ const sections = [
     ],
   },
   {
-    title: "Review & Edit",
+    title: "Review",
     items: [
       {
         q: "Editing segments",
@@ -130,7 +130,7 @@ const sections = [
           : "New Project — Ctrl+N\nSave Project — Ctrl+S\nSettings — Ctrl+,\nFull Screen — F11",
       },
       {
-        q: "Review & Edit",
+        q: "Review",
         a: isMac
           ? "Undo — ⌘Z\nRedo — ⌘⇧Z\nPlay/Pause video — Space"
           : "Undo — Ctrl+Z\nRedo — Ctrl+Shift+Z\nPlay/Pause video — Space",

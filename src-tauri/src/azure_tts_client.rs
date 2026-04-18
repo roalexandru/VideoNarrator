@@ -251,6 +251,29 @@ pub async fn generate_speech(
     }
 }
 
+pub async fn validate_key(api_key: &str, region: &str) -> Result<bool, NarratorError> {
+    let client = http_client::shared();
+
+    let key = api_key.trim();
+    let url = format!(
+        "https://{}.tts.speech.microsoft.com/cognitiveservices/voices/list",
+        region
+    );
+
+    let resp = client
+        .get(&url)
+        .header("Ocp-Apim-Subscription-Key", key)
+        .send()
+        .await
+        .map_err(|e| NarratorError::ApiError(format!("Failed to connect to Azure TTS: {e}")))?;
+
+    let status = resp.status().as_u16();
+    tracing::info!("Azure TTS key validation: HTTP {status}");
+
+    // 200 = valid key + valid region. 401 = bad key. Other statuses are ambiguous.
+    Ok(status == 200)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,27 +337,4 @@ mod tests {
         // Verify that the default voice (Jenny) is present
         assert!(voices.iter().any(|v| v.short_name == "en-US-JennyNeural"));
     }
-}
-
-pub async fn validate_key(api_key: &str, region: &str) -> Result<bool, NarratorError> {
-    let client = http_client::shared();
-
-    let key = api_key.trim();
-    let url = format!(
-        "https://{}.tts.speech.microsoft.com/cognitiveservices/voices/list",
-        region
-    );
-
-    let resp = client
-        .get(&url)
-        .header("Ocp-Apim-Subscription-Key", key)
-        .send()
-        .await
-        .map_err(|e| NarratorError::ApiError(format!("Failed to connect to Azure TTS: {e}")))?;
-
-    let status = resp.status().as_u16();
-    tracing::info!("Azure TTS key validation: HTTP {status}");
-
-    // 200 = valid key + valid region. 401 = bad key. Other statuses are ambiguous.
-    Ok(status == 200)
 }

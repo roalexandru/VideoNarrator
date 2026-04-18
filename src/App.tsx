@@ -204,6 +204,10 @@ export default function App() {
     const cs = useConfigStore.getState();
     const es = useEditStore.getState();
     const now = new Date().toISOString();
+    if (ps.contextDocuments.length > 0) {
+      console.log("[save] context_documents count:", ps.contextDocuments.length,
+        "names:", ps.contextDocuments.map((d) => d.name));
+    }
     const editClips = es.clips.length > 0 ? es.clips.map((c) => ({
       source_start: c.sourceStart,
       source_end: c.sourceEnd,
@@ -251,6 +255,9 @@ export default function App() {
         fps: ps.videoFile.fps,
         file_size: ps.videoFile.size,
       } : null,
+      // Persist context documents so they survive reload and stay wired to
+      // the next AI generation.
+      context_documents: ps.contextDocuments.length > 0 ? ps.contextDocuments : null,
     };
   }, []);
 
@@ -385,6 +392,25 @@ export default function App() {
       ps.setTitle(cfg.title);
       ps.setDescription(cfg.description);
       ps.setCreatedAt(cfg.created_at);
+
+      // Restore context documents so the Setup panel shows them and AI
+      // generation continues to use the same sources.
+      console.log("[load] cfg.context_documents:", cfg.context_documents);
+      if (cfg.context_documents && cfg.context_documents.length > 0) {
+        const docs = cfg.context_documents
+          .filter((d) => d && d.path)
+          .map((d) => ({
+            id: d.id || crypto.randomUUID(),
+            path: d.path,
+            name: d.name || d.path.split("/").pop() || "document",
+            size: d.size || 0,
+            type: (["md", "txt", "pdf"].includes(d.type) ? d.type : "txt") as "md" | "txt" | "pdf",
+            tokenCount: d.tokenCount,
+          }));
+        ps.setDocuments(docs);
+      } else {
+        ps.setDocuments([]);
+      }
 
       // Use cached video metadata if available; only probe as a fallback
       const cachedMeta = cfg.video_metadata;

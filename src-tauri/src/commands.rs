@@ -84,22 +84,48 @@ fn load_config() -> PersistentConfig {
 fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     let path = config_path();
     let json = serde_json::to_string_pretty(config)?;
-    // Write atomically with restrictive permissions from the start
+    // Write atomically via temp file + rename. Set 0o600 on the temp file
+    // BEFORE the rename so the final file is never briefly world-readable.
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(json.as_bytes())?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| NarratorError::ProjectError("config path has no parent".into()))?;
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("config.json");
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp = parent.join(format!(".{file_name}.tmp.{nonce}"));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, &path)
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        write_result?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, json)?;
+        crate::project_store::atomic_write(&path, json.as_bytes())?;
     }
     Ok(())
 }
@@ -357,6 +383,53 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     // Strip \\?\ extended-length path prefix that Windows canonicalize adds
     let resolved = strip_extended_path_prefix(&resolved);
     video_engine::probe_video(&resolved).await
+}
+
+/// Check whether the app can actually read the given file path. On macOS,
+/// this surfaces TCC denials (Documents/Desktop/Downloads folder permissions)
+/// as a clear error instead of a silent black video preview.
+#[tauri::command]
+pub async fn check_file_readable(path: String) -> Result<bool, NarratorError> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(NarratorError::VideoProbeError(format!(
+            "File not found: {path}"
+        )));
+    }
+    // Attempt an actual read of the first byte. Just checking metadata is
+    // insufficient because macOS TCC allows stat() but blocks read().
+    match tokio::fs::File::open(p).await {
+        Ok(mut f) => {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 1];
+            match f.read(&mut buf).await {
+                Ok(_) => Ok(true),
+                Err(e) if e.raw_os_error() == Some(1) => {
+                    // errno 1 = EPERM on macOS → TCC denial
+                    Err(NarratorError::VideoProbeError(
+                        "macOS has denied access to this file. Go to System Settings → \
+                         Privacy & Security → Files and Folders, and enable access for Narrator \
+                         (Documents / Desktop / Downloads as applicable). Or move the file to \
+                         ~/Downloads or ~/Videos which don't need special permission."
+                            .into(),
+                    ))
+                }
+                Err(e) => Err(NarratorError::VideoProbeError(format!(
+                    "Cannot read file: {e}"
+                ))),
+            }
+        }
+        Err(e) if e.raw_os_error() == Some(1) => Err(NarratorError::VideoProbeError(
+            "macOS has denied access to this file. Go to System Settings → \
+             Privacy & Security → Files and Folders, and enable access for Narrator \
+             (Documents / Desktop / Downloads as applicable). Or move the file to \
+             ~/Downloads or ~/Videos which don't need special permission."
+                .into(),
+        )),
+        Err(e) => Err(NarratorError::VideoProbeError(format!(
+            "Cannot open file: {e}"
+        ))),
+    }
 }
 
 // ── Document commands ──
@@ -631,6 +704,10 @@ pub async fn generate_narration(
         video_metadata: existing_config
             .as_ref()
             .and_then(|c| c.video_metadata.clone()),
+        // Preserve context documents across regenerations
+        context_documents: existing_config
+            .as_ref()
+            .and_then(|c| c.context_documents.clone()),
     };
     if let Err(e) = project_store::create_project(&project_config) {
         tracing::warn!("Failed to auto-save project: {e}");

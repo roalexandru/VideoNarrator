@@ -270,7 +270,8 @@ export function ReviewScreen() {
     return () => window.removeEventListener("keydown", handler);
   }, [canUndo, canRedo, undo, redo]);
 
-  // Use edited video for review — narration timestamps match the edited timeline
+  // Review plays the edited video so the user sees the same output that will
+  // be exported (speed changes, zooms, effects baked in).
   const videoPath = editedVideoPath || videoFile?.path;
   const src = videoPath ? convertFileSrc(videoPath) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
@@ -448,7 +449,7 @@ export function ReviewScreen() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review & Edit</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", borderRadius: 7, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
             <select

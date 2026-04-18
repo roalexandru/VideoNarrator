@@ -154,7 +154,7 @@ describe("wizardStore", () => {
     );
     expect(trackCalls).toHaveLength(1);
     const props = trackCalls[0].payload.props as Record<string, unknown>;
-    expect(props.step).toBe("Review & Edit");
+    expect(props.step).toBe("Review");
     expect(props.step_index).toBe(4);
   });
 

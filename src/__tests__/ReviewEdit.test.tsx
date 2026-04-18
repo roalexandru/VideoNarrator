@@ -220,10 +220,10 @@ describe("ReviewScreen", () => {
     expect(screen.getAllByText("Japanese narration text").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("renders Review & Edit heading", () => {
+  it("renders Review heading", () => {
     seedStores();
     render(<ReviewScreen />);
-    expect(screen.getByText("Review & Edit")).toBeInTheDocument();
+    expect(screen.getByText("Review")).toBeInTheDocument();
   });
 
   it("shows No segments message when script has no segments", () => {

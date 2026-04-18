@@ -116,6 +116,24 @@ export function ProcessingScreen() {
               } : null,
             };
           }),
+          // Overlay effects (spotlight, blur, text, fade) — applied post-concat in output time.
+          // Zoom-pan is excluded because it's handled per-clip above.
+          // Rust's OverlayEffect / SpotlightData / BlurData / TextData / FadeData
+          // all use #[serde(rename_all = "camelCase")] so JSON keys MUST be camelCase.
+          effects: effectsTrack
+            .filter((e) => e.type !== 'zoom-pan')
+            .map((e) => ({
+              type: e.type,
+              startTime: e.startTime,
+              endTime: e.endTime,
+              transitionIn: e.transitionIn,
+              transitionOut: e.transitionOut,
+              reverse: e.reverse,
+              spotlight: e.spotlight ? { x: e.spotlight.x, y: e.spotlight.y, radius: e.spotlight.radius, dimOpacity: e.spotlight.dimOpacity } : undefined,
+              blur: e.blur ? { x: e.blur.x, y: e.blur.y, width: e.blur.width, height: e.blur.height, radius: e.blur.radius, invert: e.blur.invert } : undefined,
+              text: e.text ? { content: e.text.content, x: e.text.x, y: e.text.y, fontSize: e.text.fontSize, color: e.text.color, fontFamily: e.text.fontFamily, bold: e.text.bold, italic: e.text.italic, underline: e.text.underline, background: e.text.background, align: e.text.align, opacity: e.text.opacity } : undefined,
+              fade: e.fade ? { color: e.fade.color, opacity: e.fade.opacity } : undefined,
+            })),
         };
         const editCh = new Channel<ProgressEvent>();
         editCh.onmessage = (e: ProgressEvent) => {

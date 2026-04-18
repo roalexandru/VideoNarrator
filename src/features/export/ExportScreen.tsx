@@ -5,6 +5,7 @@ import { useExportStore, slugify } from "../../stores/exportStore";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useProjectStore } from "../../stores/projectStore";
+import { useEditStore } from "../../stores/editStore";
 import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
@@ -113,7 +114,11 @@ export function ExportScreen() {
   const scripts = useScriptStore((s) => s.scripts);
   const languages = useConfigStore((s) => s.languages);
   const projectTitle = useProjectStore((s) => s.title);
-  const videoPath = useProjectStore((s) => s.videoFile?.path);
+  // Export uses the EDITED video (with speed changes, zooms, and effects baked in)
+  // when edits were applied; falls back to the original if no edits were made.
+  const originalVideoPath = useProjectStore((s) => s.videoFile?.path);
+  const editedVideoPath = useEditStore((s) => s.editedVideoPath);
+  const videoPath = editedVideoPath || originalVideoPath;
 
   // Script export
   const [scriptResults, setScriptResults] = useState<ExportResult[]>([]);

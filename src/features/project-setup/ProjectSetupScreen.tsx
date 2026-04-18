@@ -1,7 +1,7 @@
 import { useCallback, useState, useEffect, type CSSProperties } from "react";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../../stores/projectStore";
-import { probeVideo, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
+import { probeVideo, checkFileReadable, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
 import { fileNameFromPath } from "../../lib/formatters";
 import { trackEvent, trackError } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
@@ -120,13 +120,17 @@ export function ProjectSetupScreen() {
     if (!file) return;
     setProbing(true);
     try {
+      // First verify macOS/OS actually lets us read this file. Without this
+      // check, a TCC-denied file would pass probe (ffmpeg has its own perms)
+      // and silently break the video preview in the Edit screen.
+      await checkFileReadable(file as string);
       const m = await probeVideo(file as string);
       setVideoFile({ path: m.path, name: fileNameFromPath(m.path), size: m.file_size, duration: m.duration_seconds, resolution: { width: m.width, height: m.height }, codec: m.codec, fps: m.fps });
       trackEvent("video_imported", { source: "file", duration_s: Math.round(m.duration_seconds), codec: m.codec, width: m.width, height: m.height, fps: Math.round(m.fps), size_mb: Math.round(m.file_size / 1048576) });
     } catch (err) {
       console.error("Probe failed:", err);
       trackError("probe_video_file_select", err);
-      await message(`Failed to load video: ${String(err)}`, { title: "Video Error", kind: "error" });
+      await message(String(err).replace(/^(Error: )?/, ""), { title: "Can't open video", kind: "error" });
     }
     finally { setProbing(false); }
   }, [setVideoFile]);

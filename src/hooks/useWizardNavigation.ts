@@ -6,7 +6,7 @@ const STEP_LABELS = [
   "Edit Video",
   "Configuration",
   "Processing",
-  "Review & Edit",
+  "Review",
   "Export",
 ] as const;
 

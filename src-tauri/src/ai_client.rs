@@ -7,6 +7,17 @@ use crate::video_engine;
 use async_trait::async_trait;
 use serde_json::json;
 
+/// Truncate a string to at most `max_chars` CHARACTERS (not bytes), safe for
+/// multi-byte UTF-8 text like Japanese or emoji. Returns a borrowed slice when
+/// the string already fits, otherwise an owned String.
+fn truncate_chars(s: &str, max_chars: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max_chars {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(s.chars().take(max_chars).collect())
+    }
+}
+
 #[async_trait]
 pub trait AiProvider: Send + Sync {
     async fn generate(
@@ -86,11 +97,7 @@ impl AiProvider for ClaudeProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = if error_text.len() > 200 {
-                    &error_text[..200]
-                } else {
-                    &error_text
-                };
+                let truncated = truncate_chars(&error_text, 200);
                 tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
                     "Claude API error (HTTP {status}). Check your API key and try again."
@@ -210,11 +217,7 @@ impl AiProvider for OpenAiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = if error_text.len() > 200 {
-                    &error_text[..200]
-                } else {
-                    &error_text
-                };
+                let truncated = truncate_chars(&error_text, 200);
                 tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
                     "OpenAI API error (HTTP {status}). Check your API key and try again."
@@ -325,11 +328,7 @@ impl AiProvider for GeminiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = if error_text.len() > 200 {
-                    &error_text[..200]
-                } else {
-                    &error_text
-                };
+                let truncated = truncate_chars(&error_text, 200);
                 tracing::error!("API error ({status}): {truncated}");
                 return Err(NarratorError::ApiError(format!(
                     "Gemini API error (HTTP {status}). Check your API key and try again."
@@ -535,6 +534,22 @@ async fn generate_chunked(
         MAX_FRAMES_PER_CALL
     );
 
+    // Extract frame timestamps from labels so we can compute per-chunk time bounds.
+    // Collect timestamps aligned to image_pairs order.
+    let frame_times: Vec<f64> = image_pairs
+        .iter()
+        .map(|(label, _img)| {
+            let text = label.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            // Parse "[Frame N at X.Xs]"
+            text.find(" at ")
+                .and_then(|idx| {
+                    let after = &text[idx + 4..];
+                    after.find('s').and_then(|s| after[..s].parse::<f64>().ok())
+                })
+                .unwrap_or(0.0)
+        })
+        .collect();
+
     let mut all_segments: Vec<crate::models::Segment> = Vec::new();
     let mut merged_script: Option<NarrationScript> = None;
 
@@ -543,19 +558,44 @@ async fn generate_chunked(
         let end = (start + MAX_FRAMES_PER_CALL).min(image_pairs.len());
         let chunk_pairs = &image_pairs[start..end];
 
+        // Compute time bounds for this chunk from frame timestamps.
+        // chunk_start = first frame's timestamp (or previous chunk's end if context exists)
+        // chunk_end   = next chunk's first frame timestamp (or total video duration if last chunk)
+        let chunk_first_ts = frame_times.get(start).copied().unwrap_or(0.0);
+        let chunk_last_ts = frame_times.get(end - 1).copied().unwrap_or(chunk_first_ts);
+        let next_chunk_first_ts = frame_times.get(end).copied();
+
+        // Bound the chunk strictly between the first frame and the first frame of the next chunk.
+        // For the final chunk, allow up to chunk_last_ts + buffer (no hard upper bound known here).
+        let chunk_start_time = if chunk_idx == 0 {
+            0.0
+        } else {
+            // Hard-lock: must start where previous chunk ended
+            all_segments
+                .last()
+                .map(|s| s.end_seconds)
+                .unwrap_or(chunk_first_ts)
+        };
+        let chunk_end_time = next_chunk_first_ts.unwrap_or(chunk_last_ts + 30.0);
+
         // Build the message for this chunk
         let mut chunk_content = text_parts.clone();
 
-        // Add context from previous chunks
+        // Add context from previous chunks + strict time-bound instructions
         if !all_segments.is_empty() {
             let prev_summary: String = all_segments
                 .iter()
+                .rev()
+                .take(5) // only the last 5 to keep prompt tight
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
                 .map(|s| {
                     format!(
-                        "[{:.1}s-{:.1}s]: {}",
+                        "[{:.2}s-{:.2}s]: {}",
                         s.start_seconds,
                         s.end_seconds,
-                        &s.text[..s.text.len().min(80)]
+                        truncate_chars(&s.text, 80)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -563,13 +603,26 @@ async fn generate_chunked(
             chunk_content.push(json!({
                 "type": "text",
                 "text": format!(
-                    "\n--- PREVIOUSLY GENERATED SEGMENTS (for context, do NOT repeat these) ---\n{prev_summary}\n--- NOW CONTINUE narration for the following frames. Start from where the previous segments ended. ---\n"
+                    "\n--- PREVIOUSLY GENERATED SEGMENTS (for context only — DO NOT repeat or overlap them) ---\n{prev_summary}\n\n\
+                    --- STRICT TIME BOUNDS for this batch ---\n\
+                    All new segments in this batch MUST have start_seconds >= {:.2} and end_seconds <= {:.2}.\n\
+                    The first new segment's start_seconds MUST equal {:.2} (continuation from previous batch).\n\
+                    Segments MUST be in strictly ascending time order. DO NOT emit any segment that overlaps the previous batch.\n\
+                    --- NOW generate narration for the following frames within these time bounds. ---\n",
+                    chunk_start_time, chunk_end_time, chunk_start_time
                 )
             }));
         } else {
             chunk_content.push(json!({
                 "type": "text",
-                "text": format!("\nThis is batch {}/{num_chunks} of frames. Generate narration segments for these frames.", chunk_idx + 1)
+                "text": format!(
+                    "\nThis is batch {}/{num_chunks} of frames.\n\
+                    --- STRICT TIME BOUNDS for this batch ---\n\
+                    All segments MUST have start_seconds >= {:.2} and end_seconds <= {:.2}.\n\
+                    Segments MUST be in strictly ascending time order.\n\
+                    --- Generate narration segments for these frames within these bounds. ---\n",
+                    chunk_idx + 1, chunk_start_time, chunk_end_time
+                )
             }));
         }
 
@@ -582,12 +635,12 @@ async fn generate_chunked(
         let chunk_message = serde_json::Value::Array(chunk_content);
 
         tracing::info!(
-            "Chunk {}/{}: {} frames (image pairs {}-{})",
+            "Chunk {}/{}: {} frames ({:.2}s → {:.2}s)",
             chunk_idx + 1,
             num_chunks,
             end - start,
-            start,
-            end - 1
+            chunk_start_time,
+            chunk_end_time
         );
 
         let response = generate_with_retry(provider, system_prompt, chunk_message).await?;
@@ -604,7 +657,7 @@ async fn generate_chunked(
             NarratorError::ApiError(format!(
                 "Failed to parse chunk {} response: {e}\nResponse: {}",
                 chunk_idx + 1,
-                &json_text[..json_text.len().min(500)]
+                truncate_chars(json_text, 500)
             ))
         })?;
 
@@ -617,22 +670,195 @@ async fn generate_chunked(
             };
             merged_script = Some(base);
         }
-        all_segments.extend(chunk_script.segments);
+
+        // Clamp segments to this chunk's time bounds and drop any that violate ordering
+        // relative to segments already accumulated.
+        let clamped = clamp_chunk_segments(chunk_script.segments, chunk_start_time, chunk_end_time);
+        let last_end = all_segments.last().map(|s| s.end_seconds).unwrap_or(0.0);
+        let mut kept = 0usize;
+        let mut skipped = 0usize;
+        for mut seg in clamped {
+            // Hard-lock: reject any segment that starts before the previous one ended.
+            if seg.start_seconds < last_end - 0.01 {
+                // Try to rescue by pushing forward if the segment still has room
+                if seg.end_seconds > last_end + 0.3 {
+                    seg.start_seconds = last_end;
+                } else {
+                    skipped += 1;
+                    continue;
+                }
+            }
+            all_segments.push(seg);
+            kept += 1;
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                "Chunk {}: kept {} segments, skipped {} that violated time bounds",
+                chunk_idx + 1,
+                kept,
+                skipped
+            );
+        }
     }
 
     // Build the final merged script
     if let Some(mut script) = merged_script {
-        // Re-index segments
-        for (i, seg) in all_segments.iter_mut().enumerate() {
-            seg.index = i;
-        }
-        script.segments = all_segments;
+        // Final normalization pass (guarantees monotonic, non-overlapping, re-indexed)
+        let normalized = normalize_timeline(all_segments, script.total_duration_seconds);
+        script.segments = normalized;
         // Return as JSON string (same format as single-call response)
         serde_json::to_string(&script)
             .map_err(|e| NarratorError::ApiError(format!("Failed to serialize merged script: {e}")))
     } else {
         Err(NarratorError::ApiError("No chunks generated".into()))
     }
+}
+
+/// Clamp segments to a chunk's time range and drop invalid ones.
+fn clamp_chunk_segments(
+    segments: Vec<Segment>,
+    chunk_start: f64,
+    chunk_end: f64,
+) -> Vec<Segment> {
+    segments
+        .into_iter()
+        .filter(|s| s.start_seconds.is_finite() && s.end_seconds.is_finite())
+        .filter(|s| !s.text.trim().is_empty())
+        .map(|mut s| {
+            s.start_seconds = s.start_seconds.max(chunk_start);
+            s.end_seconds = s.end_seconds.min(chunk_end);
+            s
+        })
+        .filter(|s| s.end_seconds > s.start_seconds + 0.3)
+        .collect()
+}
+
+/// Normalize a timeline of segments: filter malformed, sort, dedupe, resolve overlaps.
+/// This is the defensive last-line post-processor that guarantees monotonic timestamps.
+pub fn normalize_timeline(
+    mut segments: Vec<Segment>,
+    video_duration: f64,
+) -> Vec<Segment> {
+    let original_len = segments.len();
+
+    // 1. Filter obviously malformed
+    segments.retain(|s| {
+        s.start_seconds.is_finite()
+            && s.end_seconds.is_finite()
+            && s.start_seconds >= 0.0
+            && s.start_seconds < video_duration + 1.0
+            && s.end_seconds > s.start_seconds
+            && !s.text.trim().is_empty()
+    });
+
+    // 2. Clamp end times to video duration
+    for s in segments.iter_mut() {
+        s.end_seconds = s.end_seconds.min(video_duration);
+    }
+
+    // 3. Sort by start time (primary), end time (secondary)
+    segments.sort_by(|a, b| {
+        a.start_seconds
+            .partial_cmp(&b.start_seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                a.end_seconds
+                    .partial_cmp(&b.end_seconds)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+
+    // 4. Deduplicate segments with nearly identical start/end
+    segments.dedup_by(|a, b| {
+        (a.start_seconds - b.start_seconds).abs() < 0.2
+            && (a.end_seconds - b.end_seconds).abs() < 0.2
+    });
+
+    // 5. Resolve overlaps
+    let mut fixed: Vec<Segment> = Vec::with_capacity(segments.len());
+    let mut dropped_count = 0usize;
+    let mut clamped_count = 0usize;
+    for seg in segments {
+        if let Some(last) = fixed.last_mut() {
+            if seg.start_seconds < last.end_seconds {
+                let overlap = last.end_seconds - seg.start_seconds;
+                let seg_len = seg.end_seconds - seg.start_seconds;
+                if seg.end_seconds <= last.end_seconds {
+                    // Fully contained — drop it
+                    tracing::warn!(
+                        "Dropping segment fully contained in previous [{:.2}-{:.2}]: \"{}\"",
+                        seg.start_seconds,
+                        seg.end_seconds,
+                        truncate_chars(&seg.text, 60)
+                    );
+                    dropped_count += 1;
+                    continue;
+                } else if overlap > seg_len * 0.5 {
+                    // Heavy overlap: truncate previous to make room
+                    tracing::warn!(
+                        "Heavy overlap: truncating previous [{:.2}-{:.2}] to [{:.2}]",
+                        last.start_seconds,
+                        last.end_seconds,
+                        seg.start_seconds
+                    );
+                    last.end_seconds = seg.start_seconds;
+                    clamped_count += 1;
+                } else {
+                    // Light overlap: push new segment's start
+                    let mut s = seg;
+                    let old_start = s.start_seconds;
+                    s.start_seconds = last.end_seconds;
+                    tracing::warn!(
+                        "Light overlap: pushed segment start {:.2} → {:.2}",
+                        old_start,
+                        s.start_seconds
+                    );
+                    if s.end_seconds - s.start_seconds >= 0.3 {
+                        fixed.push(s);
+                    } else {
+                        dropped_count += 1;
+                    }
+                    clamped_count += 1;
+                    continue;
+                }
+            }
+        }
+        fixed.push(seg);
+    }
+
+    // 6. Ensure minimum 0.5s duration per segment
+    for s in fixed.iter_mut() {
+        if s.end_seconds - s.start_seconds < 0.5 {
+            s.end_seconds = s.start_seconds + 0.5;
+        }
+    }
+
+    // 7. Final sanity pass: ensure strict ascending order
+    for i in 1..fixed.len() {
+        if fixed[i].start_seconds < fixed[i - 1].end_seconds {
+            fixed[i].start_seconds = fixed[i - 1].end_seconds;
+            if fixed[i].end_seconds <= fixed[i].start_seconds {
+                fixed[i].end_seconds = fixed[i].start_seconds + 0.5;
+            }
+        }
+    }
+
+    // 8. Re-index
+    for (i, s) in fixed.iter_mut().enumerate() {
+        s.index = i;
+    }
+
+    if original_len != fixed.len() || dropped_count > 0 || clamped_count > 0 {
+        tracing::info!(
+            "normalize_timeline: {} → {} segments ({} dropped, {} clamped)",
+            original_len,
+            fixed.len(),
+            dropped_count,
+            clamped_count
+        );
+    }
+
+    fixed
 }
 
 /// Check if an error is a rate limit (429) that should be retried.
@@ -724,6 +950,22 @@ pub async fn generate_narration(
     if script.metadata.generated_at.is_empty() {
         script.metadata.generated_at = chrono::Utc::now().to_rfc3339();
     }
+
+    // Normalize the timeline: filter malformed, sort, dedupe, resolve overlaps.
+    // This guarantees monotonic, non-overlapping segments regardless of AI output shape.
+    // (For the chunked path this is also applied inside generate_chunked, so running it
+    // again here is idempotent and cheap.)
+    let duration = if script.total_duration_seconds > 0.0 {
+        script.total_duration_seconds
+    } else {
+        script
+            .segments
+            .last()
+            .map(|s| s.end_seconds)
+            .unwrap_or(0.0)
+            + 60.0
+    };
+    script.segments = normalize_timeline(std::mem::take(&mut script.segments), duration);
 
     // Post-process: ensure segments cover the full video duration
     // If AI stopped early, stretch the timeline proportionally
@@ -1140,5 +1382,817 @@ mod tests {
         assert!(result.is_ok());
         let script = result.unwrap();
         assert_eq!(script.title, "Fenced");
+    }
+
+    // ── normalize_timeline ─────────────────────────────────────────────
+
+    fn seg(index: usize, start: f64, end: f64, text: &str) -> Segment {
+        Segment {
+            index,
+            start_seconds: start,
+            end_seconds: end,
+            text: text.to_string(),
+            visual_description: String::new(),
+            emphasis: vec![],
+            pace: Pace::default(),
+            pause_after_ms: 0,
+            frame_refs: vec![],
+            voice_override: None,
+        }
+    }
+
+    #[test]
+    fn test_normalize_timeline_sorts_out_of_order() {
+        // The exact bug the user reported: segment at 3:22 followed by segment at 2:40
+        let segs = vec![
+            seg(0, 189.0, 202.0, "segment 16"),
+            seg(1, 202.0, 222.0, "segment 17"),
+            seg(2, 160.0, 170.0, "segment 18 — goes backwards!"),
+            seg(3, 170.0, 180.0, "segment 19"),
+        ];
+        let out = normalize_timeline(segs, 300.0);
+        // Must be in strictly ascending order
+        for w in out.windows(2) {
+            assert!(
+                w[0].end_seconds <= w[1].start_seconds + 0.01,
+                "out-of-order: {:?} → {:?}",
+                w[0].start_seconds,
+                w[1].start_seconds
+            );
+        }
+        // Indexes should be sequential
+        for (i, s) in out.iter().enumerate() {
+            assert_eq!(s.index, i);
+        }
+    }
+
+    #[test]
+    fn test_normalize_timeline_drops_duplicates() {
+        let segs = vec![
+            seg(0, 10.0, 20.0, "first"),
+            seg(1, 10.05, 20.05, "duplicate"),
+            seg(2, 30.0, 40.0, "third"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn test_normalize_timeline_drops_fully_contained() {
+        let segs = vec![
+            seg(0, 10.0, 30.0, "outer"),
+            seg(1, 15.0, 25.0, "inside outer"),
+            seg(2, 30.0, 40.0, "after"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "outer");
+        assert_eq!(out[1].text, "after");
+    }
+
+    #[test]
+    fn test_normalize_timeline_handles_heavy_overlap() {
+        // Second segment overlaps by more than 50% → previous is truncated
+        let segs = vec![
+            seg(0, 10.0, 30.0, "first"),
+            seg(1, 12.0, 35.0, "heavy overlap"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out.len(), 2);
+        // The first should be truncated to 12.0
+        assert!((out[0].end_seconds - 12.0).abs() < 0.6); // min duration clamps it to 10+0.5
+    }
+
+    #[test]
+    fn test_normalize_timeline_handles_light_overlap() {
+        // Light overlap → push the new segment's start forward
+        let segs = vec![
+            seg(0, 10.0, 20.0, "first"),
+            seg(1, 19.0, 30.0, "light overlap"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out.len(), 2);
+        assert!(out[1].start_seconds >= out[0].end_seconds - 0.01);
+    }
+
+    #[test]
+    fn test_normalize_timeline_filters_malformed() {
+        let segs = vec![
+            seg(0, f64::NAN, 10.0, "nan start"),
+            seg(1, -5.0, 10.0, "negative start"),
+            seg(2, 10.0, 5.0, "end before start"),
+            seg(3, 20.0, 30.0, ""),
+            seg(4, 40.0, 50.0, "valid"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "valid");
+    }
+
+    #[test]
+    fn test_normalize_timeline_clamps_end_to_duration() {
+        let segs = vec![seg(0, 10.0, 200.0, "too long")];
+        let out = normalize_timeline(segs, 60.0);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].end_seconds - 60.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_normalize_timeline_enforces_min_duration() {
+        let segs = vec![
+            seg(0, 10.0, 10.2, "too short"),
+            seg(1, 30.0, 40.0, "fine"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert!(out[0].end_seconds - out[0].start_seconds >= 0.5);
+    }
+
+    #[test]
+    fn test_normalize_timeline_empty_input() {
+        let out = normalize_timeline(vec![], 100.0);
+        assert_eq!(out.len(), 0);
+    }
+
+    #[test]
+    fn test_normalize_timeline_reindexes() {
+        let segs = vec![
+            seg(99, 30.0, 40.0, "third"),
+            seg(42, 10.0, 20.0, "first"),
+            seg(7, 20.0, 30.0, "second"),
+        ];
+        let out = normalize_timeline(segs, 100.0);
+        assert_eq!(out[0].index, 0);
+        assert_eq!(out[1].index, 1);
+        assert_eq!(out[2].index, 2);
+        assert_eq!(out[0].text, "first");
+    }
+
+    // ── clamp_chunk_segments ─────────────────────────────────────────────
+
+    #[test]
+    fn test_clamp_chunk_segments_drops_outside_range() {
+        let segs = vec![
+            seg(0, 5.0, 15.0, "partial start overlap — clamped"),
+            seg(1, 20.0, 30.0, "fully inside"),
+            seg(2, 100.0, 110.0, "fully after end — clamped to nothing"),
+        ];
+        let out = clamp_chunk_segments(segs, 10.0, 40.0);
+        // The first is clamped to [10, 15], the second fully survives,
+        // the third is clamped to [40, 40] which fails min duration.
+        assert_eq!(out.len(), 2);
+        assert!((out[0].start_seconds - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_clamp_chunk_segments_drops_too_short() {
+        let segs = vec![seg(0, 5.0, 10.1, "too short after clamp")];
+        let out = clamp_chunk_segments(segs, 10.0, 100.0);
+        assert_eq!(out.len(), 0);
+    }
+
+    // ── Chunked generation ────────────────────────────────────────────────
+
+    /// Mock provider that returns a different response per call, and records
+    /// every system_prompt / user_message pair it received.
+    struct ScriptedProvider {
+        responses: std::sync::Mutex<Vec<String>>,
+        calls: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(
+                    responses.into_iter().map(String::from).collect(),
+                ),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn captured(&self) -> Vec<serde_json::Value> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AiProvider for ScriptedProvider {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            user_message: serde_json::Value,
+        ) -> Result<String, NarratorError> {
+            self.calls.lock().unwrap().push(user_message);
+            let mut r = self.responses.lock().unwrap();
+            if r.is_empty() {
+                return Err(NarratorError::ApiError(
+                    "ScriptedProvider ran out of responses".into(),
+                ));
+            }
+            Ok(r.remove(0))
+        }
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn model(&self) -> &str {
+            "scripted-v1"
+        }
+    }
+
+    fn chunk_response_json(title: &str, total: f64, segs: &[(f64, f64, &str)]) -> String {
+        let seg_json: Vec<serde_json::Value> = segs
+            .iter()
+            .enumerate()
+            .map(|(i, (s, e, t))| {
+                json!({
+                    "index": i,
+                    "start_seconds": s,
+                    "end_seconds": e,
+                    "text": t,
+                    "visual_description": "",
+                    "emphasis": [],
+                    "pace": "medium",
+                    "pause_after_ms": 0,
+                    "frame_refs": []
+                })
+            })
+            .collect();
+        json!({
+            "title": title,
+            "total_duration_seconds": total,
+            "segments": seg_json,
+            "metadata": {
+                "style": "test",
+                "language": "en",
+                "provider": "scripted",
+                "model": "scripted-v1",
+                "generated_at": "2026-04-01T00:00:00Z"
+            }
+        })
+        .to_string()
+    }
+
+    /// Build a user_message with exactly `num_frames` image parts, each labeled
+    /// with a timestamp. Frame i is labelled "[Frame {i} at {i*interval:.1}s]".
+    fn user_msg_with_frames(num_frames: usize, interval: f64) -> serde_json::Value {
+        let mut parts: Vec<serde_json::Value> = vec![json!({
+            "type": "text",
+            "text": "Context: test video."
+        })];
+        for i in 0..num_frames {
+            parts.push(json!({
+                "type": "text",
+                "text": format!("[Frame {} at {:.1}s]", i, i as f64 * interval)
+            }));
+            parts.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "data": "QQ==" }
+            }));
+        }
+        serde_json::Value::Array(parts)
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_splits_frames() {
+        // 25 frames at 1s intervals → 3 chunks of 10, 10, 5 (MAX_FRAMES_PER_CALL=10)
+        let r1 = chunk_response_json(
+            "T",
+            25.0,
+            &[(0.0, 5.0, "chunk1 first"), (5.0, 10.0, "chunk1 second")],
+        );
+        let r2 = chunk_response_json(
+            "T",
+            25.0,
+            &[(10.0, 15.0, "chunk2 first"), (15.0, 20.0, "chunk2 second")],
+        );
+        let r3 = chunk_response_json("T", 25.0, &[(20.0, 25.0, "chunk3")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2, &r3]);
+
+        let msg = user_msg_with_frames(25, 1.0);
+        let result =
+            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        // Provider was called exactly 3 times (one per chunk)
+        assert_eq!(provider.captured().len(), 3);
+        // Merged script has 5 segments (2+2+1)
+        assert_eq!(result.segments.len(), 5);
+        // Segments must be in strictly ascending order
+        for w in result.segments.windows(2) {
+            assert!(
+                w[0].end_seconds <= w[1].start_seconds + 0.01,
+                "segments out of order: {} vs {}",
+                w[0].end_seconds,
+                w[1].start_seconds
+            );
+        }
+        // Indexes should be sequential after normalize_timeline
+        for (i, s) in result.segments.iter().enumerate() {
+            assert_eq!(s.index, i);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_fixes_backwards_segments() {
+        // Simulates the exact bug the user reported: chunk 2 returns segments
+        // with timestamps BEFORE chunk 1's last segment. normalize_timeline
+        // must enforce strictly-ascending order.
+        let r1 = chunk_response_json(
+            "T",
+            30.0,
+            &[(0.0, 10.0, "chunk1 A"), (10.0, 20.0, "chunk1 B")],
+        );
+        // Chunk 2 emits a segment at 5-8s — BEFORE chunk 1's end.
+        let r2 = chunk_response_json(
+            "T",
+            30.0,
+            &[
+                (5.0, 8.0, "backwards jump!"),
+                (22.0, 28.0, "later"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0); // 2 chunks
+
+        let result =
+            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        // The "backwards jump" segment must NOT appear before chunk1's segments
+        for w in result.segments.windows(2) {
+            assert!(
+                w[0].end_seconds <= w[1].start_seconds + 0.01,
+                "backwards jump slipped through: {} -> {}",
+                w[0].end_seconds,
+                w[1].start_seconds
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_time_bounds_in_prompt() {
+        // Each chunk prompt should include STRICT TIME BOUNDS instruction.
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 10.0, "a")]);
+        let r2 = chunk_response_json("T", 30.0, &[(15.0, 25.0, "b")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        let calls = provider.captured();
+        assert_eq!(calls.len(), 2);
+        for (i, call) in calls.iter().enumerate() {
+            let arr = call.as_array().expect("user message should be array");
+            let text_parts: Vec<String> = arr
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            let combined = text_parts.join("\n");
+            assert!(
+                combined.contains("STRICT TIME BOUNDS"),
+                "chunk {} prompt missing time-bounds instruction:\n{}",
+                i + 1,
+                combined
+            );
+            assert!(
+                combined.contains("start_seconds >="),
+                "chunk {} prompt missing start_seconds constraint",
+                i + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_drops_segments_outside_chunk_bounds() {
+        // Chunk 1 covers frames 0..10 (times 0–9s). AI hallucinates a segment
+        // at 50s which should be clamped away before merge.
+        let r1 = chunk_response_json(
+            "T",
+            30.0,
+            &[
+                (0.0, 5.0, "valid"),
+                (50.0, 60.0, "wildly out of range"),
+            ],
+        );
+        let r2 = chunk_response_json("T", 30.0, &[(15.0, 20.0, "chunk2")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        let result =
+            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        // The out-of-range segment shouldn't survive
+        assert!(
+            !result
+                .segments
+                .iter()
+                .any(|s| s.text == "wildly out of range"),
+            "out-of-bounds segment leaked through"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_single_call_generation_applies_normalize() {
+        // Single call (<= MAX_FRAMES_PER_CALL frames) should still apply
+        // normalize_timeline to fix any out-of-order segments the AI emits.
+        let resp = chunk_response_json(
+            "T",
+            30.0,
+            &[
+                (10.0, 20.0, "second"),
+                (0.0, 10.0, "first"),
+                (20.0, 30.0, "third"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let msg = user_msg_with_frames(3, 5.0);
+
+        let result =
+            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        assert_eq!(provider.captured().len(), 1);
+        assert_eq!(result.segments.len(), 3);
+        // Must be sorted
+        assert!(result.segments[0].start_seconds < result.segments[1].start_seconds);
+        assert!(result.segments[1].start_seconds < result.segments[2].start_seconds);
+        assert_eq!(result.segments[0].text, "first");
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_prev_context_included() {
+        // Chunks after the first should include "PREVIOUSLY GENERATED SEGMENTS"
+        // so the AI can continue coherently.
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 5.0, "hello world")]);
+        let r2 = chunk_response_json("T", 30.0, &[(15.0, 20.0, "continued")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+
+        let calls = provider.captured();
+        assert_eq!(calls.len(), 2);
+        let second_call_text: String = calls[1]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()).map(String::from))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            second_call_text.contains("PREVIOUSLY GENERATED SEGMENTS"),
+            "second chunk missing context from first"
+        );
+        assert!(
+            second_call_text.contains("hello world"),
+            "second chunk missing previous segment text"
+        );
+    }
+
+    // ── truncate_chars: UTF-8 safety ────────────────────────────────────
+
+    #[test]
+    fn test_truncate_chars_ascii() {
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+        assert_eq!(truncate_chars("short", 100), "short");
+    }
+
+    #[test]
+    fn test_truncate_chars_preserves_multibyte_boundaries() {
+        // Japanese text — would panic with naive byte slicing
+        let japanese = "こんにちは世界"; // 7 chars, 21 bytes in UTF-8
+        let result = truncate_chars(japanese, 3);
+        assert_eq!(result, "こんに");
+        assert_eq!(result.chars().count(), 3);
+    }
+
+    #[test]
+    fn test_truncate_chars_emoji() {
+        // Emoji are 4-byte sequences — same panic risk
+        let text = "Done 🎬 now 🎞️ what";
+        let result = truncate_chars(text, 7);
+        // First 7 chars (whatever they are) — key assertion is no panic
+        assert!(result.chars().count() <= 7);
+    }
+
+    #[test]
+    fn test_truncate_chars_boundary_cases() {
+        assert_eq!(truncate_chars("", 10), "");
+        assert_eq!(truncate_chars("a", 0), "");
+        assert_eq!(truncate_chars("abc", 3), "abc");
+    }
+
+    // ── Chunked generation: more edge cases ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_chunked_generation_with_multibyte_segments() {
+        // Segments with Japanese text should not cause panics in logging/truncation.
+        // The trigger: a segment with length >60 bytes where byte-index 60 falls
+        // mid-codepoint. In the chunk-overlap warn branch, we log truncate_chars(text, 60).
+        let long_jp = "こんにちは世界これはナレーションのテキストです".repeat(2);
+        let r1 = chunk_response_json(
+            "T",
+            30.0,
+            &[(0.0, 10.0, &long_jp), (10.0, 20.0, &long_jp)],
+        );
+        let r2 = chunk_response_json(
+            "T",
+            30.0,
+            &[
+                // Deliberately fully-contained in chunk 1's range → triggers the
+                // "Dropping segment fully contained" warn log that uses
+                // truncate_chars(&seg.text, 60) under the hood.
+                (5.0, 8.0, &long_jp),
+                (22.0, 28.0, &long_jp),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .expect("must not panic on multibyte text");
+        // Monotonic order preserved
+        for w in result.segments.windows(2) {
+            assert!(w[0].end_seconds <= w[1].start_seconds + 0.01);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_empty_segments_response() {
+        // Chunk 1 returns no segments; chunk 2 returns a segment within ITS bounds.
+        // With 15 frames at 2s interval, chunks are [0..10] (times 0-18) and
+        // [10..15] (times 20-28). Chunk 2 bounds are [20, 58] — so we place
+        // the segment at 22-26s.
+        let r1 = chunk_response_json("T", 30.0, &[]);
+        let r2 = chunk_response_json("T", 30.0, &[(22.0, 26.0, "only segment")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].text, "only segment");
+    }
+
+    #[tokio::test]
+    async fn test_single_call_unicode_survives_normalize() {
+        let resp = chunk_response_json(
+            "Tタイトル",
+            30.0,
+            &[
+                (0.0, 10.0, "セグメント 1 🎬"),
+                (10.0, 20.0, "セグメント 2 🎞️"),
+                (20.0, 30.0, "セグメント 3 ✂️"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let msg = user_msg_with_frames(3, 5.0);
+
+        let result = generate_narration(&provider, "sys", msg, "test", "ja")
+            .await
+            .unwrap();
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(result.segments[0].text, "セグメント 1 🎬");
+    }
+
+    #[tokio::test]
+    async fn test_single_call_at_max_frames_threshold() {
+        // Exactly MAX_FRAMES_PER_CALL frames → single-call path, not chunked
+        let resp =
+            chunk_response_json("T", 30.0, &[(0.0, 15.0, "a"), (15.0, 30.0, "b")]);
+        let provider = ScriptedProvider::new(vec![&resp]);
+        let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL, 1.0);
+
+        generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
+        // Exactly one call — confirms the threshold check is `>` not `>=`
+        assert_eq!(provider.captured().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_just_over_threshold() {
+        // MAX_FRAMES_PER_CALL + 1 → 2 chunks of 10 and 1
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 15.0, "chunk1")]);
+        let r2 = chunk_response_json("T", 30.0, &[(20.0, 25.0, "chunk2")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL + 1, 1.0);
+
+        generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
+        assert_eq!(provider.captured().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_frames_without_timestamps() {
+        // Frames whose labels don't match "[Frame N at X.Xs]" → timestamps parse
+        // as 0.0 and the pipeline should still function (even if chunk bounds
+        // are degenerate).
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 5.0, "a")]);
+        let r2 = chunk_response_json("T", 30.0, &[(10.0, 15.0, "b")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+
+        // Build a message with unlabeled image pairs
+        let mut parts: Vec<serde_json::Value> = vec![json!({"type":"text","text":"ctx"})];
+        for _ in 0..15 {
+            parts.push(json!({"type":"text","text":"frame"}));
+            parts.push(json!({"type":"image","source":{"type":"base64","data":"QQ=="}}));
+        }
+        let msg = serde_json::Value::Array(parts);
+
+        let result = generate_narration(&provider, "sys", msg, "test", "en").await;
+        assert!(result.is_ok(), "should still succeed with unparseable timestamps");
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_invalid_json_chunk_errors_cleanly() {
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 5.0, "ok")]);
+        // Chunk 2 returns garbage — should bubble up a clear ApiError
+        let provider = ScriptedProvider::new(vec![&r1, "NOT JSON AT ALL"]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        let err = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("chunk 2") || err_str.contains("parse"),
+            "expected parse error for chunk 2, got: {err_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_generation_first_chunk_must_start_at_zero() {
+        // Verify the first chunk prompt instructs start from 0.0
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 5.0, "a")]);
+        let r2 = chunk_response_json("T", 30.0, &[(20.0, 25.0, "b")]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        let first_call_text: String = provider.captured()[0]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|v| v.as_str()).map(String::from))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // First chunk's lower bound should be 0.00
+        assert!(
+            first_call_text.contains("start_seconds >= 0.00"),
+            "first chunk missing start>=0 instruction"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunked_handles_all_chunks_empty() {
+        // Pathological case: every chunk returns no segments
+        let r1 = chunk_response_json("T", 30.0, &[]);
+        let r2 = chunk_response_json("T", 30.0, &[]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2]);
+        let msg = user_msg_with_frames(15, 2.0);
+
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
+        // Should succeed with empty segments — not crash
+        assert_eq!(result.segments.len(), 0);
+    }
+
+    // ── translate_script ───────────────────────────────────────────────
+
+    fn translation_response_json(title: &str, lang: &str, segs: &[(f64, f64, &str)]) -> String {
+        chunk_response_json(title, 30.0, segs)
+            // Override language in metadata (simulate the AI returning the translated script)
+            .replacen("\"language\":\"en\"", &format!("\"language\":\"{lang}\""), 1)
+    }
+
+    #[tokio::test]
+    async fn test_translate_script_success() {
+        let original = NarrationScript {
+            title: "Original".into(),
+            total_duration_seconds: 30.0,
+            segments: vec![
+                Segment {
+                    index: 0,
+                    start_seconds: 0.0,
+                    end_seconds: 15.0,
+                    text: "Hello world".into(),
+                    visual_description: String::new(),
+                    emphasis: vec![],
+                    pace: Pace::Medium,
+                    pause_after_ms: 0,
+                    frame_refs: vec![],
+                    voice_override: None,
+                },
+            ],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+                generated_at: "2026-04-01T00:00:00Z".into(),
+            },
+        };
+        let resp = translation_response_json(
+            "Original",
+            "ja",
+            &[(0.0, 15.0, "こんにちは世界")],
+        );
+        let provider = ScriptedProvider::new(vec![&resp]);
+
+        let translated = translate_script(&provider, &original, "Japanese")
+            .await
+            .unwrap();
+        // Metadata language should be set to target
+        assert_eq!(translated.metadata.language, "Japanese");
+        assert_eq!(translated.segments.len(), 1);
+        assert_eq!(translated.segments[0].text, "こんにちは世界");
+    }
+
+    #[tokio::test]
+    async fn test_translate_script_strips_code_fences() {
+        let original = NarrationScript {
+            title: "T".into(),
+            total_duration_seconds: 10.0,
+            segments: vec![],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+                generated_at: "2026-01-01T00:00:00Z".into(),
+            },
+        };
+        let fenced = format!(
+            "```json\n{}\n```",
+            chunk_response_json("T", 10.0, &[(0.0, 5.0, "hola")])
+        );
+        let provider = ScriptedProvider::new(vec![&fenced]);
+        let result = translate_script(&provider, &original, "es").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_translate_script_invalid_json_errors() {
+        let original = NarrationScript {
+            title: "T".into(),
+            total_duration_seconds: 10.0,
+            segments: vec![],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+                generated_at: "2026-01-01T00:00:00Z".into(),
+            },
+        };
+        let provider = ScriptedProvider::new(vec!["not json at all"]);
+        let err = translate_script(&provider, &original, "fr")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("parse"));
+    }
+
+    // ── refine_segment ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_refine_segment_returns_clean_text() {
+        let provider = ScriptedProvider::new(vec!["This is the refined text."]);
+        let result =
+            refine_segment(&provider, "original text", "make shorter", "surrounding context")
+                .await
+                .unwrap();
+        assert_eq!(result, "This is the refined text.");
+    }
+
+    #[tokio::test]
+    async fn test_refine_segment_strips_quotes_and_fences() {
+        let provider =
+            ScriptedProvider::new(vec!["```\n\"Quoted refinement\"\n```"]);
+        let result = refine_segment(&provider, "orig", "instruction", "ctx")
+            .await
+            .unwrap();
+        // Leading/trailing quotes and code fences removed
+        assert!(!result.contains("```"));
+        assert!(result.contains("Quoted refinement"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_segment_empty_response_errors() {
+        let provider = ScriptedProvider::new(vec!["   \n\n   "]);
+        let err = refine_segment(&provider, "orig", "inst", "ctx")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn test_refine_segment_preserves_unicode() {
+        let provider =
+            ScriptedProvider::new(vec!["精緻化されたセグメント 🎬"]);
+        let result = refine_segment(&provider, "orig", "inst", "ctx")
+            .await
+            .unwrap();
+        assert_eq!(result, "精緻化されたセグメント 🎬");
     }
 }
