@@ -213,6 +213,7 @@ export interface VideoEditPlan {
     blur?: { x: number; y: number; width: number; height: number; radius: number; invert?: boolean };
     text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string; opacity?: number };
     fade?: { color: string; opacity: number };
+    zoomPan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string };
   }[];
 }
 export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>

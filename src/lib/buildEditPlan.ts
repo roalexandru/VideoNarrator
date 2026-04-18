@@ -21,25 +21,12 @@ export function buildEditPlan(
   effects: TimelineEffect[],
 ): VideoEditPlan {
   const effectsTrack = effects || [];
-  let cumOutTime = 0;
   const planClips = clips.map((c) => {
-    const clipDur =
-      c.type === "freeze"
-        ? (c.freezeDuration ?? 3)
-        : (c.sourceEnd - c.sourceStart) / c.speed;
-    const clipStart = cumOutTime;
-    const clipEnd = cumOutTime + clipDur;
-    cumOutTime = clipEnd;
-    // First zoom-pan effect overlapping this clip "owns" the clip's zoom.
-    // Falls back to the legacy clip-level zoomPan if no effect-track zoom overlaps.
-    const overlapping = effectsTrack.find(
-      (e) =>
-        e.type === "zoom-pan" &&
-        e.zoomPan &&
-        e.startTime < clipEnd &&
-        e.endTime > clipStart,
-    );
-    const zoomPan = overlapping?.zoomPan ?? c.zoomPan;
+    // NOTE: timeline-track zoom-pan effects are NOT mapped onto clips anymore.
+    // They're animated post-concat in build_effects_filter using their own
+    // time range (mirrors OpenShot's Timeline::apply_effects pattern).
+    // We still honor `c.zoomPan` for backward compat with old saved projects
+    // that used the legacy per-clip zoom field.
     return {
       start_seconds: c.sourceStart,
       end_seconds: c.sourceEnd,
@@ -48,61 +35,68 @@ export function buildEditPlan(
       clip_type: c.type ?? "normal",
       freeze_source_time: c.freezeSourceTime,
       freeze_duration: c.freezeDuration,
-      zoom_pan: zoomPan
+      zoom_pan: c.zoomPan
         ? {
-            startRegion: zoomPan.startRegion,
-            endRegion: zoomPan.endRegion,
-            easing: zoomPan.easing,
+            startRegion: c.zoomPan.startRegion,
+            endRegion: c.zoomPan.endRegion,
+            easing: c.zoomPan.easing,
           }
         : null,
     };
   });
 
-  const planEffects = effectsTrack
-    .filter((e) => e.type !== "zoom-pan")
-    .map((e) => ({
-      type: e.type,
-      startTime: e.startTime,
-      endTime: e.endTime,
-      transitionIn: e.transitionIn,
-      transitionOut: e.transitionOut,
-      reverse: e.reverse,
-      spotlight: e.spotlight
-        ? {
-            x: e.spotlight.x,
-            y: e.spotlight.y,
-            radius: e.spotlight.radius,
-            dimOpacity: e.spotlight.dimOpacity,
-          }
-        : undefined,
-      blur: e.blur
-        ? {
-            x: e.blur.x,
-            y: e.blur.y,
-            width: e.blur.width,
-            height: e.blur.height,
-            radius: e.blur.radius,
-            invert: e.blur.invert,
-          }
-        : undefined,
-      text: e.text
-        ? {
-            content: e.text.content,
-            x: e.text.x,
-            y: e.text.y,
-            fontSize: e.text.fontSize,
-            color: e.text.color,
-            fontFamily: e.text.fontFamily,
-            bold: e.text.bold,
-            italic: e.text.italic,
-            underline: e.text.underline,
-            background: e.text.background,
-            align: e.text.align,
-            opacity: e.text.opacity,
-          }
-        : undefined,
-      fade: e.fade ? { color: e.fade.color, opacity: e.fade.opacity } : undefined,
-    }));
+  // ALL timeline effects (including zoom-pan) flow through the post-concat
+  // effects pass so each has its own bounded time range.
+  const planEffects = effectsTrack.map((e) => ({
+    type: e.type,
+    startTime: e.startTime,
+    endTime: e.endTime,
+    transitionIn: e.transitionIn,
+    transitionOut: e.transitionOut,
+    reverse: e.reverse,
+    spotlight: e.spotlight
+      ? {
+          x: e.spotlight.x,
+          y: e.spotlight.y,
+          radius: e.spotlight.radius,
+          dimOpacity: e.spotlight.dimOpacity,
+        }
+      : undefined,
+    blur: e.blur
+      ? {
+          x: e.blur.x,
+          y: e.blur.y,
+          width: e.blur.width,
+          height: e.blur.height,
+          radius: e.blur.radius,
+          invert: e.blur.invert,
+        }
+      : undefined,
+    text: e.text
+      ? {
+          content: e.text.content,
+          x: e.text.x,
+          y: e.text.y,
+          fontSize: e.text.fontSize,
+          color: e.text.color,
+          fontFamily: e.text.fontFamily,
+          bold: e.text.bold,
+          italic: e.text.italic,
+          underline: e.text.underline,
+          background: e.text.background,
+          align: e.text.align,
+          opacity: e.text.opacity,
+        }
+      : undefined,
+    fade: e.fade ? { color: e.fade.color, opacity: e.fade.opacity } : undefined,
+    zoomPan: e.zoomPan
+      ? {
+          startRegion: e.zoomPan.startRegion,
+          endRegion: e.zoomPan.endRegion,
+          easing: e.zoomPan.easing,
+        }
+      : undefined,
+  }));
 
   return { clips: planClips, effects: planEffects };
 }

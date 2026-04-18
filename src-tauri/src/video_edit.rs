@@ -181,6 +181,11 @@ pub struct OverlayEffect {
     pub text: Option<TextData>,
     #[serde(default)]
     pub fade: Option<FadeData>,
+    /// Present when effect_type == "zoom-pan". Carries the start/end regions
+    /// and easing. Unlike the legacy per-clip zoom_pan on EditClip, this one
+    /// is animated over its own [start_time, end_time] window.
+    #[serde(default)]
+    pub zoom_pan: Option<ZoomPanEffect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,17 +246,72 @@ pub struct FadeData {
 /// Returns `Some((filter_complex_string, final_label))` or `None` if there are
 /// no applicable effects. Coordinate convention: all positions are normalized
 /// 0–1 and scaled to the output `width` × `height`.
+/// Generate a PNG alpha mask with a transparent circular cutout on a
+/// semi-transparent black background. Used to produce a visually clean
+/// circular spotlight without relying on ffmpeg's `geq` filter (which is
+/// O(pixels × frames × pow) and practically unusable on HD video).
+///
+/// The mask is cached by a content hash so repeat renders of the same
+/// spotlight skip the write.
+fn generate_spotlight_mask(
+    width: u32,
+    height: u32,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    dim_opacity: f64,
+    out_dir: &Path,
+) -> Result<PathBuf, NarratorError> {
+    let dim_alpha = (dim_opacity.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let hash = format!(
+        "spot_{}x{}_{:.1}_{:.1}_{:.1}_{:03}",
+        width, height, cx, cy, radius, dim_alpha
+    );
+    let path = out_dir.join(format!("{hash}.png"));
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let mut img = image::RgbaImage::new(width, height);
+    let r = radius.max(1.0);
+    // 2-pixel anti-aliased band at the edge so the circle doesn't look
+    // jagged. Wider = softer; 2 px is a good compromise.
+    let feather: f64 = 2.0;
+    let r_inner = (r - feather).max(0.0);
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f64 - cx;
+            let dy = y as f64 - cy;
+            let dist = (dx * dx + dy * dy).sqrt();
+            let alpha = if dist <= r_inner {
+                0u8
+            } else if dist >= r {
+                dim_alpha
+            } else {
+                let t = (dist - r_inner) / feather;
+                (dim_alpha as f64 * t).round().clamp(0.0, 255.0) as u8
+            };
+            img.put_pixel(x, y, image::Rgba([0, 0, 0, alpha]));
+        }
+    }
+    img.save(&path).map_err(|e| {
+        NarratorError::FfmpegFailed(format!("Failed to save spotlight mask: {e}"))
+    })?;
+    Ok(path)
+}
+
 fn build_effects_filter(
     effects: &[OverlayEffect],
     width: u32,
     height: u32,
-) -> Option<(String, String)> {
+    mask_dir: &Path,
+) -> Option<(String, String, Vec<PathBuf>)> {
     let relevant: Vec<&OverlayEffect> = effects
         .iter()
         .filter(|e| {
             matches!(
                 e.effect_type.as_str(),
-                "spotlight" | "blur" | "text" | "fade"
+                "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
             )
         })
         .collect();
@@ -264,6 +324,11 @@ fn build_effects_filter(
     let max_wh = w.max(h);
     let mut parts: Vec<String> = Vec::new();
     let mut prev_label = "0:v".to_string();
+    // Extra inputs for mask-based effects (e.g. spotlight). Their ffmpeg
+    // input index is 1 + their position in this Vec (index 0 is the main
+    // video). We track them here and return to the caller so it can add
+    // them to the command line.
+    let mut extra_inputs: Vec<PathBuf> = Vec::new();
 
     for (i, fx) in relevant.iter().enumerate() {
         let next_label = format!("fx{i}");
@@ -317,47 +382,33 @@ fn build_effects_filter(
                 let Some(sp) = &fx.spotlight else {
                     continue;
                 };
-                // Rectangular (square) spotlight for performance. A circular
-                // mask via `geq` would evaluate pow/sqrt per pixel per frame,
-                // which is 30+ billion ops for a 1080p 4-minute video — hours
-                // of CPU. Approximating with a square bright region is ~100x
-                // faster and visually comparable for screen recordings.
-                let cx_f = sp.x.clamp(0.0, 1.0) * w;
-                let cy_f = sp.y.clamp(0.0, 1.0) * h;
-                let r_f = (sp.radius.clamp(0.01, 1.0) * max_wh).max(4.0);
-                // Bright region bounds, clamped to frame dimensions.
-                let rx = (cx_f - r_f).max(0.0).round() as i64;
-                let ry = (cy_f - r_f).max(0.0).round() as i64;
-                let rw = ((cx_f + r_f).min(w) - rx as f64).round().max(2.0) as i64;
-                let rh = ((cy_f + r_f).min(h) - ry as f64).round().max(2.0) as i64;
-                // dim_opacity 0.0 = untouched, 1.0 = pitch black outside. Brightness = 1 - dim.
+                // Circular spotlight via a pre-rendered alpha-mask PNG. The
+                // mask is a black image with a transparent circle, saved once
+                // and overlaid by ffmpeg on every frame during the effect's
+                // time range. Far faster than geq (single precomputed image
+                // vs. per-pixel/per-frame expression evaluation) and gives
+                // true circular geometry.
+                let cx_px = sp.x.clamp(0.0, 1.0) * w;
+                let cy_px = sp.y.clamp(0.0, 1.0) * h;
+                let r_px = (sp.radius.clamp(0.01, 1.0) * max_wh).max(4.0);
                 let dim_opacity = sp.dim_opacity.clamp(0.0, 1.0);
-                let bright = 1.0 - dim_opacity;
-                let a_lbl = format!("sp{i}a");
-                let b_lbl = format!("sp{i}b");
-                let c_lbl = format!("sp{i}c");
-                let dim_lbl = format!("dim{i}");
-                let crop_lbl = format!("crp{i}");
-                let inside_lbl = format!("ins{i}");
-
+                let mask_path = match generate_spotlight_mask(
+                    width, height, cx_px, cy_px, r_px, dim_opacity, mask_dir,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("spotlight mask generation failed: {e}; skipping effect");
+                        parts.push(format!("[{prev_label}]null[{next_label}]"));
+                        prev_label = next_label;
+                        continue;
+                    }
+                };
+                // Input indices: [0] = main video, [1..] = each extra input
+                // we've added so far.
+                let mask_input_idx = 1 + extra_inputs.len();
+                extra_inputs.push(mask_path);
                 parts.push(format!(
-                    "[{prev_label}]split=3[{a_lbl}][{b_lbl}][{c_lbl}]"
-                ));
-                // Dim the whole frame uniformly
-                parts.push(format!(
-                    "[{a_lbl}]colorchannelmixer=rr={bright:.4}:gg={bright:.4}:bb={bright:.4}[{dim_lbl}]"
-                ));
-                // Crop out the original bright region
-                parts.push(format!(
-                    "[{b_lbl}]crop={rw}:{rh}:{rx}:{ry}[{crop_lbl}]"
-                ));
-                // Paste the bright region back onto the dimmed frame
-                parts.push(format!(
-                    "[{dim_lbl}][{crop_lbl}]overlay={rx}:{ry}[{inside_lbl}]"
-                ));
-                // Switch between original and composed based on enable range
-                parts.push(format!(
-                    "[{c_lbl}][{inside_lbl}]overlay=0:0:enable='{enable}'[{next_label}]"
+                    "[{prev_label}][{mask_input_idx}:v]overlay=0:0:enable='{enable}'[{next_label}]"
                 ));
             }
             "text" => {
@@ -418,6 +469,69 @@ fn build_effects_filter(
                 );
                 parts.push(format!("[{prev_label}]{expr}[{next_label}]"));
             }
+            "zoom-pan" => {
+                // Animated zoom/pan bound to the effect's time range. Pattern
+                // borrowed from OpenShot's Timeline::apply_effects (see
+                // libopenshot Timeline.cpp:554) — progress is LOCAL to the
+                // effect, not stretched across the clip.
+                let Some(zp) = &fx.zoom_pan else {
+                    continue;
+                };
+                // Clamp regions defensively (same as per-clip builder)
+                let sx = zp.start_region.x.clamp(0.0, 0.99);
+                let sy = zp.start_region.y.clamp(0.0, 0.99);
+                let sw = zp.start_region.width.clamp(0.05, 1.0);
+                let sh = zp.start_region.height.clamp(0.05, 1.0);
+                let ex = zp.end_region.x.clamp(0.0, 0.99);
+                let ey = zp.end_region.y.clamp(0.0, 0.99);
+                let ew = zp.end_region.width.clamp(0.05, 1.0);
+                let eh = zp.end_region.height.clamp(0.05, 1.0);
+
+                let s = fx.start_time.max(0.0);
+                let e = fx.end_time.max(s + 0.01);
+                let dur = (e - s).max(0.01);
+
+                // Raw progress in [0, 1] — expression uses ffmpeg's `t` for
+                // the current output time (seconds).
+                let raw_p = format!("max(0\\,min(1\\,(t-{s:.3})/{dur:.3}))");
+                // Eased progress, matching the four UI easings.
+                let eased = match zp.easing {
+                    EasingPreset::Linear => raw_p.clone(),
+                    EasingPreset::EaseIn => format!("({raw_p})*({raw_p})"),
+                    EasingPreset::EaseOut => format!("({raw_p})*(2-({raw_p}))"),
+                    EasingPreset::EaseInOut => format!(
+                        "if(lt({raw_p}\\,0.5)\\,2*({raw_p})*({raw_p})\\,-1+(4-2*({raw_p}))*({raw_p}))"
+                    ),
+                };
+                // Crop expressions in pixels. Clamp to frame bounds so extreme
+                // easing outputs can never produce a negative width or crop
+                // outside the image.
+                let cw = format!(
+                    "max(2\\,min(iw\\,({sw:.4}+({ew:.4}-{sw:.4})*({eased}))*{w}))"
+                );
+                let ch = format!(
+                    "max(2\\,min(ih\\,({sh:.4}+({eh:.4}-{sh:.4})*({eased}))*{h}))"
+                );
+                let cx = format!(
+                    "max(0\\,min(iw-out_w\\,({sx:.4}+({ex:.4}-{sx:.4})*({eased}))*{w}))"
+                );
+                let cy = format!(
+                    "max(0\\,min(ih-out_h\\,({sy:.4}+({ey:.4}-{sy:.4})*({eased}))*{h}))"
+                );
+
+                let base = format!("zb{i}");
+                let zoom_src = format!("zs{i}");
+                let zoomed = format!("zd{i}");
+                parts.push(format!("[{prev_label}]split=2[{base}][{zoom_src}]"));
+                parts.push(format!(
+                    "[{zoom_src}]crop={cw}:{ch}:{cx}:{cy},scale={width}:{height}:flags=lanczos,setsar=1[{zoomed}]"
+                ));
+                // Overlay only during the effect's time range; outside [s,e]
+                // the un-zoomed base shows through.
+                parts.push(format!(
+                    "[{base}][{zoomed}]overlay=0:0:enable='{enable}'[{next_label}]"
+                ));
+            }
             _ => continue,
         }
         prev_label = next_label;
@@ -426,7 +540,7 @@ fn build_effects_filter(
     if parts.is_empty() {
         return None;
     }
-    Some((parts.join(";"), prev_label))
+    Some((parts.join(";"), prev_label, extra_inputs))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,7 +579,13 @@ async fn run_ffmpeg_with_progress(
         .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to start ffmpeg: {e}")))?;
 
-    // Read stderr line by line for progress
+    // Ring buffer of recent stderr lines so failures can include meaningful
+    // context instead of just "exited with status 1". ffmpeg banners are
+    // chatty; 40 lines is enough to catch the actual error tail.
+    const STDERR_TAIL: usize = 40;
+    let mut recent_stderr: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(STDERR_TAIL + 1);
+
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
@@ -477,6 +597,10 @@ async fn run_ffmpeg_with_progress(
                     on_progress(pct);
                 }
             }
+            if recent_stderr.len() >= STDERR_TAIL {
+                recent_stderr.pop_front();
+            }
+            recent_stderr.push_back(line);
         }
     }
 
@@ -486,9 +610,37 @@ async fn run_ffmpeg_with_progress(
         .map_err(|e| NarratorError::FfmpegFailed(format!("ffmpeg process error: {e}")))?;
 
     if !status.success() {
+        // Surface the most relevant stderr lines (those that look like errors)
+        // falling back to the tail if nothing obvious stands out.
+        let tail: Vec<&String> = recent_stderr.iter().collect();
+        let meaningful: String = tail
+            .iter()
+            .filter(|l| {
+                let ll = l.to_lowercase();
+                ll.contains("error")
+                    || ll.contains("invalid")
+                    || ll.contains("no such")
+                    || ll.contains("failed")
+                    || ll.contains("unknown")
+                    || ll.contains("unrecognized")
+                    || ll.contains("does not")
+            })
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let detail = if meaningful.is_empty() {
+            tail.iter()
+                .rev()
+                .take(5)
+                .rev()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            meaningful
+        };
         return Err(NarratorError::FfmpegFailed(format!(
-            "ffmpeg exited with status {}",
-            status
+            "ffmpeg exited with status {status}: {detail}"
         )));
     }
 
@@ -881,8 +1033,33 @@ pub async fn apply_edits(
     // Process each clip
     let mut clip_files: Vec<PathBuf> = Vec::new();
 
+    // For smooth progress: give each clip a share of the 0-80% band
+    // proportional to its expected output duration (so a 30s clip advances
+    // the bar faster than a 10s clip at the same speed).
+    let clip_weights: Vec<f64> = plan
+        .clips
+        .iter()
+        .map(|c| {
+            if c.clip_type.as_deref() == Some("freeze") {
+                c.freeze_duration.unwrap_or(3.0).max(0.1)
+            } else {
+                let src = (c.end_seconds - c.start_seconds).max(0.01);
+                if (c.speed - 1.0).abs() > 0.01 {
+                    src / c.speed
+                } else {
+                    src
+                }
+            }
+        })
+        .collect();
+    let total_weight: f64 = clip_weights.iter().sum::<f64>().max(0.01);
+
     for (i, clip) in plan.clips.iter().enumerate() {
-        on_progress((i as f64 / total as f64) * 80.0);
+        // Base progress = sum of previous clips' shares (in 0-80% band).
+        let cum_before: f64 =
+            clip_weights.iter().take(i).sum::<f64>() / total_weight * 80.0;
+        let this_share = clip_weights[i] / total_weight * 80.0;
+        on_progress(cum_before);
 
         // Handle freeze frame clips separately
         if clip.clip_type.as_deref() == Some("freeze") {
@@ -1002,44 +1179,24 @@ pub async fn apply_edits(
             expected_output_dur
         );
 
-        let output = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        // Stream progress from ffmpeg stderr so the UI bar advances smoothly.
+        // Each clip contributes `this_share` percent of the 0-80% band,
+        // offset by `cum_before` (the sum of previous clips' shares).
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let progress_cb = |pct: f64| {
+            on_progress(cum_before + (pct / 100.0) * this_share);
+        };
+        if let Err(e) = run_ffmpeg_with_progress(
+            &ffmpeg,
+            &arg_refs,
+            expected_output_dur,
+            &progress_cb,
+        )
+        .await
+        {
             tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
-            tracing::error!("Clip {i} stderr: {stderr}");
-            tracing::error!("Clip {i} stdout: {stdout}");
-            // Get the last meaningful part of stderr (skip the banner)
-            let err_tail = stderr[stderr.len().saturating_sub(800)..].trim();
-            // Find lines with actual errors (not the banner)
-            let meaningful: String = err_tail
-                .lines()
-                .filter(|l| {
-                    let ll = l.to_lowercase();
-                    ll.contains("error")
-                        || ll.contains("invalid")
-                        || ll.contains("no such")
-                        || ll.contains("not found")
-                        || ll.contains("failed")
-                        || ll.contains("unknown")
-                        || ll.contains("unrecognized")
-                        || ll.contains("does not")
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            let detail = if meaningful.is_empty() {
-                err_tail.to_string()
-            } else {
-                meaningful
-            };
             return Err(NarratorError::FfmpegFailed(format!(
-                "Clip {i} failed: {detail}"
+                "Clip {i} failed: {e}"
             )));
         }
 
@@ -1170,49 +1327,60 @@ pub async fn apply_edits(
         let _ = tokio::fs::remove_file(p).await;
     }
 
-    // Apply overlay effects (spotlight, blur, text, fade) in a post-concat pass.
+    // Apply overlay effects (spotlight, blur, text, fade, zoom-pan) in a post-concat pass.
     if has_overlay_effects {
         on_progress(90.0);
         let effects = plan.effects.as_deref().unwrap_or(&[]);
-        if let Some((filter_complex, final_label)) =
-            build_effects_filter(effects, meta.width, meta.height)
+        // Masks (e.g. spotlight alpha PNGs) are cached inside the project dir.
+        let mask_dir = out_dir.join("_fx_masks");
+        let _ = tokio::fs::create_dir_all(&mask_dir).await;
+        if let Some((filter_complex, final_label, extra_inputs)) =
+            build_effects_filter(effects, meta.width, meta.height, &mask_dir)
         {
             tracing::info!(
-                "Applying {} overlay effect(s) in post-concat pass",
+                "Applying {} overlay effect(s) in post-concat pass ({} mask input(s))",
                 effects
                     .iter()
                     .filter(|e| matches!(
                         e.effect_type.as_str(),
-                        "spotlight" | "blur" | "text" | "fade"
+                        "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
                     ))
-                    .count()
+                    .count(),
+                extra_inputs.len()
             );
             tracing::debug!("Effects filter_complex: {}", filter_complex);
 
-            let output = Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args(["-y", "-i", &concat_target])
-                .args([
-                    "-filter_complex",
-                    &filter_complex,
-                    "-map",
-                    &format!("[{final_label}]"),
-                    "-map",
-                    "0:a?",
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "0",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    output_path,
-                ])
+            // Build the ffmpeg argv: main input, then each extra mask/image
+            // input in order. Their input indices in the filter_complex are
+            // 1, 2, 3, ... corresponding to their order here.
+            let mut cmd = Command::new(ffmpeg.as_os_str());
+            cmd.no_window().args(["-y", "-i", &concat_target]);
+            for path in &extra_inputs {
+                cmd.args(["-loop", "1", "-i"]).arg(path);
+            }
+            cmd.args([
+                "-filter_complex",
+                &filter_complex,
+                "-map",
+                &format!("[{final_label}]"),
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-shortest",
+                "-movflags",
+                "+faststart",
+                output_path,
+            ]);
+            let output = cmd
                 .output()
                 .await
                 .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
@@ -1909,9 +2077,9 @@ mod tests {
             opacity: 0.5,
         });
         // Should not panic; filter should contain a valid between()
-        let result = build_effects_filter(&[fx], 320, 240);
+        let result = run_effects_filter(&[fx], 320, 240);
         assert!(result.is_some());
-        let (f, _) = result.unwrap();
+        let (f, _, _) = result.unwrap();
         assert!(f.contains("between(t,"));
     }
 
@@ -1927,7 +2095,7 @@ mod tests {
             radius: 10.0,
             invert: None,
         });
-        let result = build_effects_filter(&[fx], 320, 240);
+        let result = run_effects_filter(&[fx], 320, 240);
         assert!(result.is_some());
     }
 
@@ -1949,7 +2117,7 @@ mod tests {
             opacity: None,
         });
         // Empty content → null filter that preserves the stream label
-        let (f, _) = build_effects_filter(&[fx], 320, 240).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 320, 240).unwrap();
         assert!(f.contains("null"));
     }
 
@@ -1970,7 +2138,7 @@ mod tests {
             align: None,
             opacity: None,
         });
-        let (f, _) = build_effects_filter(&[fx], 320, 240).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 320, 240).unwrap();
         // Unicode content should pass through (drawtext supports UTF-8)
         assert!(f.contains("日本語のテキスト 🎬"));
     }
@@ -1989,19 +2157,31 @@ mod tests {
             blur: None,
             text: None,
             fade: None,
+            zoom_pan: None,
         }
+    }
+
+    /// Helper: call build_effects_filter with a fresh temp mask dir so tests
+    /// don't pollute each other's cache.
+    fn run_effects_filter(
+        effects: &[OverlayEffect],
+        w: u32,
+        h: u32,
+    ) -> Option<(String, String, Vec<PathBuf>)> {
+        let dir = tempfile::tempdir().unwrap();
+        build_effects_filter(effects, w, h, dir.path())
     }
 
     #[test]
     fn test_build_effects_filter_empty() {
-        assert!(build_effects_filter(&[], 1920, 1080).is_none());
+        assert!(run_effects_filter(&[], 1920, 1080).is_none());
     }
 
     #[test]
     fn test_build_effects_filter_zoom_pan_ignored() {
         // zoom-pan is handled per-clip, not in the post-pass
         let fx = empty_effect("zoom-pan");
-        assert!(build_effects_filter(&[fx], 1920, 1080).is_none());
+        assert!(run_effects_filter(&[fx], 1920, 1080).is_none());
     }
 
     #[test]
@@ -2015,7 +2195,7 @@ mod tests {
             radius: 20.0,
             invert: None,
         });
-        let (f, final_label) = build_effects_filter(&[fx], 1920, 1080).unwrap();
+        let (f, final_label, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         assert!(f.contains("boxblur"));
         assert!(f.contains("crop"));
         assert!(f.contains("overlay"));
@@ -2034,7 +2214,7 @@ mod tests {
             radius: 10.0,
             invert: Some(true),
         });
-        let (f, _) = build_effects_filter(&[fx], 1920, 1080).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         // Invert mode: boxblur runs on full frame (no crop before it)
         assert!(f.contains("boxblur"));
         assert!(f.contains("crop"));
@@ -2049,14 +2229,15 @@ mod tests {
             radius: 0.2,
             dim_opacity: 0.6,
         });
-        let (f, _) = build_effects_filter(&[fx], 1920, 1080).unwrap();
-        assert!(f.contains("colorchannelmixer"));
-        // Spotlight now uses fast rectangular crop+overlay instead of the
-        // extremely slow geq alpha mask.
-        assert!(f.contains("crop="));
-        assert!(f.contains("overlay"));
-        // dim_opacity 0.6 → brightness 0.4
-        assert!(f.contains("0.4000"));
+        // Keep the tempdir alive for the whole test so the written mask
+        // file doesn't get cleaned up before we check it.
+        let dir = tempfile::tempdir().unwrap();
+        let (f, _, extras) =
+            build_effects_filter(&[fx], 1920, 1080, dir.path()).unwrap();
+        assert_eq!(extras.len(), 1, "spotlight should add 1 extra PNG input");
+        assert!(f.contains("[1:v]overlay"), "filter should overlay mask input: {f}");
+        assert!(f.contains("between(t,0.000,5.000)"));
+        assert!(extras[0].exists(), "mask PNG should be written");
     }
 
     #[test]
@@ -2076,7 +2257,7 @@ mod tests {
             align: None,
             opacity: Some(0.9),
         });
-        let (f, _) = build_effects_filter(&[fx], 1920, 1080).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         assert!(f.contains("drawtext"));
         assert!(f.contains("Hello"));
         assert!(f.contains("text_w/2"));
@@ -2100,7 +2281,7 @@ mod tests {
             align: None,
             opacity: None,
         });
-        let (f, _) = build_effects_filter(&[fx], 1920, 1080).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         // Colons must be escaped so drawtext parses correctly
         assert!(f.contains("Hello\\:"));
         assert!(f.contains("100%%"));
@@ -2115,7 +2296,7 @@ mod tests {
             color: "#000000".into(),
             opacity: 0.5,
         });
-        let (f, _) = build_effects_filter(&[fx], 1920, 1080).unwrap();
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         assert!(f.contains("drawbox"));
         assert!(f.contains("0x000000@0.500"));
         assert!(f.contains("between(t,2.000,3.500)"));
@@ -2137,13 +2318,83 @@ mod tests {
             color: "#ffffff".into(),
             opacity: 0.3,
         });
-        let (filter, final_label) =
-            build_effects_filter(&[f1, f2], 1920, 1080).unwrap();
+        let (filter, final_label, _) =
+            run_effects_filter(&[f1, f2], 1920, 1080).unwrap();
         // Last effect's output label should be fx1
         assert_eq!(final_label, "fx1");
         // Both effects should appear
         assert!(filter.contains("boxblur"));
         assert!(filter.contains("drawbox"));
+    }
+
+    // ── zoom-pan as a timeline effect (new) ─────────────────────────────
+
+    #[test]
+    fn test_build_effects_filter_zoom_pan_branch() {
+        let mut fx = empty_effect("zoom-pan");
+        fx.start_time = 10.0;
+        fx.end_time = 14.0;
+        fx.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            end_region: crate::models::ZoomRegion { x: 0.25, y: 0.25, width: 0.5, height: 0.5 },
+            easing: EasingPreset::Linear,
+        });
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
+        // Animated crop+scale bound to the effect's time range.
+        assert!(f.contains("crop="), "expected crop filter: {f}");
+        assert!(f.contains("scale=1920:1080"), "expected scale: {f}");
+        // Time range should be embedded in the overlay enable expression.
+        assert!(
+            f.contains("between(t,10.000,14.000)"),
+            "expected effect-local time bounds: {f}"
+        );
+        // Raw progress formula uses the effect's start+duration, NOT total clip.
+        assert!(
+            f.contains("(t-10.000)/4.000"),
+            "expected effect-local progress formula: {f}"
+        );
+    }
+
+    #[test]
+    fn test_build_effects_filter_zoom_pan_easing_ease_in() {
+        let mut fx = empty_effect("zoom-pan");
+        fx.start_time = 5.0;
+        fx.end_time = 10.0;
+        fx.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            end_region: crate::models::ZoomRegion { x: 0.1, y: 0.1, width: 0.6, height: 0.6 },
+            easing: EasingPreset::EaseIn,
+        });
+        let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
+        // Ease-in: p*p. The squared progress should appear as (raw)*(raw).
+        assert!(f.contains(")*(max(0"), "expected p*p pattern for ease-in: {f}");
+    }
+
+    #[test]
+    fn test_build_effects_filter_two_zoom_pans_both_applied() {
+        // Two zoom effects at different times: both must appear (prior bug
+        // only attached the first to the clip).
+        let mut f1 = empty_effect("zoom-pan");
+        f1.start_time = 2.0;
+        f1.end_time = 5.0;
+        f1.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            end_region: crate::models::ZoomRegion { x: 0.2, y: 0.2, width: 0.5, height: 0.5 },
+            easing: EasingPreset::Linear,
+        });
+        let mut f2 = empty_effect("zoom-pan");
+        f2.start_time = 10.0;
+        f2.end_time = 13.0;
+        f2.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion { x: 0.5, y: 0.5, width: 0.4, height: 0.4 },
+            end_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            easing: EasingPreset::EaseOut,
+        });
+        let (filter, final_label, _) = run_effects_filter(&[f1, f2], 1920, 1080).unwrap();
+        assert_eq!(final_label, "fx1");
+        // Both time ranges present
+        assert!(filter.contains("between(t,2.000,5.000)"));
+        assert!(filter.contains("between(t,10.000,13.000)"));
     }
 
     #[test]
@@ -2244,6 +2495,7 @@ mod tests {
             blur: None,
             text: None,
             fade: None,
+            zoom_pan: None,
         }
     }
 
