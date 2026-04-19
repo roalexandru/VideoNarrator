@@ -211,7 +211,7 @@ pub struct ZoomRegion {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EasingPreset {
     Linear,

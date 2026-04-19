@@ -1,3 +1,10 @@
+// Legacy ffmpeg `filter_complex` builders below (`build_effects_filter`,
+// `build_progress_expr`, `generate_spotlight_mask`, etc.) were the second-pass
+// effects pipeline. Phase 3 wired in the in-process compositor, so these are
+// no longer reachable but remain in the tree until Phase 6 deletes them
+// (their tests still exercise the helpers as a regression net while the
+// compositor migration is in flight).
+#![allow(dead_code)]
 //! Video editing operations: trim, speed, frame dropping, zoom/pan, freeze frame, and concatenation.
 
 use crate::error::NarratorError;
@@ -1059,7 +1066,7 @@ pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
-    on_progress: impl Fn(f64),
+    on_progress: impl Fn(f64) + Send + Sync,
 ) -> Result<String, NarratorError> {
     // S1: Validate paths
     validate_path(input_path)?;
@@ -1475,95 +1482,57 @@ pub async fn apply_edits(
         let _ = tokio::fs::remove_file(p).await;
     }
 
-    // Apply overlay effects (spotlight, blur, text, fade, zoom-pan) in a post-concat pass.
+    // Apply overlay effects (spotlight, blur, text, fade, zoom-pan) in a
+    // post-concat pass — Phase 3+ uses the in-process compositor instead of
+    // a time-varying ffmpeg filter_complex. The compositor never builds a
+    // varying graph, so the "Reinitializing filters" failure mode cannot
+    // occur here by construction.
     if has_overlay_effects {
-        // In passthrough mode the effects pass IS the whole render, so it
-        // owns the full 0-99% band. Otherwise the per-clip encode already
-        // ran 0-85%, so effects own 90-99%.
         let fx_start = if passthrough_to_fx { 0.0 } else { 90.0 };
         let fx_end = 99.0;
         on_progress(fx_start);
 
         let effects = plan.effects.as_deref().unwrap_or(&[]);
-        // Masks (e.g. spotlight alpha PNGs) are cached inside the project dir.
-        let mask_dir = out_dir.join("_fx_masks");
-        let _ = tokio::fs::create_dir_all(&mask_dir).await;
-        if let Some((filter_complex, final_label, extra_inputs)) =
-            build_effects_filter(effects, meta.width, meta.height, &mask_dir)
-        {
+        let supported: Vec<crate::video_edit::OverlayEffect> = effects
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.effect_type.as_str(),
+                    "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
+                )
+            })
+            .cloned()
+            .collect();
+
+        if !supported.is_empty() {
             tracing::info!(
-                "Applying {} overlay effect(s) ({} mask input(s), passthrough={})",
-                effects
-                    .iter()
-                    .filter(|e| matches!(
-                        e.effect_type.as_str(),
-                        "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
-                    ))
-                    .count(),
-                extra_inputs.len(),
+                "Applying {} overlay effect(s) via in-process compositor (passthrough={})",
+                supported.len(),
                 passthrough_to_fx
             );
-            tracing::debug!("Effects filter_complex: {}", filter_complex);
 
-            // Build the ffmpeg argv: main input, then each extra mask/image
-            // input in order. Their input indices in the filter_complex are
-            // 1, 2, 3, ... corresponding to their order here.
-            let extra_input_strs: Vec<String> = extra_inputs
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            let map_label = format!("[{final_label}]");
-            let mut args: Vec<&str> = vec!["-y", "-i", &concat_target];
-            for s in &extra_input_strs {
-                args.extend_from_slice(&["-loop", "1", "-i", s.as_str()]);
-            }
-            args.extend_from_slice(&[
-                "-filter_complex",
-                &filter_complex,
-                "-map",
-                &map_label,
-                "-map",
-                "0:a?",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "0",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "copy",
-                "-shortest",
-                "-movflags",
-                "+faststart",
-                output_path,
-            ]);
-
-            // Stream progress from stderr so the UI bar moves during the
-            // effects encode (previously a blocking `Command::output()` meant
-            // it sat at 90% for the entire pass).
             let fx_progress_cb = |pct: f64| {
                 let scaled = fx_start + (pct / 100.0) * (fx_end - fx_start);
                 on_progress(scaled);
             };
-            if let Err(e) =
-                run_ffmpeg_with_progress(&ffmpeg, &args, meta.duration_seconds, &fx_progress_cb)
-                    .await
-            {
-                tracing::error!("Effects pass failed. filter_complex: {}", filter_complex);
-                return Err(NarratorError::FfmpegFailed(format!(
-                    "Effects pass failed: {e}"
-                )));
-            }
+
+            crate::compositor::apply_overlay_effects(
+                std::path::Path::new(&concat_target),
+                std::path::Path::new(output_path),
+                &supported,
+                &fx_progress_cb,
+            )
+            .await?;
         } else if !passthrough_to_fx {
-            // No supported effects found — just move concat result to output.
-            // (In passthrough mode concat_target IS the input, so never move it.)
+            // No supported effects in `supported` — concat result is the output.
             tokio::fs::rename(&concat_target, output_path).await?;
         }
         // Clean up the intermediate concat file — but NEVER delete the user's
         // input in passthrough mode.
-        if !passthrough_to_fx {
+        if !passthrough_to_fx
+            && std::path::Path::new(&concat_target).exists()
+            && concat_target != output_path
+        {
             let _ = tokio::fs::remove_file(&concat_target).await;
         }
     }

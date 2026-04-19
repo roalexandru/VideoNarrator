@@ -51,6 +51,10 @@ async-trait = "0.1"
 futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 clap = { version = "4", features = ["derive"] }
+# Compositor: pure-Rust 2D rendering for the in-process effects pipeline.
+tiny-skia = "0.11"
+# Glyph rasterization for the text overlay effect.
+ab_glyph = "0.2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
