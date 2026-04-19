@@ -3,6 +3,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
+import { IS_DEV } from "../lib/version";
 
 type Phase = "idle" | "checking" | "available" | "downloading" | "ready";
 
@@ -47,8 +48,11 @@ export function UpdateChecker() {
     }
   }, []);
 
-  // Auto-check on startup (3s delay)
+  // Auto-check on startup (3s delay). Skipped in dev — tauri.conf.json's version
+  // is typically behind the latest release, so the updater would offer to replace
+  // the dev binary with a production one.
   useEffect(() => {
+    if (IS_DEV) return;
     const timer = setTimeout(() => doCheck(false), 3000);
     return () => clearTimeout(timer);
   }, [doCheck]);

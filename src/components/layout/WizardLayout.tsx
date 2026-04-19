@@ -1,5 +1,6 @@
 import { useWizardStore, STEP_LABELS } from "../../hooks/useWizardNavigation";
 import { NarratorLogo } from "../NarratorLogo";
+import { DISPLAY_VERSION, IS_DEV } from "../../lib/version";
 import type { ReactNode } from "react";
 
 const STEP_DESCRIPTIONS = [
@@ -117,7 +118,7 @@ export function WizardLayout({ children, onOpenSettings, onBackToLibrary }: { ch
             </button>
           </div>
         )}
-        <div style={{ padding: "8px 20px 12px", fontSize: 11, color: "#2a2a3a" }}>v{__APP_VERSION__}</div>
+        <div style={{ padding: "8px 20px 12px", fontSize: 11, color: IS_DEV ? "#818cf8" : "#2a2a3a", fontWeight: IS_DEV ? 600 : 400 }}>v{DISPLAY_VERSION}</div>
       </aside>
 
       {/* Content */}

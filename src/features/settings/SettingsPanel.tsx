@@ -31,6 +31,7 @@ import { useConfigStore } from "../../stores/configStore";
 import { Button } from "../../components/ui/Button";
 import { setTelemetryEnabled as setAnalyticsEnabled, trackEvent, trackError } from "../telemetry/analytics";
 import type { AiProvider, ProviderKeyStatus } from "../../types/config";
+import { DISPLAY_VERSION } from "../../lib/version";
 
 /* ------------------------------------------------------------------ */
 /*  Design tokens                                                      */
@@ -838,7 +839,7 @@ export function SettingsPanel({
             color: C.muted,
           }}
         >
-          Narrator v{__APP_VERSION__}
+          Narrator v{DISPLAY_VERSION}
         </span>
       </div>
     </div>

@@ -1,12 +1,17 @@
-import { useEffect, useCallback } from "react";
+import { useEffect, useCallback, useState } from "react";
 import { colors, typography } from "../../lib/theme";
 import { Button } from "../../components/ui/Button";
+import { DISPLAY_VERSION, APP_BUILD_TIME, APP_GIT_SHA, formatBuildTime } from "../../lib/version";
 
 const year = new Date().getFullYear();
 const platform = navigator.platform;
 const isMac = platform.toUpperCase().includes("MAC");
+const platformLabel = isMac ? "macOS" : platform.includes("Win") ? "Windows" : "Linux";
+const archLabel = navigator.userAgent.includes("x64") || navigator.userAgent.includes("Win64") ? "x86_64" : navigator.userAgent.includes("arm") ? "ARM64" : "x86_64";
 
 export function AboutDialog({ onClose }: { onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === "Escape") onClose();
   }, [onClose]);
@@ -15,6 +20,23 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
+
+  const handleCopy = useCallback(async () => {
+    const info = [
+      `Version: v${DISPLAY_VERSION}`,
+      `Built: ${formatBuildTime(APP_BUILD_TIME)}`,
+      `Commit: ${APP_GIT_SHA}`,
+      `Platform: ${platformLabel}`,
+      `Architecture: ${archLabel}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(info);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore — clipboard may be blocked
+    }
+  }, []);
 
   return (
     <div
@@ -53,13 +75,28 @@ export function AboutDialog({ onClose }: { onClose: () => void }) {
         <div style={{
           background: colors.bg.input, borderRadius: 10,
           border: `1px solid ${colors.border.default}`,
-          padding: "14px 16px", marginBottom: 20, textAlign: "left",
+          padding: "14px 16px", marginBottom: 12, textAlign: "left",
         }}>
-          <InfoRow label="Version" value={`v${__APP_VERSION__}`} />
-          <InfoRow label="Platform" value={isMac ? "macOS" : platform.includes("Win") ? "Windows" : "Linux"} />
-          <InfoRow label="Architecture" value={navigator.userAgent.includes("x64") || navigator.userAgent.includes("Win64") ? "x86_64" : navigator.userAgent.includes("arm") ? "ARM64" : "x86_64"} />
+          <InfoRow label="Version" value={`v${DISPLAY_VERSION}`} />
+          <InfoRow label="Built" value={formatBuildTime(APP_BUILD_TIME)} />
+          <InfoRow label="Commit" value={APP_GIT_SHA} />
+          <InfoRow label="Platform" value={platformLabel} />
+          <InfoRow label="Architecture" value={archLabel} />
           <InfoRow label="Engine" value={isMac ? "WebKit" : "WebView2 (Chromium)"} />
           <InfoRow label="Framework" value="Tauri v2" last />
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+          <button
+            onClick={handleCopy}
+            style={{
+              fontSize: 11, color: copied ? "#4ade80" : colors.text.muted,
+              background: "transparent", border: "none", cursor: "pointer",
+              padding: "4px 8px", fontFamily: "inherit",
+            }}
+          >
+            {copied ? "Copied!" : "Copy info"}
+          </button>
         </div>
 
         {/* Credits */}

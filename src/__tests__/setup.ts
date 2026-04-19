@@ -2,6 +2,11 @@ import { vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
+// Force production-mode env so tests exercise prod code paths (auto-update check,
+// plain version string). Individual tests can `vi.stubEnv("DEV", true)` to cover dev.
+vi.stubEnv("DEV", "");
+vi.stubEnv("PROD", "1");
+
 // Polyfill scrollIntoView for jsdom (not implemented)
 if (typeof Element.prototype.scrollIntoView !== "function") {
   Element.prototype.scrollIntoView = vi.fn();
