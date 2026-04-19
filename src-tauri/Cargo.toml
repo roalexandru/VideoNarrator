@@ -1,6 +1,6 @@
 [package]
 name = "narrator"
-version = "0.7.1"
+version = "0.7.2"
 description = "AI-powered video narration generator"
 authors = ["you"]
 edition = "2021"

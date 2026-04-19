@@ -97,10 +97,20 @@ impl AiProvider for ClaudeProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = truncate_chars(&error_text, 200);
-                tracing::error!("API error ({status}): {truncated}");
+                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+                let api_msg = parse_api_error_message(&error_text);
+                let hint = match status.as_u16() {
+                    401 | 403 => "Check that your Anthropic API key is valid.",
+                    400 => "The request was rejected — usually a model or parameter mismatch.",
+                    _ => "See the details below.",
+                };
+                let detail: String = if api_msg.is_empty() {
+                    truncate_chars(&error_text, 240).into_owned()
+                } else {
+                    api_msg
+                };
                 return Err(NarratorError::ApiError(format!(
-                    "Claude API error (HTTP {status}). Check your API key and try again."
+                    "Claude API error (HTTP {status}). {hint}\n\n{detail}"
                 )));
             }
         }
@@ -116,6 +126,29 @@ impl AiProvider for ClaudeProvider {
 }
 
 // ── OpenAI Provider ──
+
+/// Reasoning-model families (OpenAI) that do not accept user-set
+/// `temperature` and require `max_completion_tokens` in place of
+/// `max_tokens`: o1/o3/o4 and the GPT-5 family. Sending `temperature`
+/// to these models produces a 400 with `invalid_request_error`.
+pub fn is_openai_reasoning_model(model: &str) -> bool {
+    model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+        || model.starts_with("gpt-5")
+}
+
+/// Best-effort extraction of the `error.message` field from a JSON error
+/// body. All three providers (OpenAI / Anthropic / Gemini) put the
+/// human-readable explanation there. Returns an empty string when the
+/// body isn't JSON or the field is missing — callers should fall back
+/// to the raw body in that case.
+fn parse_api_error_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
 
 pub struct OpenAiProvider {
     pub api_key: String,
@@ -168,24 +201,27 @@ impl AiProvider for OpenAiProvider {
             json!([{"type": "text", "text": user_message.to_string()}])
         };
 
-        // o3/o4 models require max_completion_tokens; older models use max_tokens
-        let is_reasoning_model = self.model.starts_with("o3")
-            || self.model.starts_with("o4")
-            || self.model.starts_with("o1");
+        // Reasoning models (o1/o3/o4, gpt-5) require `max_completion_tokens`
+        // instead of `max_tokens` AND reject any user-set `temperature`
+        // (only the default of 1 is accepted — sending even 1.0 explicitly
+        // has been observed to fail on some checkpoints, so we omit it).
+        let is_reasoning_model = is_openai_reasoning_model(&self.model);
         let token_key = if is_reasoning_model {
             "max_completion_tokens"
         } else {
             "max_tokens"
         };
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             token_key: 8192,
-            "temperature": self.temperature,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content}
             ]
         });
+        if !is_reasoning_model {
+            body["temperature"] = json!(self.temperature);
+        }
 
         let mut retries = 0;
         let max_retries = 3;
@@ -217,10 +253,23 @@ impl AiProvider for OpenAiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = truncate_chars(&error_text, 200);
-                tracing::error!("API error ({status}): {truncated}");
+                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+                let api_msg = parse_api_error_message(&error_text);
+                // 401/403 really is auth; 400 etc. is usually a malformed
+                // request (model, temperature, etc.) — don't say "check
+                // your key" when it's actually a shape problem.
+                let hint = match status.as_u16() {
+                    401 | 403 => "Check that your OpenAI API key is valid.",
+                    400 => "The request was rejected — usually a model or parameter mismatch.",
+                    _ => "See the details below.",
+                };
+                let detail: String = if api_msg.is_empty() {
+                    truncate_chars(&error_text, 240).into_owned()
+                } else {
+                    api_msg
+                };
                 return Err(NarratorError::ApiError(format!(
-                    "OpenAI API error (HTTP {status}). Check your API key and try again."
+                    "OpenAI API error (HTTP {status}). {hint}\n\n{detail}"
                 )));
             }
         }
@@ -328,10 +377,20 @@ impl AiProvider for GeminiProvider {
                 tokio::time::sleep(delay).await;
             } else {
                 let error_text = resp.text().await.unwrap_or_default();
-                let truncated = truncate_chars(&error_text, 200);
-                tracing::error!("API error ({status}): {truncated}");
+                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+                let api_msg = parse_api_error_message(&error_text);
+                let hint = match status.as_u16() {
+                    401 | 403 => "Check that your Google API key is valid.",
+                    400 => "The request was rejected — usually a model or parameter mismatch.",
+                    _ => "See the details below.",
+                };
+                let detail: String = if api_msg.is_empty() {
+                    truncate_chars(&error_text, 240).into_owned()
+                } else {
+                    api_msg
+                };
                 return Err(NarratorError::ApiError(format!(
-                    "Gemini API error (HTTP {status}). Check your API key and try again."
+                    "Gemini API error (HTTP {status}). {hint}\n\n{detail}"
                 )));
             }
         }

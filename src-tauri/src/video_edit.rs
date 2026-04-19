@@ -1360,6 +1360,97 @@ mod tests {
         );
     }
 
+    /// Speed change must cover the FULL source range, not just the first
+    /// fraction of it. A previous impl inverted `decode_fps` (fps*speed
+    /// instead of fps/speed) so at 2x the video showed only the first 25%
+    /// of the source while audio (via atempo) correctly spanned all of it
+    /// — the two tracks would desync.
+    ///
+    /// Build a red-then-green 10s source (red first 5s, green last 5s),
+    /// render at 2x (output = 5s; source [5..10] maps to output [2.5..5]),
+    /// and check that a frame at output t=4s is GREEN, not RED.
+    #[tokio::test]
+    async fn integration_speed_2x_covers_full_source_range() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("red_then_green.mp4");
+        let output = dir.path().join("sped.mp4");
+        let late_frame = dir.path().join("late.png");
+
+        let ffmpeg = video_engine::detect_ffmpeg().unwrap();
+        let status = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:duration=5:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=green:duration=5:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=10",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                "-map",
+                "[v]",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-g",
+                "15",
+                "-keyint_min",
+                "15",
+            ])
+            .arg(&input)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 10.0, 2.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        extract_single_frame(output.to_str().unwrap(), 4.0, late_frame.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let img = image::open(&late_frame).unwrap().to_rgb8();
+        let cx = img.width() / 2;
+        let cy = img.height() / 2;
+        let p = img.get_pixel(cx, cy);
+        // Widen to i32 before subtracting so a red pixel ([255, 0, 0])
+        // doesn't u8-overflow the assertion message in debug builds.
+        let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        assert!(
+            g - r > 30 && g - b > 30,
+            "frame at output t=4s must be GREEN (source t≈8s); got r={r} g={g} b={b}"
+        );
+    }
+
     #[tokio::test]
     async fn integration_concat_multiple_clips() {
         if !ffmpeg_ok() {

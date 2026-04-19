@@ -142,11 +142,32 @@ pub fn ease(t: f32, interp: Interp) -> f32 {
 }
 
 /// Map an absolute timeline `time` (seconds) within an effect window into
-/// a normalized progress value, applying transitionIn / transitionOut /
-/// reverse semantics. Returns `None` when the time falls outside the
-/// effect's effective window (so the caller can skip evaluation).
+/// a normalized animation progress (0..1), applying transition-in /
+/// transition-out / reverse semantics. Returns `None` when the time falls
+/// outside the window.
 ///
-/// Mirrors `build_progress_expr` in `video_edit.rs` but in plain Rust.
+/// `transition_in` and `transition_out` are in **seconds** (not fractions).
+/// The returned value is LINEAR — easing (`Linear` / `EaseIn` / `EaseOut`
+/// / `EaseInOut`) is applied downstream (in `effects::zoom_pan`, etc.) so
+/// tests here stay trivially checkable and effects can pick their own curve.
+///
+/// Shape (mirrors `src/features/edit-video/easing.ts::effectProgress` so
+/// the preview and the exported render animate identically):
+///
+/// - **reverse = true**  (three phases: ramp-in → hold → ramp-out)
+///   - `[0, transition_in)`          ramp 0 → 1
+///   - `[transition_in, dur - transition_out]`  hold at 1
+///   - `(dur - transition_out, dur]` ramp 1 → 0
+///
+///   Overlap (`transition_in + transition_out > dur`) is resolved by
+///   `max(hold_start, hold_end)` — the in-ramp wins over the out-ramp.
+///
+/// - **reverse = false** (simple: ramp-in → hold)
+///   - `transition_in` covers the whole window (or is 0) → full-window
+///     linear ramp (`local / dur`). Lets the effect animate from start
+///     to end across its full duration without the user spelling out a
+///     transition.
+///   - otherwise: ramp 0 → 1 over `transition_in`, then hold at 1
 pub fn window_progress(
     time: f32,
     start: f32,
@@ -158,24 +179,30 @@ pub fn window_progress(
     if time < start || time > end {
         return None;
     }
-    let dur = (end - start).max(f32::EPSILON);
-    let local = (time - start) / dur;
-
-    // Both transitions are expressed as a fraction of the window.
-    let t_in = transition_in.clamp(0.0, 0.5);
-    let t_out = transition_out.clamp(0.0, 0.5);
+    let total_duration = (end - start).max(f32::EPSILON);
+    let local_time = (time - start).max(0.0);
 
     let progress = if reverse {
-        // Animate up then back down; transitions become alpha ramps elsewhere.
-        if local < 0.5 {
-            local * 2.0
+        let hold_start = transition_in;
+        let hold_end = total_duration - transition_out;
+
+        if local_time <= 0.0 {
+            0.0
+        } else if transition_in > 0.0 && local_time < hold_start {
+            local_time / transition_in
+        } else if local_time <= hold_start.max(hold_end) {
+            1.0
+        } else if transition_out > 0.0 && local_time < total_duration {
+            let out_progress = (local_time - hold_end) / transition_out;
+            1.0 - out_progress
         } else {
-            (1.0 - local) * 2.0
+            0.0
         }
-    } else if t_in > 0.0 && local < t_in {
-        local / t_in.max(f32::EPSILON)
-    } else if t_out > 0.0 && local > 1.0 - t_out {
-        (1.0 - local) / t_out.max(f32::EPSILON)
+    } else if transition_in > 0.0 && transition_in < total_duration && local_time < transition_in {
+        local_time / transition_in
+    } else if transition_in <= 0.0 || transition_in >= total_duration {
+        // Full-window linear animation (no distinct transition).
+        local_time / total_duration
     } else {
         1.0
     };
@@ -218,25 +245,90 @@ mod tests {
     }
 
     #[test]
-    fn full_window_progress_is_one() {
-        let p = window_progress(1.5, 1.0, 2.0, 0.0, 0.0, false).unwrap();
-        assert!((p - 1.0).abs() < 1e-5);
+    fn non_reverse_no_transition_animates_over_full_window() {
+        // With transitionIn = 0 the whole window is a single ramp 0→1 —
+        // matches easing.ts line 58-60 ("No transition or past it").
+        let p_start = window_progress(0.0, 0.0, 10.0, 0.0, 0.0, false).unwrap();
+        let p_mid = window_progress(5.0, 0.0, 10.0, 0.0, 0.0, false).unwrap();
+        let p_end = window_progress(10.0, 0.0, 10.0, 0.0, 0.0, false).unwrap();
+        assert!(p_start.abs() < 1e-4);
+        assert!((p_mid - 0.5).abs() < 1e-4);
+        assert!((p_end - 1.0).abs() < 1e-4);
     }
 
     #[test]
-    fn transition_in_ramps_up() {
-        // 1s window, 20% transition in
-        let p_quarter = window_progress(1.05, 1.0, 2.0, 0.2, 0.0, false).unwrap();
-        assert!(p_quarter < 1.0 && p_quarter > 0.0);
+    fn non_reverse_with_transition_ramps_then_holds() {
+        // 10s window, 2s transition-in → 0..2s ramps, 2..10s holds at 1.
+        let p_0 = window_progress(0.0, 0.0, 10.0, 2.0, 0.0, false).unwrap();
+        let p_1s = window_progress(1.0, 0.0, 10.0, 2.0, 0.0, false).unwrap();
+        let p_5s = window_progress(5.0, 0.0, 10.0, 2.0, 0.0, false).unwrap();
+        let p_end = window_progress(10.0, 0.0, 10.0, 2.0, 0.0, false).unwrap();
+        assert!(p_0.abs() < 1e-4);
+        assert!((p_1s - 0.5).abs() < 1e-4);
+        assert!((p_5s - 1.0).abs() < 1e-4);
+        assert!((p_end - 1.0).abs() < 1e-4);
     }
 
     #[test]
-    fn reverse_returns_to_zero() {
-        let p_start = window_progress(1.0, 1.0, 2.0, 0.0, 0.0, true).unwrap();
-        let p_mid = window_progress(1.5, 1.0, 2.0, 0.0, 0.0, true).unwrap();
-        let p_end = window_progress(2.0, 1.0, 2.0, 0.0, 0.0, true).unwrap();
-        assert!(p_start < 0.1);
-        assert!((p_mid - 1.0).abs() < 0.1);
-        assert!(p_end < 0.1);
+    fn reverse_three_phase_matches_frontend() {
+        // The user's actual config: 17.9s window, 2s in, 3s out, reverse.
+        // Expected: ramp 0→1 over 0..2s, hold 1 over 2..14.9s, ramp 1→0
+        // over 14.9..17.9s — exactly what easing.ts::effectProgress does.
+        let dur = 17.9_f32;
+        let t_in = 2.0_f32;
+        let t_out = 3.0_f32;
+        let at = |t| window_progress(t, 0.0, dur, t_in, t_out, true).unwrap();
+
+        // Ramp-in
+        assert!(at(0.0).abs() < 1e-4, "at 0s, progress should be 0");
+        assert!(
+            (at(1.0) - 0.5).abs() < 1e-4,
+            "1s into 2s ramp-in → 0.5, got {}",
+            at(1.0)
+        );
+        assert!((at(1.999) - 0.9995).abs() < 1e-3, "end of ramp-in ≈ 1");
+
+        // Hold
+        assert!((at(2.0) - 1.0).abs() < 1e-4, "hold starts at 1.0");
+        assert!((at(8.0) - 1.0).abs() < 1e-4, "middle of hold = 1.0");
+        assert!((at(14.9) - 1.0).abs() < 1e-4, "hold ends at 1.0");
+
+        // Ramp-out
+        assert!(
+            (at(16.4) - 0.5).abs() < 1e-3,
+            "mid ramp-out (1.5s in) → 0.5, got {}",
+            at(16.4)
+        );
+        assert!(at(17.9) < 1e-3, "at 17.9s, progress back to 0");
+    }
+
+    #[test]
+    fn reverse_no_transitions_holds_full_window() {
+        // reverse=true with both transitions=0 means there's nothing to
+        // ramp — the effect is just "active" for the whole window. Must
+        // hold at 1 (NOT the old triangle-wave behaviour).
+        //
+        // Matches easing.ts's `if (localTime <= 0) return 0;` guard at
+        // the exact start — the first sub-frame of the window returns 0,
+        // every subsequent frame returns 1. This parity with the preview
+        // is why we test `p_any_interior` rather than the boundary.
+        let p_any_interior = window_progress(0.001, 0.0, 2.0, 0.0, 0.0, true).unwrap();
+        let p_mid = window_progress(1.0, 0.0, 2.0, 0.0, 0.0, true).unwrap();
+        let p_end = window_progress(2.0, 0.0, 2.0, 0.0, 0.0, true).unwrap();
+        assert!((p_any_interior - 1.0).abs() < 1e-4);
+        assert!((p_mid - 1.0).abs() < 1e-4);
+        assert!((p_end - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reverse_overlapping_transitions_dont_panic() {
+        // transitionIn + transitionOut > total — the in-ramp wins via the
+        // `hold_start.max(hold_end)` branch. No panic, always in [0, 1].
+        let dur = 3.0_f32;
+        let at = |t| window_progress(t, 0.0, dur, 2.5, 2.0, true).unwrap();
+        for t in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0] {
+            let p = at(t);
+            assert!((0.0..=1.0).contains(&p), "t={t} p={p} out of range");
+        }
     }
 }

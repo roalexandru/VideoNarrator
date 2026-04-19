@@ -6,7 +6,7 @@
 //! via `image::imageops::blur`, then composite back onto the canvas.
 
 use image::{DynamicImage, ImageBuffer, RgbaImage};
-use tiny_skia::{IntRect, Pixmap, PixmapPaint, Transform};
+use tiny_skia::{BlendMode, IntRect, Pixmap, PixmapPaint, Transform};
 
 /// Apply a blur to a sub-rectangle of the canvas (or to everything outside
 /// it when `invert=true`).
@@ -14,6 +14,11 @@ use tiny_skia::{IntRect, Pixmap, PixmapPaint, Transform};
 /// All position params are normalized [0, 1] of the canvas dimensions.
 /// `radius_n` is the blur radius — accepted in either pixels (when > 1.0)
 /// or normalized to canvas width.
+///
+/// `effect_alpha` is the per-frame transition alpha (0..1). Blur fades in /
+/// out smoothly by blending the blurred pixels on top of the original with
+/// this opacity — at `effect_alpha = 0` the canvas is untouched; at `1.0`
+/// the blur is fully applied.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_blur(
     canvas: &mut Pixmap,
@@ -25,7 +30,8 @@ pub fn apply_blur(
     invert: bool,
     effect_alpha: f32,
 ) {
-    if effect_alpha <= 0.001 {
+    let alpha = effect_alpha.clamp(0.0, 1.0);
+    if alpha <= 0.001 {
         return;
     }
     let cw = canvas.width() as f32;
@@ -49,24 +55,56 @@ pub fn apply_blur(
     }
     .clamp(0.5, 200.0);
 
+    // Blend paint: SourceOver + opacity = effect_alpha. This gives
+    //   out = dst * (1 - alpha) + src * alpha
+    // — i.e. a smooth fade between the un-blurred (dst) and blurred (src)
+    // pixels. Re-used for both invert and non-invert paths.
+    let blend_paint = PixmapPaint {
+        opacity: alpha,
+        blend_mode: BlendMode::SourceOver,
+        ..PixmapPaint::default()
+    };
+
     if invert {
-        // Blur the whole canvas, then paste the original sharp rect back on top.
+        // Take a snapshot first so we can (1) blur from it without seeing
+        // our own writes, and (2) restore the sharp sub-rect afterward.
         let original = match clone_pixmap(canvas) {
             Some(p) => p,
             None => return,
         };
-        let blurred = blur_pixmap(canvas, radius);
-        canvas.fill(tiny_skia::Color::TRANSPARENT);
-        let paint = PixmapPaint::default();
-        canvas.draw_pixmap(0, 0, blurred.as_ref(), &paint, Transform::identity(), None);
-        // Paste the un-blurred rect back on top.
+        let blurred_full = blur_pixmap(&original, radius);
+        // Blend the full-frame blur over the live canvas with `alpha`:
+        // the outside of the rect ends up partially blurred, proportional
+        // to the transition progress.
+        canvas.draw_pixmap(
+            0,
+            0,
+            blurred_full.as_ref(),
+            &blend_paint,
+            Transform::identity(),
+            None,
+        );
+        // Restore the sub-rect to the original sharp pixels. BlendMode::Source
+        // forces an overwrite (not a blend) so the rect stays 100% sharp
+        // regardless of `alpha`.
         if let Some(rect) = IntRect::from_xywh(x, y, w, h) {
             if let Some(sub) = sub_pixmap(&original, &rect) {
-                canvas.draw_pixmap(x, y, sub.as_ref(), &paint, Transform::identity(), None);
+                let sharp_paint = PixmapPaint {
+                    blend_mode: BlendMode::Source,
+                    ..PixmapPaint::default()
+                };
+                canvas.draw_pixmap(
+                    x,
+                    y,
+                    sub.as_ref(),
+                    &sharp_paint,
+                    Transform::identity(),
+                    None,
+                );
             }
         }
     } else {
-        // Blur just the rect.
+        // Blur just the rect, then blend it on top with `alpha`.
         let rect = match IntRect::from_xywh(x, y, w, h) {
             Some(r) => r,
             None => return,
@@ -76,8 +114,14 @@ pub fn apply_blur(
             None => return,
         };
         let blurred = blur_pixmap(&sub, radius);
-        let paint = PixmapPaint::default();
-        canvas.draw_pixmap(x, y, blurred.as_ref(), &paint, Transform::identity(), None);
+        canvas.draw_pixmap(
+            x,
+            y,
+            blurred.as_ref(),
+            &blend_paint,
+            Transform::identity(),
+            None,
+        );
     }
 }
 

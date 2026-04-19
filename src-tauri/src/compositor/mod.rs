@@ -55,11 +55,9 @@ fn compose_frame(
         let t_out = effect.transition_out.unwrap_or(0.0) as f32;
         let reverse = effect.reverse.unwrap_or(false);
 
-        // Convert absolute transition seconds into a fraction of the window
-        // (matches the existing video_edit semantics where the user enters
-        // seconds, not a percentage).
-        let dur = (end - start).max(f32::EPSILON);
-        let progress = match window_progress(time, start, end, t_in / dur, t_out / dur, reverse) {
+        // window_progress takes transitions in seconds (matches the frontend
+        // TimelineEffect schema 1:1 — user enters seconds in the UI).
+        let progress = match window_progress(time, start, end, t_in, t_out, reverse) {
             Some(p) => p,
             None => continue,
         };
@@ -261,10 +259,25 @@ pub async fn run_pipeline(
                 }
             }
         } else {
-            // Decode the source range at output_fps * speed, so each output
-            // frame consumes exactly one decoded frame regardless of clip
-            // speed (ffmpeg handles the frame rate conversion via `-r`).
-            let decode_fps = (fps * clip.speed).clamp(1.0, MAX_OUTPUT_FPS * 4.0);
+            // We consume exactly `out_frames = out_dur * fps` output frames
+            // and decode the source range [clip.start, clip.end] (length
+            // `src_dur = end - start` seconds). For frame counts to match
+            // (so every output frame maps to the correct source moment):
+            //
+            //   decoded_frames  = src_dur * decode_fps
+            //   output_frames   = (src_dur / speed) * fps
+            //   ⇒  decode_fps   = fps / speed
+            //
+            // Speed > 1 ⇒ fewer decoded frames (ffmpeg drops source frames);
+            // speed < 1 ⇒ more decoded frames (ffmpeg duplicates them).
+            //
+            // An earlier version inverted this (fps * speed), which caused
+            // video to show a fraction of the source at the wrong rate and
+            // desynchronize from audio (`atempo` in compositor::audio is
+            // correct, so the two tracks drift apart). Covered by
+            // `integration_speed_2x_halves_duration` and friends.
+            let speed = clip.speed.max(0.01);
+            let decode_fps = (fps / speed).clamp(1.0, MAX_OUTPUT_FPS * 4.0);
             let (mut rx, decoder_handle) = decoder::decode_video_range(
                 input_path,
                 clip.start_seconds,
