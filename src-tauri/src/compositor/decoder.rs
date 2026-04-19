@@ -50,20 +50,52 @@ pub async fn decode_video(
     ),
     NarratorError,
 > {
+    decode_video_range(path, 0.0, f64::INFINITY, width, height, fps).await
+}
+
+/// Same as `decode_video` but decodes only the source range `[start, end]`
+/// (seconds). Used by the single-pass pipeline to walk per-clip source
+/// segments. `end = f64::INFINITY` means "decode to EOF".
+pub async fn decode_video_range(
+    path: &Path,
+    start_seconds: f64,
+    end_seconds: f64,
+    width: u32,
+    height: u32,
+    fps: f64,
+) -> Result<
+    (
+        mpsc::Receiver<RgbaFrame>,
+        tokio::task::JoinHandle<Result<(), NarratorError>>,
+    ),
+    NarratorError,
+> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let frame_bytes = (width as usize) * (height as usize) * 4;
     let fps_arg = format!("{:.6}", fps);
     let scale_arg = format!("scale={width}:{height}:flags=lanczos,format=rgba");
 
-    let mut child = Command::new(ffmpeg.as_os_str())
-        .no_window()
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(path.as_os_str())
-        .args([
-            "-vf", &scale_arg, "-r", &fps_arg, "-f", "rawvideo", "-pix_fmt", "rgba", "-an", "-",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window();
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    if start_seconds > 0.0 {
+        // -ss before -i: fast (keyframe) seek. Frame-accurate seek would be
+        // slower; the typical user-perceptible drift is < 1 frame and the
+        // existing pipeline accepted the same trade-off.
+        cmd.args(["-ss", &format!("{:.6}", start_seconds)]);
+    }
+    cmd.arg("-i").arg(path.as_os_str());
+    if end_seconds.is_finite() && end_seconds > start_seconds {
+        let dur = (end_seconds - start_seconds).max(0.001);
+        cmd.args(["-t", &format!("{:.6}", dur)]);
+    }
+    cmd.args([
+        "-vf", &scale_arg, "-r", &fps_arg, "-f", "rawvideo", "-pix_fmt", "rgba", "-an", "-",
+    ]);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(format!("decoder spawn: {e}")))?;
 
@@ -124,4 +156,58 @@ pub async fn decode_video(
     });
 
     Ok((rx, handle))
+}
+
+/// Decode a single frame at `time_seconds`, returning a tightly packed RGBA
+/// buffer of length `width * height * 4`. Used for freeze clips.
+pub async fn decode_single_frame_rgba(
+    path: &Path,
+    time_seconds: f64,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, NarratorError> {
+    let ffmpeg = video_engine::detect_ffmpeg()?;
+    let scale_arg = format!("scale={width}:{height}:flags=lanczos,format=rgba");
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{:.6}", time_seconds),
+            "-i",
+        ])
+        .arg(path.as_os_str())
+        .args([
+            "-vf",
+            &scale_arg,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-an",
+            "-",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(format!("freeze decode: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "freeze decode failed: {stderr}"
+        )));
+    }
+    let expected = (width as usize) * (height as usize) * 4;
+    if output.stdout.len() < expected {
+        return Err(NarratorError::FfmpegFailed(format!(
+            "freeze decode produced {} bytes, expected {expected}",
+            output.stdout.len()
+        )));
+    }
+    Ok(output.stdout[..expected].to_vec())
 }

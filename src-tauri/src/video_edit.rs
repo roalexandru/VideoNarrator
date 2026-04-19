@@ -1170,14 +1170,28 @@ pub async fn apply_edits(
         return Ok(output_path.to_string());
     }
 
-    // Passthrough shortcut: if there's exactly one unmodified clip covering
-    // the full source and the only work is overlay effects, skip the per-clip
-    // re-encode entirely and feed `input_path` straight to the effects pass.
-    // This was previously doing a full lossless re-encode just to produce a
-    // concat target that the effects pass would read back seconds later —
-    // roughly halves render time for the common case (single take + overlays).
+    // Phase 4: hand the whole plan to the in-process compositor. The legacy
+    // per-clip re-encode + concat-demuxer + filter-complex effects pass is
+    // unreachable from here onward and removed in Phase 6.
+    crate::compositor::run_pipeline(
+        std::path::Path::new(input_path),
+        std::path::Path::new(output_path),
+        plan,
+        &on_progress,
+    )
+    .await?;
+    on_progress(100.0);
+    return Ok(output_path.to_string());
+
+    // ── Legacy code path (unreachable; Phase 6 will remove) ──
+    #[allow(unreachable_code)]
+    let _ = ffmpeg;
+    #[allow(unreachable_code)]
+    let _ = has_overlay_fx;
+    #[allow(unreachable_code)]
     let covers_full_source = plan.clips[0].start_seconds < 0.5
         && (plan.clips[0].end_seconds - meta.duration_seconds).abs() < 0.5;
+    #[allow(unreachable_code)]
     let passthrough_to_fx = total == 1
         && plan.clips[0].speed == 1.0
         && plan.clips[0].fps_override.is_none()
@@ -1186,6 +1200,7 @@ pub async fn apply_edits(
         && covers_full_source;
 
     // Process each clip
+    #[allow(unreachable_code)]
     let mut clip_files: Vec<PathBuf> = Vec::new();
 
     // For smooth progress: give each clip a share of the 0-80% band

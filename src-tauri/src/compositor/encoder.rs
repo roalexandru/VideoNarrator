@@ -36,6 +36,30 @@ impl Encoder {
         fps: f64,
         audio_source: Option<&Path>,
     ) -> Result<Self, NarratorError> {
+        Self::start_inner(output_path, width, height, fps, audio_source, "copy").await
+    }
+
+    /// Same as `start` but re-encodes the audio source to AAC.
+    /// Used by the single-pass pipeline where the audio source is a PCM WAV
+    /// (timeline-assembled) that needs AAC for the MP4 container.
+    pub async fn start_with_aac(
+        output_path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        audio_source: Option<&Path>,
+    ) -> Result<Self, NarratorError> {
+        Self::start_inner(output_path, width, height, fps, audio_source, "aac").await
+    }
+
+    async fn start_inner(
+        output_path: &Path,
+        width: u32,
+        height: u32,
+        fps: f64,
+        audio_source: Option<&Path>,
+        audio_codec: &str,
+    ) -> Result<Self, NarratorError> {
         let ffmpeg = video_engine::detect_ffmpeg()?;
         let size_arg = format!("{width}x{height}");
         let fps_arg = format!("{:.6}", fps);
@@ -74,11 +98,16 @@ impl Encoder {
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
-                "copy",
-                "-shortest",
-                "-movflags",
-                "+faststart",
+                audio_codec,
             ]);
+            if audio_codec == "aac" {
+                cmd.args(["-b:a", "256k"]);
+            }
+            // No `-shortest`: freeze clips contribute video but not audio, so
+            // the audio WAV is often shorter than the video stream. Letting
+            // the longer (video) stream finish keeps the output's duration
+            // matching the timeline; trailing frames simply have no audio.
+            cmd.args(["-movflags", "+faststart"]);
         } else {
             cmd.args([
                 "-map",
