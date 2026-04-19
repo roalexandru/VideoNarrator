@@ -34,28 +34,12 @@ pub struct RgbaFrame {
 }
 
 /// Spawn an ffmpeg decoder for `path`, scaled to `(width, height)` at
-/// `fps` frames/sec, and stream `RgbaFrame`s through the returned receiver.
+/// `fps` frames/sec, decoding only the source range `[start_seconds,
+/// end_seconds]`. Stream `RgbaFrame`s through the returned receiver;
+/// the join handle resolves once stdout closes (check for ffmpeg exit
+/// status if you need to confirm a clean decode).
 ///
-/// The join handle resolves once stdout closes; check it for the ffmpeg
-/// exit status if you need to confirm a clean decode.
-pub async fn decode_video(
-    path: &Path,
-    width: u32,
-    height: u32,
-    fps: f64,
-) -> Result<
-    (
-        mpsc::Receiver<RgbaFrame>,
-        tokio::task::JoinHandle<Result<(), NarratorError>>,
-    ),
-    NarratorError,
-> {
-    decode_video_range(path, 0.0, f64::INFINITY, width, height, fps).await
-}
-
-/// Same as `decode_video` but decodes only the source range `[start, end]`
-/// (seconds). Used by the single-pass pipeline to walk per-clip source
-/// segments. `end = f64::INFINITY` means "decode to EOF".
+/// `end_seconds = f64::INFINITY` means "decode to EOF".
 pub async fn decode_video_range(
     path: &Path,
     start_seconds: f64,

@@ -26,22 +26,10 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Start an encoder writing to `output_path`. If `audio_source` is
-    /// supplied, its first audio stream is muxed (`-c:a copy`) into the
-    /// output; if it is `None`, the output has no audio track.
-    pub async fn start(
-        output_path: &Path,
-        width: u32,
-        height: u32,
-        fps: f64,
-        audio_source: Option<&Path>,
-    ) -> Result<Self, NarratorError> {
-        Self::start_inner(output_path, width, height, fps, audio_source, "copy").await
-    }
-
-    /// Same as `start` but re-encodes the audio source to AAC.
-    /// Used by the single-pass pipeline where the audio source is a PCM WAV
-    /// (timeline-assembled) that needs AAC for the MP4 container.
+    /// Start an encoder writing to `output_path`. The audio source (if
+    /// supplied) is re-encoded to AAC because the single-pass pipeline
+    /// feeds it a PCM WAV (timeline-assembled) that the MP4 container
+    /// can't hold natively.
     pub async fn start_with_aac(
         output_path: &Path,
         width: u32,
