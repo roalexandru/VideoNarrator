@@ -200,7 +200,8 @@ pub async fn run_pipeline(
     for effect in &supported_effects {
         if effect.effect_type == "text" {
             if let Some(td) = &effect.text {
-                text_cache.get_or_render(td, width, height).await?;
+                // None = drawtext unavailable; warning already logged.
+                let _ = text_cache.get_or_render(td, width, height).await?;
             }
         }
     }

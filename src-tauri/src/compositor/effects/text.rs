@@ -46,15 +46,29 @@ impl TextRenderCache {
         text: &TextData,
         canvas_w: u32,
         canvas_h: u32,
-    ) -> Result<Arc<PreRenderedText>, NarratorError> {
+    ) -> Result<Option<Arc<PreRenderedText>>, NarratorError> {
         let key = compute_text_key(text, canvas_w, canvas_h);
         if let Some(p) = self.entries.get(&key) {
-            return Ok(p.clone());
+            return Ok(Some(p.clone()));
+        }
+        // Some ffmpeg builds (notably Homebrew's default on macOS) ship
+        // without libfreetype — `drawtext` isn't registered. Rather than
+        // failing the entire render, log a warning and skip the text
+        // overlay; every other effect still composites normally. A future
+        // pure-Rust rasterizer (ab_glyph is already a dep) can replace this
+        // path without changing the public surface.
+        if !drawtext_available().await {
+            tracing::warn!(
+                "ffmpeg drawtext filter not available — skipping text overlay '{}' \
+                 (rebuild ffmpeg with libfreetype to enable)",
+                text.content.chars().take(40).collect::<String>()
+            );
+            return Ok(None);
         }
         let rendered = render_text_to_pixmap(text, canvas_w, canvas_h).await?;
         let arc = Arc::new(rendered);
         self.entries.insert(key, arc.clone());
-        Ok(arc)
+        Ok(Some(arc))
     }
 
     /// Cache lookup by the same key the orchestrator will compute.
@@ -68,6 +82,29 @@ impl TextRenderCache {
         let key = compute_text_key(text, canvas_w, canvas_h);
         self.entries.get(&key).cloned()
     }
+}
+
+/// Cached probe: does the on-system ffmpeg expose the `drawtext` filter?
+/// Result is computed once per process and cached behind an OnceCell.
+async fn drawtext_available() -> bool {
+    use tokio::sync::OnceCell;
+    static AVAILABLE: OnceCell<bool> = OnceCell::const_new();
+    *AVAILABLE
+        .get_or_init(|| async {
+            let Ok(ffmpeg) = video_engine::detect_ffmpeg() else {
+                return false;
+            };
+            let Ok(output) = Command::new(ffmpeg)
+                .no_window()
+                .arg("-filters")
+                .output()
+                .await
+            else {
+                return false;
+            };
+            String::from_utf8_lossy(&output.stdout).contains("drawtext")
+        })
+        .await
 }
 
 fn compute_text_key(text: &TextData, w: u32, h: u32) -> u64 {
