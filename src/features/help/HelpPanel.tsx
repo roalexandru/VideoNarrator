@@ -52,6 +52,26 @@ const sections = [
         a: "Use the timeline to select portions of your video. Press S to split at the playhead. Delete unwanted clips. Adjust speed (0.25x–10x) or enable time-lapse mode for clean jump-cuts.",
       },
       {
+        q: "Freeze frame",
+        a: "Hold a single still frame for a fixed duration — handy for emphasizing a state before the video continues. Pick a source time and a duration in the clip panel; freeze clips add to output length without consuming source audio.",
+      },
+      {
+        q: "Effects overview",
+        a: "Add effects on the FX track below the timeline. Five types: Zoom (animate between two regions of the frame), Spotlight (dim everything except a circular area), Blur (Gaussian blur of a rectangular region, or the inverse — blur everything except the rect), Text (overlay text with font/colour/background), and Fade (blend a solid colour over the whole frame). Effects compose on top of speed-changed sections and multi-clip cuts — they time on the output timeline, not the source.",
+      },
+      {
+        q: "Effect transitions (Zoom In / Hold / Zoom Out)",
+        a: "Every effect has transitionIn + transitionOut values (in seconds) plus a Return toggle. With Return on, the effect ramps 0→1 over transitionIn, holds at full strength for the middle, then ramps 1→0 over transitionOut. Without Return, it ramps in and stays at full until the effect ends. The Smooth/Linear/Ease In/Ease Out preset controls the ramp curve.",
+      },
+      {
+        q: "Stacking effects",
+        a: "Effects composite in declaration order. Zoom OVERWRITES the frame with the cropped-and-scaled region, so put it FIRST in a stack — Spotlight / Blur / Text / Fade drawn afterwards will appear on top of the zoomed frame. Blur / Spotlight / Text / Fade fade in smoothly with the configured transition; on a zoomed section they operate in screen space (e.g. a blur rect in the top-right stays in the top-right regardless of zoom).",
+      },
+      {
+        q: "Per-clip zoom vs overlay zoom",
+        a: "Per-clip zoom lives on a clip and ramps linearly across the whole clip output duration (no transition controls). Overlay Zoom on the FX track is the full animation model — start region, end region, transitionIn/Hold/Out, reverse, easing. Prefer the overlay version for anything beyond a simple whole-clip pan.",
+      },
+      {
         q: "Controls",
         a: `Play/Pause — Space bar\nSplit at playhead — S\nUndo — ${isMac ? "⌘Z" : "Ctrl+Z"}\nRedo — ${isMac ? "⌘⇧Z" : "Ctrl+Shift+Z"}\nZoom timeline — ${isMac ? "⌘" : "Ctrl"}+Scroll`,
       },
@@ -155,7 +175,11 @@ const sections = [
       },
       {
         q: "Generation fails or poor results",
-        a: "Try a different narration style or lower the temperature (0.3–0.5) for consistency. Adding context documents helps the AI understand domain-specific content. For long videos, use \"Heavy\" density to capture more visual detail.",
+        a: "Try a different narration style or lower the temperature (0.3–0.5) for consistency. Adding context documents helps the AI understand domain-specific content. For long videos, use \"Heavy\" density to capture more visual detail. Note: OpenAI reasoning models (o1, o3, o4, GPT-5) don't support a custom temperature — the slider auto-disables when you pick one and the model runs at its default.",
+      },
+      {
+        q: "Export is slow",
+        a: "Export runs a frame-by-frame Rust compositor — a 4-minute 1080p video with effects typically renders in a few minutes on Apple Silicon. Development builds (pnpm tauri dev) are 10–20× slower than release builds; always use a release/installed build for real renders. Expected throughput is roughly 1× realtime at 1080p30 for multi-effect timelines.",
       },
       {
         q: "Audio/video merge issues",
