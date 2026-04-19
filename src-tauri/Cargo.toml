@@ -4,6 +4,10 @@ version = "0.7.1"
 description = "AI-powered video narration generator"
 authors = ["you"]
 edition = "2021"
+# Declaring `[[bin]]` entries (added in Phase 2 for the CLI) disables Cargo's
+# implicit default binary selection. `tauri dev` invokes `cargo run` without
+# --bin, so it needs this to pick the GUI binary by default.
+default-run = "narrator"
 
 [lib]
 name = "narrator_lib"
