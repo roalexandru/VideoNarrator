@@ -75,9 +75,9 @@ test.describe("Review Screen", () => {
   });
 
   test("shows empty state message when no script exists", async ({ page }) => {
-    // Navigate to Review & Edit step
-    await page.getByRole("button", { name: "Review & Edit" }).click();
-    await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+    // Navigate to Review step
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
 
     // Without a generated script, should show the empty state
     await expect(page.getByText("No narration generated yet")).toBeVisible();
@@ -85,13 +85,13 @@ test.describe("Review Screen", () => {
   });
 
   test("review screen header is visible", async ({ page }) => {
-    await page.getByRole("button", { name: "Review & Edit" }).click();
-    await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
   });
 
   test("no video placeholder is shown when no video is loaded", async ({ page }) => {
-    await page.getByRole("button", { name: "Review & Edit" }).click();
-    await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
     await expect(page.getByText("No video")).toBeVisible();
   });
 });
@@ -104,8 +104,8 @@ test.describe("Review Screen with script data", () => {
     await expect(page.getByRole("heading", { name: "Project Setup" })).toBeVisible({ timeout: 10000 });
 
     // Navigate to Review step first
-    await page.getByRole("button", { name: "Review & Edit" }).click();
-    await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
 
     // Now inject script data by finding and calling the Zustand store
     // We need to access the store that's already been created by the app
@@ -164,8 +164,8 @@ test.describe("Review Screen with script data", () => {
     if (hasSegments) {
       // Force a re-render by navigating away and back
       await page.getByRole("button", { name: "Configuration" }).click();
-      await page.getByRole("button", { name: "Review & Edit" }).click();
-      await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+      await page.getByRole("button", { name: "Review", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
 
       // Now check that segments are rendered
       await expect(page.getByText("Welcome to this product demonstration.")).toBeVisible({ timeout: 5000 });
@@ -177,8 +177,8 @@ test.describe("Review Screen with script data", () => {
     await page.goto("/");
     await page.getByText("New Project").click();
     await expect(page.getByRole("heading", { name: "Project Setup" })).toBeVisible({ timeout: 10000 });
-    await page.getByRole("button", { name: "Review & Edit" }).click();
-    await expect(page.getByRole("heading", { name: "Review & Edit" })).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: "Review", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Review", exact: true })).toBeVisible({ timeout: 5000 });
 
     // When segments exist, textareas should have proper aria-labels
     // In the empty state, there are no textareas
