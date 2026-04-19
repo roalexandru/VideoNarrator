@@ -55,6 +55,8 @@ clap = { version = "4", features = ["derive"] }
 tiny-skia = "0.11"
 # Glyph rasterization for the text overlay effect.
 ab_glyph = "0.2"
+# Pure-Rust WAV I/O for the in-process audio mixer (Phase 5).
+hound = "3.5"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"

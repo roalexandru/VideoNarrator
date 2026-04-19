@@ -1602,43 +1602,38 @@ pub async fn merge_audio_video(
         return Ok(output_path.to_string());
     }
 
-    // Mix original + narration audio (amix) — re-encodes audio, so use progress reporting.
-    let meta = video_engine::probe_video(Path::new(video_path)).await?;
-    let total_duration = meta.duration_seconds;
+    // Mix original + narration audio. Phase 5: this happens in Rust via the
+    // compositor::audio mixer (sample-level math + optional ducking) instead
+    // of ffmpeg amix. ffmpeg only does the final mux.
+    on_progress(5.0);
 
-    let filter = "[0:a][1:a]amix=inputs=2:duration=first:normalize=1[a]";
-    let result = run_ffmpeg_with_progress(
-        &ffmpeg,
-        &[
-            "-y",
-            "-i",
-            video_path,
-            "-i",
-            audio_path,
-            "-filter_complex",
-            filter,
-            "-map",
-            "0:v",
-            "-map",
-            "[a]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            output_path,
-        ],
-        total_duration,
-        &on_progress,
+    let tmp_dir = std::env::temp_dir();
+    let mixed_wav = tmp_dir.join(format!("_narrator_mix_{}.wav", uuid::Uuid::new_v4()));
+    let _cleanup = TempCleanup(vec![mixed_wav.clone()]);
+
+    // Default ducking: -8dB whenever narration has signal. Keeps narration
+    // intelligible without making the original disappear.
+    let mix_result = crate::compositor::audio::mix_narration(
+        Path::new(video_path),
+        Path::new(audio_path),
+        &mixed_wav,
+        1.0,
+        1.0,
+        -8.0,
     )
     .await;
 
-    if let Err(_e) = result {
-        // Fallback: video might not have audio stream, use narration audio only
-        tracing::warn!("amix failed, trying narration-only fallback");
+    if let Err(e) = mix_result {
+        // Fallback: video might not have an audio stream — use narration only
+        // via straight mux.
+        tracing::warn!("Rust mix failed ({e}), falling back to narration-only mux");
         let fallback = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args([
                 "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
                 "-i",
                 video_path,
                 "-i",
@@ -1656,18 +1651,70 @@ pub async fn merge_audio_video(
             .output()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
         if !fallback.status.success() {
             let stderr = String::from_utf8_lossy(&fallback.stderr);
             return Err(NarratorError::FfmpegFailed(format!(
-                "Audio merge failed: {}",
+                "Audio merge fallback failed: {}",
                 &stderr[stderr.len().saturating_sub(500)..]
             )));
         }
+        on_progress(100.0);
+        return Ok(output_path.to_string());
+    }
+
+    on_progress(70.0);
+
+    // Mux: video stream copied through, audio = the mixed WAV → AAC.
+    let mux = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            video_path,
+            "-i",
+        ])
+        .arg(&mixed_wav)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(format!("mux: {e}")))?;
+    if !mux.status.success() {
+        let stderr = String::from_utf8_lossy(&mux.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Audio mux failed: {}",
+            &stderr[stderr.len().saturating_sub(500)..]
+        )));
     }
 
     on_progress(100.0);
     Ok(output_path.to_string())
+}
+
+/// RAII helper for cleaning up temp files inside merge_audio_video.
+struct TempCleanup(Vec<PathBuf>);
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
