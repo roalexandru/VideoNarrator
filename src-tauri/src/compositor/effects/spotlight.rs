@@ -111,9 +111,11 @@ fn apply_alpha_mask(pix: &mut Pixmap, mask: &Mask) {
         let off = i * 4;
         let a = data[off + 3] as u16;
         let new_a = ((a * m as u16) / 255) as u8;
-        // Adjust premultiplied RGB by the alpha ratio.
-        if a > 0 {
-            let scale = new_a as u16 * 256 / a;
+        // Adjust premultiplied RGB by the alpha ratio. `checked_div` on a
+        // u16 returns None when the divisor is zero, which lets clippy's
+        // `manual_checked_ops` lint (rust 1.95+) accept this without the
+        // explicit `if a > 0` guard.
+        if let Some(scale) = (new_a as u16 * 256).checked_div(a) {
             data[off] = ((data[off] as u16 * scale) / 256) as u8;
             data[off + 1] = ((data[off + 1] as u16 * scale) / 256) as u8;
             data[off + 2] = ((data[off + 2] as u16 * scale) / 256) as u8;
