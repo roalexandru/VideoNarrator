@@ -149,10 +149,7 @@ pub fn export_ssml(script: &NarrationScript) -> String {
 /// XML-escape the five reserved characters. Returns a borrowed slice when no
 /// escape is needed to avoid unnecessary allocations.
 fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s
-        .chars()
-        .any(|c| matches!(c, '<' | '>' | '&' | '"' | '\''))
-    {
+    if !s.chars().any(|c| matches!(c, '<' | '>' | '&' | '"' | '\'')) {
         return std::borrow::Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + 8);
@@ -649,10 +646,7 @@ mod tests {
     fn test_wrap_emphasis_preserves_punctuation() {
         // Emphasis word next to punctuation should still match
         let out = wrap_emphasis("hello, world!", "world");
-        assert_eq!(
-            out,
-            "hello, <emphasis level=\"moderate\">world</emphasis>!"
-        );
+        assert_eq!(out, "hello, <emphasis level=\"moderate\">world</emphasis>!");
     }
 
     #[test]

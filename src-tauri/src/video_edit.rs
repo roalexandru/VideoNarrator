@@ -50,10 +50,7 @@ fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
 fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), NarratorError> {
     let err = |msg: &str| NarratorError::ExportError(format!("Clip {index}: {msg}"));
     // Reject NaN / Infinity — they produce invalid ffmpeg args and cause hangs or crashes.
-    if !clip.speed.is_finite()
-        || !clip.start_seconds.is_finite()
-        || !clip.end_seconds.is_finite()
-    {
+    if !clip.speed.is_finite() || !clip.start_seconds.is_finite() || !clip.end_seconds.is_finite() {
         return Err(err("speed/start/end must be finite"));
     }
     if clip.speed <= 0.0 || clip.speed > 100.0 {
@@ -262,7 +259,9 @@ fn generate_spotlight_mask(
     dim_opacity: f64,
     out_dir: &Path,
 ) -> Result<PathBuf, NarratorError> {
-    let dim_alpha = (dim_opacity.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let dim_alpha = (dim_opacity.clamp(0.0, 1.0) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u8;
     // Sub-pixel precision (3 decimals = 0.001 px) so two nearby spotlights
     // don't collide on the same cached mask. The earlier 1-decimal hash
     // could alias distinct effect positions that differ by less than 0.05 px.
@@ -297,9 +296,8 @@ fn generate_spotlight_mask(
             img.put_pixel(x, y, image::Rgba([0, 0, 0, alpha]));
         }
     }
-    img.save(&path).map_err(|e| {
-        NarratorError::FfmpegFailed(format!("Failed to save spotlight mask: {e}"))
-    })?;
+    img.save(&path)
+        .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to save spotlight mask: {e}")))?;
     Ok(path)
 }
 
@@ -345,10 +343,7 @@ fn build_progress_expr(s: f64, dur: f64, tin: f64, tout: f64, reverse: bool) -> 
     } else if tin > 0.001 && tin < dur {
         // Ramp in over tin, then hold at 1 for the remainder.
         let ramp_in = format!("{local}/{:.3}", tin);
-        let inner = format!(
-            "if(lt({local}\\,{:.3})\\,{ramp_in}\\,1)",
-            tin
-        );
+        let inner = format!("if(lt({local}\\,{:.3})\\,{ramp_in}\\,1)", tin);
         format!("max(0\\,min(1\\,{inner}))")
     } else {
         // No transition specified — animate over the full window.
@@ -418,9 +413,7 @@ fn build_effects_filter(
                     parts.push(format!(
                         "[{split_a}]boxblur=luma_radius={radius}:luma_power=1[{blurred}]"
                     ));
-                    parts.push(format!(
-                        "[{split_b}]crop={bw_px}:{bh_px}:{bx}:{by}[{crop}]"
-                    ));
+                    parts.push(format!("[{split_b}]crop={bw_px}:{bh_px}:{bx}:{by}[{crop}]"));
                     parts.push(format!(
                         "[{blurred}][{crop}]overlay={bx}:{by}:enable='{enable}'[{next_label}]"
                     ));
@@ -449,7 +442,13 @@ fn build_effects_filter(
                 let r_px = (sp.radius.clamp(0.01, 1.0) * max_wh).max(4.0);
                 let dim_opacity = sp.dim_opacity.clamp(0.0, 1.0);
                 let mask_path = match generate_spotlight_mask(
-                    width, height, cx_px, cy_px, r_px, dim_opacity, mask_dir,
+                    width,
+                    height,
+                    cx_px,
+                    cy_px,
+                    r_px,
+                    dim_opacity,
+                    mask_dir,
                 ) {
                     Ok(p) => p,
                     Err(e) => {
@@ -488,9 +487,7 @@ fn build_effects_filter(
 
                 if tin > 0.001 {
                     let tin_eff = tin.min(fx_dur * 0.5).max(0.001);
-                    mask_chain.push_str(&format!(
-                        ",fade=t=in:st={s:.3}:d={tin_eff:.3}:alpha=1"
-                    ));
+                    mask_chain.push_str(&format!(",fade=t=in:st={s:.3}:d={tin_eff:.3}:alpha=1"));
                 }
                 if reverse && tout > 0.001 {
                     let tout_eff = tout.min(fx_dur * 0.5).max(0.001);
@@ -516,7 +513,9 @@ fn build_effects_filter(
                     prev_label = next_label;
                     continue;
                 }
-                let fontsize_px = ((t.font_size.clamp(1.0, 40.0) / 100.0) * h).round().max(8.0);
+                let fontsize_px = ((t.font_size.clamp(1.0, 40.0) / 100.0) * h)
+                    .round()
+                    .max(8.0);
                 let color = hex_to_ffmpeg_color(&t.color);
                 let opacity = t.opacity.unwrap_or(1.0).clamp(0.0, 1.0);
                 let bold = t.bold.unwrap_or(false);
@@ -620,17 +619,13 @@ fn build_effects_filter(
                 // (rw=rh=1) the scale is identity; at small regions it's
                 // large. Clamp to [1, 20] so we never downscale or produce
                 // pathologically huge intermediates.
-                let scale_w =
-                    format!("max({w}\\,min({w}*20\\,{w}/max(0.05\\,{cur_rw})))");
-                let scale_h =
-                    format!("max({h}\\,min({h}*20\\,{h}/max(0.05\\,{cur_rh})))");
+                let scale_w = format!("max({w}\\,min({w}*20\\,{w}/max(0.05\\,{cur_rw})))");
+                let scale_h = format!("max({h}\\,min({h}*20\\,{h}/max(0.05\\,{cur_rh})))");
                 // Crop position in the scaled image = region_origin * scaled_dim.
                 // iw/ih inside crop = scale's output dims, so this resolves
                 // per frame without any self-reference.
-                let cx =
-                    format!("max(0\\,min(iw-{width}\\,{cur_rx}*iw))");
-                let cy =
-                    format!("max(0\\,min(ih-{height}\\,{cur_ry}*ih))");
+                let cx = format!("max(0\\,min(iw-{width}\\,{cur_rx}*iw))");
+                let cy = format!("max(0\\,min(ih-{height}\\,{cur_ry}*ih))");
 
                 let base = format!("zb{i}");
                 let zoom_src = format!("zs{i}");
@@ -1211,8 +1206,7 @@ pub async fn apply_edits(
     // will read `input_path` directly.
     for (i, clip) in plan.clips.iter().enumerate().filter(|_| !passthrough_to_fx) {
         // Base progress = sum of previous clips' shares (in 0-80% band).
-        let cum_before: f64 =
-            clip_weights.iter().take(i).sum::<f64>() / total_weight * 80.0;
+        let cum_before: f64 = clip_weights.iter().take(i).sum::<f64>() / total_weight * 80.0;
         let this_share = clip_weights[i] / total_weight * 80.0;
         on_progress(cum_before);
 
@@ -1341,18 +1335,11 @@ pub async fn apply_edits(
         let progress_cb = |pct: f64| {
             on_progress(cum_before + (pct / 100.0) * this_share);
         };
-        if let Err(e) = run_ffmpeg_with_progress(
-            &ffmpeg,
-            &arg_refs,
-            expected_output_dur,
-            &progress_cb,
-        )
-        .await
+        if let Err(e) =
+            run_ffmpeg_with_progress(&ffmpeg, &arg_refs, expected_output_dur, &progress_cb).await
         {
             tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
-            return Err(NarratorError::FfmpegFailed(format!(
-                "Clip {i} failed: {e}"
-            )));
+            return Err(NarratorError::FfmpegFailed(format!("Clip {i} failed: {e}")));
         }
 
         // Verify clip file was actually created and has content
@@ -1560,18 +1547,11 @@ pub async fn apply_edits(
                 let scaled = fx_start + (pct / 100.0) * (fx_end - fx_start);
                 on_progress(scaled);
             };
-            if let Err(e) = run_ffmpeg_with_progress(
-                &ffmpeg,
-                &args,
-                meta.duration_seconds,
-                &fx_progress_cb,
-            )
-            .await
+            if let Err(e) =
+                run_ffmpeg_with_progress(&ffmpeg, &args, meta.duration_seconds, &fx_progress_cb)
+                    .await
             {
-                tracing::error!(
-                    "Effects pass failed. filter_complex: {}",
-                    filter_complex
-                );
+                tracing::error!("Effects pass failed. filter_complex: {}", filter_complex);
                 return Err(NarratorError::FfmpegFailed(format!(
                     "Effects pass failed: {e}"
                 )));
@@ -2400,8 +2380,7 @@ mod tests {
         // Keep the tempdir alive for the whole test so the written mask
         // file doesn't get cleaned up before we check it.
         let dir = tempfile::tempdir().unwrap();
-        let (f, _, extras) =
-            build_effects_filter(&[fx], 1920, 1080, dir.path()).unwrap();
+        let (f, _, extras) = build_effects_filter(&[fx], 1920, 1080, dir.path()).unwrap();
         assert_eq!(extras.len(), 1, "spotlight should add 1 extra PNG input");
         // Mask is now pre-chained through format=rgba (and optionally fade
         // filters when the effect has transitions) into a named label that
@@ -2496,8 +2475,7 @@ mod tests {
             color: "#ffffff".into(),
             opacity: 0.3,
         });
-        let (filter, final_label, _) =
-            run_effects_filter(&[f1, f2], 1920, 1080).unwrap();
+        let (filter, final_label, _) = run_effects_filter(&[f1, f2], 1920, 1080).unwrap();
         // Last effect's output label should be fx1
         assert_eq!(final_label, "fx1");
         // Both effects should appear
@@ -2513,18 +2491,25 @@ mod tests {
         fx.start_time = 10.0;
         fx.end_time = 14.0;
         fx.zoom_pan = Some(ZoomPanEffect {
-            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
-            end_region: crate::models::ZoomRegion { x: 0.25, y: 0.25, width: 0.5, height: 0.5 },
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
             easing: EasingPreset::Linear,
         });
         let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         // Ken Burns via time-varying scale + constant-size crop (avoids the
         // ffmpeg "reinitializing filters" path that killed the previous
         // time-varying crop approach). Crop's W:H are now literal constants.
-        assert!(
-            f.contains("scale=w='"),
-            "expected time-varying scale: {f}"
-        );
+        assert!(f.contains("scale=w='"), "expected time-varying scale: {f}");
         assert!(
             f.contains("eval=frame"),
             "scale must re-evaluate per frame: {f}"
@@ -2551,13 +2536,26 @@ mod tests {
         fx.start_time = 5.0;
         fx.end_time = 10.0;
         fx.zoom_pan = Some(ZoomPanEffect {
-            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
-            end_region: crate::models::ZoomRegion { x: 0.1, y: 0.1, width: 0.6, height: 0.6 },
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.1,
+                y: 0.1,
+                width: 0.6,
+                height: 0.6,
+            },
             easing: EasingPreset::EaseIn,
         });
         let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
         // Ease-in: p*p. The squared progress should appear as (raw)*(raw).
-        assert!(f.contains(")*(max(0"), "expected p*p pattern for ease-in: {f}");
+        assert!(
+            f.contains(")*(max(0"),
+            "expected p*p pattern for ease-in: {f}"
+        );
     }
 
     #[test]
@@ -2568,16 +2566,36 @@ mod tests {
         f1.start_time = 2.0;
         f1.end_time = 5.0;
         f1.zoom_pan = Some(ZoomPanEffect {
-            start_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
-            end_region: crate::models::ZoomRegion { x: 0.2, y: 0.2, width: 0.5, height: 0.5 },
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.2,
+                y: 0.2,
+                width: 0.5,
+                height: 0.5,
+            },
             easing: EasingPreset::Linear,
         });
         let mut f2 = empty_effect("zoom-pan");
         f2.start_time = 10.0;
         f2.end_time = 13.0;
         f2.zoom_pan = Some(ZoomPanEffect {
-            start_region: crate::models::ZoomRegion { x: 0.5, y: 0.5, width: 0.4, height: 0.4 },
-            end_region: crate::models::ZoomRegion { x: 0.0, y: 0.0, width: 1.0, height: 1.0 },
+            start_region: crate::models::ZoomRegion {
+                x: 0.5,
+                y: 0.5,
+                width: 0.4,
+                height: 0.4,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
             easing: EasingPreset::EaseOut,
         });
         let (filter, final_label, _) = run_effects_filter(&[f1, f2], 1920, 1080).unwrap();
@@ -2721,10 +2739,7 @@ mod tests {
             effects: None,
         };
         let (dur, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
-        assert!(
-            (dur - 4.0).abs() < 0.3,
-            "expected ~4s, got {dur}s"
-        );
+        assert!((dur - 4.0).abs() < 0.3, "expected ~4s, got {dur}s");
         assert_eq!((w, h), (320, 240));
     }
 
@@ -2755,10 +2770,7 @@ mod tests {
             effects: None,
         };
         let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
-        assert!(
-            (dur - 4.0).abs() < 0.5,
-            "expected ~4s concat, got {dur}s"
-        );
+        assert!((dur - 4.0).abs() < 0.5, "expected ~4s concat, got {dur}s");
     }
 
     #[tokio::test]
@@ -2809,10 +2821,7 @@ mod tests {
             effects: Some(vec![fx]),
         };
         let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
-        assert!(
-            dur > 2.7 && dur < 3.3,
-            "expected ~3s with blur, got {dur}s"
-        );
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with blur, got {dur}s");
     }
 
     #[tokio::test]
@@ -2863,10 +2872,7 @@ mod tests {
             effects: Some(vec![fx]),
         };
         let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
-        assert!(
-            dur > 2.7 && dur < 3.3,
-            "expected ~3s with text, got {dur}s"
-        );
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with text, got {dur}s");
     }
 
     #[tokio::test]
@@ -2884,10 +2890,7 @@ mod tests {
             effects: Some(vec![fx]),
         };
         let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
-        assert!(
-            dur > 2.7 && dur < 3.3,
-            "expected ~3s with fade, got {dur}s"
-        );
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with fade, got {dur}s");
     }
 
     #[tokio::test]
@@ -3226,14 +3229,8 @@ mod tests {
         let size = tokio::fs::metadata(&output).await.unwrap().len();
         // A 1.5s 320x240 h264 clip should be at least a few hundred bytes
         // (valid container with headers) and less than 10MB (not wildly inflated)
-        assert!(
-            size > 500,
-            "output suspiciously small: {size} bytes"
-        );
-        assert!(
-            size < 10_000_000,
-            "output suspiciously large: {size} bytes"
-        );
+        assert!(size > 500, "output suspiciously small: {size} bytes");
+        assert!(size < 10_000_000, "output suspiciously large: {size} bytes");
     }
 
     // ── burn_subtitles ────────────────────────────────────────────────
@@ -3357,14 +3354,15 @@ mod tests {
         std::fs::create_dir_all(&out_dir).unwrap();
         make_test_video(&input, 10.0).await.unwrap();
 
-        let thumbs = extract_edit_thumbnails(
-            input.to_str().unwrap(),
-            out_dir.to_str().unwrap(),
+        let thumbs = extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            thumbs.len(),
             5,
-        )
-        .await
-        .unwrap();
-        assert_eq!(thumbs.len(), 5, "expected 5 thumbnails, got {}", thumbs.len());
+            "expected 5 thumbnails, got {}",
+            thumbs.len()
+        );
         // Each thumbnail should exist and be non-empty
         for t in &thumbs {
             let size = tokio::fs::metadata(t).await.unwrap().len();
@@ -3385,25 +3383,19 @@ mod tests {
 
         // First call populates the cache
         let first_start = std::time::Instant::now();
-        let thumbs1 = extract_edit_thumbnails(
-            input.to_str().unwrap(),
-            out_dir.to_str().unwrap(),
-            5,
-        )
-        .await
-        .unwrap();
+        let thumbs1 =
+            extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+                .await
+                .unwrap();
         let first_elapsed = first_start.elapsed();
         assert_eq!(thumbs1.len(), 5);
 
         // Second call with same inputs should hit cache and be substantially faster
         let second_start = std::time::Instant::now();
-        let thumbs2 = extract_edit_thumbnails(
-            input.to_str().unwrap(),
-            out_dir.to_str().unwrap(),
-            5,
-        )
-        .await
-        .unwrap();
+        let thumbs2 =
+            extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+                .await
+                .unwrap();
         let second_elapsed = second_start.elapsed();
         assert_eq!(thumbs2.len(), 5);
         // Cache hit should be at least 5x faster than the ffmpeg run
@@ -3425,13 +3417,13 @@ mod tests {
         let out = dir.path().join("frame.jpg");
         make_test_video(&input, 10.0).await.unwrap();
 
-        let result = extract_single_frame(
-            input.to_str().unwrap(),
-            5.0,
-            out.to_str().unwrap(),
-        )
-        .await;
-        assert!(result.is_ok(), "extract_single_frame failed: {:?}", result.err());
+        let result =
+            extract_single_frame(input.to_str().unwrap(), 5.0, out.to_str().unwrap()).await;
+        assert!(
+            result.is_ok(),
+            "extract_single_frame failed: {:?}",
+            result.err()
+        );
         let size = tokio::fs::metadata(&out).await.unwrap().len();
         assert!(size > 100, "frame file too small: {size} bytes");
     }
@@ -3482,7 +3474,7 @@ mod tests {
             easing: EasingPreset::EaseInOut,
         });
         let clip2 = simple_clip(4.0, 7.0, 2.0); // 3s source → 1.5s output
-        // Output timeline: clip1 = 3s, clip2 = 1.5s → total 4.5s
+                                                // Output timeline: clip1 = 3s, clip2 = 1.5s → total 4.5s
         let mut spotlight = base_effect("spotlight", 0.5, 2.0);
         spotlight.spotlight = Some(SpotlightData {
             x: 0.5,
@@ -3581,10 +3573,7 @@ mod tests {
             (merged_meta.width, merged_meta.height),
             "burn_subtitles must preserve resolution"
         );
-        assert_eq!(
-            final_meta.codec, "h264",
-            "final output must be h264"
-        );
+        assert_eq!(final_meta.codec, "h264", "final output must be h264");
     }
 
     /// Regression guard: a single clip with speed=1 and an overlay effect

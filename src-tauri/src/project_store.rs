@@ -22,10 +22,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no parent")
     })?;
     // Build a unique sibling temp path so concurrent writes don't collide.
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("tmp");
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("tmp");
     let nonce = format!(
         "{}-{}",
         std::process::id(),
@@ -889,10 +886,7 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        let tmps: Vec<_> = entries
-            .iter()
-            .filter(|n| n.contains(".tmp."))
-            .collect();
+        let tmps: Vec<_> = entries.iter().filter(|n| n.contains(".tmp.")).collect();
         assert!(tmps.is_empty(), "leftover temp files: {tmps:?}");
     }
 
@@ -1192,10 +1186,8 @@ mod tests {
 
         // Copy archive to a path outside g1's tempdir because we're about to
         // drop g1 and create a new guard (new tempdir, different NARRATOR_DIR).
-        let shared_archive = std::env::temp_dir().join(format!(
-            "narrator-test-{}.narrator",
-            uuid::Uuid::new_v4()
-        ));
+        let shared_archive =
+            std::env::temp_dir().join(format!("narrator-test-{}.narrator", uuid::Uuid::new_v4()));
         std::fs::copy(&archive, &shared_archive).unwrap();
         drop(g1);
 

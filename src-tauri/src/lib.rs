@@ -3,6 +3,7 @@
 mod ai_client;
 mod azure_tts_client;
 mod builtin_tts;
+pub mod cli;
 mod commands;
 mod doc_processor;
 mod elevenlabs_client;

@@ -715,11 +715,7 @@ async fn generate_chunked(
 }
 
 /// Clamp segments to a chunk's time range and drop invalid ones.
-fn clamp_chunk_segments(
-    segments: Vec<Segment>,
-    chunk_start: f64,
-    chunk_end: f64,
-) -> Vec<Segment> {
+fn clamp_chunk_segments(segments: Vec<Segment>, chunk_start: f64, chunk_end: f64) -> Vec<Segment> {
     segments
         .into_iter()
         .filter(|s| s.start_seconds.is_finite() && s.end_seconds.is_finite())
@@ -735,10 +731,7 @@ fn clamp_chunk_segments(
 
 /// Normalize a timeline of segments: filter malformed, sort, dedupe, resolve overlaps.
 /// This is the defensive last-line post-processor that guarantees monotonic timestamps.
-pub fn normalize_timeline(
-    mut segments: Vec<Segment>,
-    video_duration: f64,
-) -> Vec<Segment> {
+pub fn normalize_timeline(mut segments: Vec<Segment>, video_duration: f64) -> Vec<Segment> {
     let original_len = segments.len();
 
     // 1. Filter obviously malformed
@@ -873,10 +866,7 @@ pub fn normalize_timeline(
 /// next segment (so the timeline extends forward rather than backward).
 /// Runs AFTER `normalize_timeline` which already guarantees monotonic,
 /// non-overlapping segments.
-pub fn merge_short_segments(
-    segments: Vec<Segment>,
-    min_duration: f64,
-) -> Vec<Segment> {
+pub fn merge_short_segments(segments: Vec<Segment>, min_duration: f64) -> Vec<Segment> {
     if segments.len() < 2 {
         return segments;
     }
@@ -1057,12 +1047,7 @@ pub async fn generate_narration(
     let duration = if script.total_duration_seconds > 0.0 {
         script.total_duration_seconds
     } else {
-        script
-            .segments
-            .last()
-            .map(|s| s.end_seconds)
-            .unwrap_or(0.0)
-            + 60.0
+        script.segments.last().map(|s| s.end_seconds).unwrap_or(0.0) + 60.0
     };
     script.segments = normalize_timeline(std::mem::take(&mut script.segments), duration);
 
@@ -1833,10 +1818,7 @@ mod tests {
 
     #[test]
     fn test_normalize_timeline_enforces_min_duration() {
-        let segs = vec![
-            seg(0, 10.0, 10.2, "too short"),
-            seg(1, 30.0, 40.0, "fine"),
-        ];
+        let segs = vec![seg(0, 10.0, 10.2, "too short"), seg(1, 30.0, 40.0, "fine")];
         let out = normalize_timeline(segs, 100.0);
         assert!(out[0].end_seconds - out[0].start_seconds >= 0.5);
     }
@@ -1876,7 +1858,14 @@ mod tests {
         let out = merge_short_segments(segs, 2.5);
         // Fragments (0.5s each) should have been merged into the first full
         // segment, which now covers 0.0-4.0s.
-        assert_eq!(out.len(), 2, "got {:?}", out.iter().map(|s| (s.start_seconds, s.end_seconds, s.text.clone())).collect::<Vec<_>>());
+        assert_eq!(
+            out.len(),
+            2,
+            "got {:?}",
+            out.iter()
+                .map(|s| (s.start_seconds, s.end_seconds, s.text.clone()))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(out[0].start_seconds, 0.0);
         assert_eq!(out[0].end_seconds, 4.0);
         assert!(out[0].text.contains("First full sentence"));
@@ -1985,9 +1974,7 @@ mod tests {
     impl ScriptedProvider {
         fn new(responses: Vec<&str>) -> Self {
             Self {
-                responses: std::sync::Mutex::new(
-                    responses.into_iter().map(String::from).collect(),
-                ),
+                responses: std::sync::Mutex::new(responses.into_iter().map(String::from).collect()),
                 calls: std::sync::Mutex::new(Vec::new()),
             }
         }
@@ -2101,12 +2088,12 @@ mod tests {
                 (20.0, 25.0, "chunk3"),
             ],
         );
-        let provider =
-            ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
+        let provider = ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
 
         let msg = user_msg_with_frames(25, 1.0);
-        let result =
-            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         // 3 chunk calls + 1 polish call
         assert_eq!(provider.captured().len(), 4);
@@ -2141,16 +2128,14 @@ mod tests {
         let r2 = chunk_response_json(
             "T",
             30.0,
-            &[
-                (5.0, 8.0, "backwards jump!"),
-                (22.0, 28.0, "later"),
-            ],
+            &[(5.0, 8.0, "backwards jump!"), (22.0, 28.0, "later")],
         );
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0); // 2 chunks
 
-        let result =
-            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         // The "backwards jump" segment must NOT appear before chunk1's segments
         for w in result.segments.windows(2) {
@@ -2171,7 +2156,9 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         let calls = provider.captured();
         assert_eq!(calls.len(), 2);
@@ -2203,17 +2190,15 @@ mod tests {
         let r1 = chunk_response_json(
             "T",
             30.0,
-            &[
-                (0.0, 5.0, "valid"),
-                (50.0, 60.0, "wildly out of range"),
-            ],
+            &[(0.0, 5.0, "valid"), (50.0, 60.0, "wildly out of range")],
         );
         let r2 = chunk_response_json("T", 30.0, &[(15.0, 20.0, "chunk2")]);
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result =
-            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         // The out-of-range segment shouldn't survive
         assert!(
@@ -2241,8 +2226,9 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result =
-            generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        let result = generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         assert_eq!(provider.captured().len(), 1);
         assert_eq!(result.segments.len(), 3);
@@ -2261,7 +2247,9 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
 
         let calls = provider.captured();
         assert_eq!(calls.len(), 2);
@@ -2323,11 +2311,7 @@ mod tests {
         // The trigger: a segment with length >60 bytes where byte-index 60 falls
         // mid-codepoint. In the chunk-overlap warn branch, we log truncate_chars(text, 60).
         let long_jp = "こんにちは世界これはナレーションのテキストです".repeat(2);
-        let r1 = chunk_response_json(
-            "T",
-            30.0,
-            &[(0.0, 10.0, &long_jp), (10.0, 20.0, &long_jp)],
-        );
+        let r1 = chunk_response_json("T", 30.0, &[(0.0, 10.0, &long_jp), (10.0, 20.0, &long_jp)]);
         let r2 = chunk_response_json(
             "T",
             30.0,
@@ -2393,8 +2377,7 @@ mod tests {
     #[tokio::test]
     async fn test_single_call_at_max_frames_threshold() {
         // Exactly MAX_FRAMES_PER_CALL frames → single-call path, not chunked
-        let resp =
-            chunk_response_json("T", 30.0, &[(0.0, 15.0, "a"), (15.0, 30.0, "b")]);
+        let resp = chunk_response_json("T", 30.0, &[(0.0, 15.0, "a"), (15.0, 30.0, "b")]);
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL, 1.0);
 
@@ -2437,7 +2420,10 @@ mod tests {
         let msg = serde_json::Value::Array(parts);
 
         let result = generate_narration(&provider, "sys", msg, "test", "en").await;
-        assert!(result.is_ok(), "should still succeed with unparseable timestamps");
+        assert!(
+            result.is_ok(),
+            "should still succeed with unparseable timestamps"
+        );
     }
 
     #[tokio::test]
@@ -2465,7 +2451,9 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en").await.unwrap();
+        generate_narration(&provider, "sys", msg, "test", "en")
+            .await
+            .unwrap();
         let first_call_text: String = provider.captured()[0]
             .as_array()
             .unwrap()
@@ -2500,7 +2488,11 @@ mod tests {
     fn translation_response_json(title: &str, lang: &str, segs: &[(f64, f64, &str)]) -> String {
         chunk_response_json(title, 30.0, segs)
             // Override language in metadata (simulate the AI returning the translated script)
-            .replacen("\"language\":\"en\"", &format!("\"language\":\"{lang}\""), 1)
+            .replacen(
+                "\"language\":\"en\"",
+                &format!("\"language\":\"{lang}\""),
+                1,
+            )
     }
 
     #[tokio::test]
@@ -2508,20 +2500,18 @@ mod tests {
         let original = NarrationScript {
             title: "Original".into(),
             total_duration_seconds: 30.0,
-            segments: vec![
-                Segment {
-                    index: 0,
-                    start_seconds: 0.0,
-                    end_seconds: 15.0,
-                    text: "Hello world".into(),
-                    visual_description: String::new(),
-                    emphasis: vec![],
-                    pace: Pace::Medium,
-                    pause_after_ms: 0,
-                    frame_refs: vec![],
-                    voice_override: None,
-                },
-            ],
+            segments: vec![Segment {
+                index: 0,
+                start_seconds: 0.0,
+                end_seconds: 15.0,
+                text: "Hello world".into(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            }],
             metadata: ScriptMetadata {
                 style: "test".into(),
                 language: "en".into(),
@@ -2530,11 +2520,7 @@ mod tests {
                 generated_at: "2026-04-01T00:00:00Z".into(),
             },
         };
-        let resp = translation_response_json(
-            "Original",
-            "ja",
-            &[(0.0, 15.0, "こんにちは世界")],
-        );
+        let resp = translation_response_json("Original", "ja", &[(0.0, 15.0, "こんにちは世界")]);
         let provider = ScriptedProvider::new(vec![&resp]);
 
         let translated = translate_script(&provider, &original, "Japanese")
@@ -2595,17 +2581,20 @@ mod tests {
     #[tokio::test]
     async fn test_refine_segment_returns_clean_text() {
         let provider = ScriptedProvider::new(vec!["This is the refined text."]);
-        let result =
-            refine_segment(&provider, "original text", "make shorter", "surrounding context")
-                .await
-                .unwrap();
+        let result = refine_segment(
+            &provider,
+            "original text",
+            "make shorter",
+            "surrounding context",
+        )
+        .await
+        .unwrap();
         assert_eq!(result, "This is the refined text.");
     }
 
     #[tokio::test]
     async fn test_refine_segment_strips_quotes_and_fences() {
-        let provider =
-            ScriptedProvider::new(vec!["```\n\"Quoted refinement\"\n```"]);
+        let provider = ScriptedProvider::new(vec!["```\n\"Quoted refinement\"\n```"]);
         let result = refine_segment(&provider, "orig", "instruction", "ctx")
             .await
             .unwrap();
@@ -2625,8 +2614,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_refine_segment_preserves_unicode() {
-        let provider =
-            ScriptedProvider::new(vec!["精緻化されたセグメント 🎬"]);
+        let provider = ScriptedProvider::new(vec!["精緻化されたセグメント 🎬"]);
         let result = refine_segment(&provider, "orig", "inst", "ctx")
             .await
             .unwrap();
@@ -2710,7 +2698,9 @@ mod tests {
             "metadata": {"style":"","language":"","provider":"","model":"","generated_at":""}
         }"#;
         let provider = ScriptedProvider::new(vec![resp]);
-        let result = polish_script(&provider, &sample_script(), 2.5).await.unwrap();
+        let result = polish_script(&provider, &sample_script(), 2.5)
+            .await
+            .unwrap();
         assert_eq!(result.title, "Test");
         assert_eq!(result.total_duration_seconds, 30.0);
     }
@@ -2722,10 +2712,7 @@ mod tests {
         let resp = chunk_response_json(
             "Test",
             30.0,
-            &[
-                (0.0, 3.0, "Tight first."),
-                (3.0, 10.0, "Tight second."),
-            ],
+            &[(0.0, 3.0, "Tight first."), (3.0, 10.0, "Tight second.")],
         );
         let provider = ScriptedProvider::new(vec![&resp]);
         // NOTE: input has 3 segments; AI returns 2 — intentional consolidation.
@@ -2768,7 +2755,10 @@ mod tests {
         let call = provider.captured();
         assert_eq!(call.len(), 1);
         let user_text = call[0].as_str().unwrap_or("");
-        assert!(user_text.contains("Use second person"), "user message missing instruction: {user_text}");
+        assert!(
+            user_text.contains("Use second person"),
+            "user message missing instruction: {user_text}"
+        );
         // Style hint flows through the system prompt — we can't observe the
         // system prompt directly (mock only records user_message), but we
         // ensure the instruction + current script JSON are packaged together.
@@ -2844,8 +2834,10 @@ mod tests {
         let inner = chunk_response_json("Test", 30.0, &[(0.0, 10.0, "ok")]);
         let fenced = format!("```json\n{inner}\n```");
         let provider = ScriptedProvider::new(vec![&fenced]);
-        assert!(refine_script(&provider, &sample_script(), "inst", "style", None)
-            .await
-            .is_ok());
+        assert!(
+            refine_script(&provider, &sample_script(), "inst", "style", None)
+                .await
+                .is_ok()
+        );
     }
 }
