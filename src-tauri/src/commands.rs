@@ -4,6 +4,7 @@ use crate::error::NarratorError;
 use crate::models::*;
 use crate::process_utils::CommandNoWindow;
 use crate::secure_store;
+use crate::render;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
     project_store, screen_recorder, video_edit, video_engine,
@@ -1690,6 +1691,14 @@ pub fn get_recordings_directory() -> Result<String, NarratorError> {
 
 // ── Video edit commands ──
 
+/// Wrap a Tauri progress channel as a `ProgressReporter` so render functions
+/// don't need to know about Tauri.
+fn channel_reporter(channel: Channel<ProgressEvent>) -> Arc<dyn render::ProgressReporter> {
+    Arc::new(render::FnReporter(move |event| {
+        channel.send(event).ok();
+    }))
+}
+
 #[tauri::command]
 pub async fn apply_video_edits(
     input_path: String,
@@ -1697,10 +1706,7 @@ pub async fn apply_video_edits(
     edits: video_edit::VideoEditPlan,
     channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::apply_edits(&input_path, &output_path, &edits, |pct| {
-        channel.send(ProgressEvent::Progress { percent: pct }).ok();
-    })
-    .await
+    render::apply_edits(&input_path, &output_path, &edits, channel_reporter(channel)).await
 }
 
 #[tauri::command]
@@ -1709,7 +1715,7 @@ pub async fn extract_edit_thumbnails(
     output_dir: String,
     count: usize,
 ) -> Result<Vec<String>, NarratorError> {
-    video_edit::extract_edit_thumbnails(&video_path, &output_dir, count).await
+    render::extract_edit_thumbnails(&video_path, &output_dir, count).await
 }
 
 #[tauri::command]
@@ -1718,7 +1724,7 @@ pub async fn extract_single_frame(
     timestamp: f64,
     output_path: String,
 ) -> Result<String, NarratorError> {
-    video_edit::extract_single_frame(&video_path, timestamp, &output_path).await
+    render::extract_single_frame(&video_path, timestamp, &output_path).await
 }
 
 #[tauri::command]
@@ -1738,14 +1744,12 @@ pub async fn merge_audio_video(
     replace_audio: bool,
     channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::merge_audio_video(
+    render::merge_audio_video(
         &video_path,
         &audio_path,
         &output_path,
         replace_audio,
-        |pct| {
-            channel.send(ProgressEvent::Progress { percent: pct }).ok();
-        },
+        channel_reporter(channel),
     )
     .await
 }
@@ -1880,14 +1884,12 @@ pub async fn burn_subtitles(
     let srt_path = out_dir.join("_temp_subtitles.srt");
     tokio::fs::write(&srt_path, &srt_content).await?;
 
-    let result = video_edit::burn_subtitles(
+    let result = render::burn_subtitles(
         &video_path,
         &srt_path.to_string_lossy(),
         &output_path,
         &style,
-        |pct| {
-            channel.send(ProgressEvent::Progress { percent: pct }).ok();
-        },
+        channel_reporter(channel),
     )
     .await;
 

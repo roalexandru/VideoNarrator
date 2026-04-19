@@ -13,6 +13,7 @@ mod menu;
 mod models;
 mod process_utils;
 mod project_store;
+mod render;
 mod screen_recorder;
 mod secure_store;
 mod telemetry;

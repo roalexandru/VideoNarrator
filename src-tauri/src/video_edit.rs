@@ -780,7 +780,7 @@ fn extract_time_from_ffmpeg_line(line: &str) -> Option<String> {
     // can actually see it.
     if let Some(i) = line.find("out_time=") {
         let rest = &line[i + 9..];
-        let end = rest.find(|c: char| c == ' ' || c == '\n' || c == '\r').unwrap_or(rest.len());
+        let end = rest.find([' ', '\n', '\r']).unwrap_or(rest.len());
         let time_str = rest[..end].trim();
         if time_str.is_empty() || time_str == "N/A" {
             return None;
