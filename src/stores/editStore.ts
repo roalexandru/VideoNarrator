@@ -477,7 +477,23 @@ export const useEditStore = create<EditStore>((set, get) => ({
   updateEffectLive: (id, partial) =>
     set((state) => {
       const snapshot = state._preEffectSnapshot || snapshotState(state);
-      const effects = state.effects.map((e) => e.id === id ? { ...e, ...partial } : e);
+      const effects = state.effects.map((e) => {
+        if (e.id !== id) return e;
+        const merged = { ...e, ...partial };
+        // Prevent the preview from rendering an inverted-range effect during
+        // live drag. If the user drags one edge past the other, clamp to a
+        // minimum 0.1s window — matching the shape commit() would produce.
+        if (merged.startTime >= merged.endTime) {
+          if (partial.startTime !== undefined) {
+            merged.startTime = Math.max(0, merged.endTime - 0.1);
+          } else if (partial.endTime !== undefined) {
+            merged.endTime = merged.startTime + 0.1;
+          } else {
+            return e; // neither bound changed — ignore this partial
+          }
+        }
+        return merged;
+      });
       return { effects, _preEffectSnapshot: snapshot };
     }),
 

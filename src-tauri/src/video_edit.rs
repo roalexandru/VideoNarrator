@@ -263,8 +263,11 @@ fn generate_spotlight_mask(
     out_dir: &Path,
 ) -> Result<PathBuf, NarratorError> {
     let dim_alpha = (dim_opacity.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8;
+    // Sub-pixel precision (3 decimals = 0.001 px) so two nearby spotlights
+    // don't collide on the same cached mask. The earlier 1-decimal hash
+    // could alias distinct effect positions that differ by less than 0.05 px.
     let hash = format!(
-        "spot_{}x{}_{:.1}_{:.1}_{:.1}_{:03}",
+        "spot_{}x{}_{:.3}_{:.3}_{:.3}_{:03}",
         width, height, cx, cy, radius, dim_alpha
     );
     let path = out_dir.join(format!("{hash}.png"));
@@ -298,6 +301,59 @@ fn generate_spotlight_mask(
         NarratorError::FfmpegFailed(format!("Failed to save spotlight mask: {e}"))
     })?;
     Ok(path)
+}
+
+/// Build an ffmpeg expression for the effect's raw progress in [0, 1],
+/// matching `effectProgress()` in `src/features/edit-video/easing.ts`.
+///
+/// The returned expression references `t` (current output time in seconds)
+/// and evaluates to the animation progress for an effect that runs from
+/// `s` to `s + dur`, with optional transition-in, transition-out, and
+/// reverse (ramp up → hold → ramp down).
+///
+/// Every comma inside is pre-escaped with `\,` because this string is
+/// substituted into filter-graph expressions where commas separate filter args.
+fn build_progress_expr(s: f64, dur: f64, tin: f64, tout: f64, reverse: bool) -> String {
+    let s3 = format!("{s:.3}");
+    let d3 = format!("{dur:.3}");
+    let local = format!("(t-{s3})");
+
+    if reverse {
+        // Three phases: ramp-in → hold → ramp-out.
+        // Clamp tin + tout so they can't exceed the window.
+        let tin_eff = tin.clamp(0.0, dur * 0.5);
+        let tout_eff = tout.clamp(0.0, dur * 0.5);
+        let hold_end = (dur - tout_eff).max(tin_eff);
+        let he3 = format!("{hold_end:.3}");
+
+        let ramp_in = if tin_eff > 0.001 {
+            format!("{local}/{:.3}", tin_eff)
+        } else {
+            "1".to_string()
+        };
+        let ramp_out = if tout_eff > 0.001 {
+            format!("({d3}-{local})/{:.3}", tout_eff)
+        } else {
+            "1".to_string()
+        };
+        // local < tin_eff ? ramp_in : (local < hold_end ? 1 : ramp_out)
+        let inner = format!(
+            "if(lt({local}\\,{:.3})\\,{ramp_in}\\,if(lt({local}\\,{he3})\\,1\\,{ramp_out}))",
+            tin_eff
+        );
+        format!("max(0\\,min(1\\,{inner}))")
+    } else if tin > 0.001 && tin < dur {
+        // Ramp in over tin, then hold at 1 for the remainder.
+        let ramp_in = format!("{local}/{:.3}", tin);
+        let inner = format!(
+            "if(lt({local}\\,{:.3})\\,{ramp_in}\\,1)",
+            tin
+        );
+        format!("max(0\\,min(1\\,{inner}))")
+    } else {
+        // No transition specified — animate over the full window.
+        format!("max(0\\,min(1\\,{local}/{d3}))")
+    }
 }
 
 fn build_effects_filter(
@@ -407,8 +463,46 @@ fn build_effects_filter(
                 // we've added so far.
                 let mask_input_idx = 1 + extra_inputs.len();
                 extra_inputs.push(mask_path);
+
+                // Honor transitionIn/Out/reverse by pre-fading the mask's
+                // alpha channel before overlaying. Previously these fields
+                // were parsed but ignored — the export matched the UI only
+                // for effects that had no transitions configured.
+                //
+                // Pattern from mature ffmpeg-driven editors: `fade=alpha=1`
+                // multiplies the mask's alpha by a 0→1 (or 1→0) ramp using
+                // the input stream's timestamp. The looped mask's stream
+                // time aligns with the main video's time (both start at 0),
+                // so `st=effect_start` fires at the right moment.
+                let tin = fx.transition_in.unwrap_or(0.0).max(0.0);
+                let tout = fx.transition_out.unwrap_or(0.0).max(0.0);
+                let reverse = fx.reverse.unwrap_or(false);
+                let fx_dur = fx.end_time.max(fx.start_time + 0.001) - fx.start_time;
+                let s = fx.start_time.max(0.0);
+
+                let faded_mask = format!("sm{i}");
+                // Start by ensuring the mask carries an alpha channel fade
+                // filter can touch. The generated PNG is already rgba, but
+                // `format=rgba` is a cheap safety net.
+                let mut mask_chain = format!("[{mask_input_idx}:v]format=rgba");
+
+                if tin > 0.001 {
+                    let tin_eff = tin.min(fx_dur * 0.5).max(0.001);
+                    mask_chain.push_str(&format!(
+                        ",fade=t=in:st={s:.3}:d={tin_eff:.3}:alpha=1"
+                    ));
+                }
+                if reverse && tout > 0.001 {
+                    let tout_eff = tout.min(fx_dur * 0.5).max(0.001);
+                    let out_start = s + fx_dur - tout_eff;
+                    mask_chain.push_str(&format!(
+                        ",fade=t=out:st={out_start:.3}:d={tout_eff:.3}:alpha=1"
+                    ));
+                }
+                mask_chain.push_str(&format!("[{faded_mask}]"));
+                parts.push(mask_chain);
                 parts.push(format!(
-                    "[{prev_label}][{mask_input_idx}:v]overlay=0:0:enable='{enable}'[{next_label}]"
+                    "[{prev_label}][{faded_mask}]overlay=0:0:enable='{enable}'[{next_label}]"
                 ));
             }
             "text" => {
@@ -491,9 +585,15 @@ fn build_effects_filter(
                 let e = fx.end_time.max(s + 0.01);
                 let dur = (e - s).max(0.01);
 
-                // Raw progress in [0, 1] — expression uses ffmpeg's `t` for
-                // the current output time (seconds).
-                let raw_p = format!("max(0\\,min(1\\,(t-{s:.3})/{dur:.3}))");
+                // Raw progress in [0, 1] matching `effectProgress()` in
+                // `src/features/edit-video/easing.ts` so the export matches
+                // the CSS preview. Honors `transitionIn`, `transitionOut`,
+                // and `reverse` — previously these were silently dropped and
+                // the export did a linear sweep regardless of the UI config.
+                let tin = fx.transition_in.unwrap_or(0.0).max(0.0);
+                let tout = fx.transition_out.unwrap_or(0.0).max(0.0);
+                let reverse = fx.reverse.unwrap_or(false);
+                let raw_p = build_progress_expr(s, dur, tin, tout, reverse);
                 // Eased progress, matching the four UI easings.
                 let eased = match zp.easing {
                     EasingPreset::Linear => raw_p.clone(),
@@ -503,28 +603,41 @@ fn build_effects_filter(
                         "if(lt({raw_p}\\,0.5)\\,2*({raw_p})*({raw_p})\\,-1+(4-2*({raw_p}))*({raw_p}))"
                     ),
                 };
-                // Crop expressions in pixels. Clamp to frame bounds so extreme
-                // easing outputs can never produce a negative width or crop
-                // outside the image.
-                let cw = format!(
-                    "max(2\\,min(iw\\,({sw:.4}+({ew:.4}-{sw:.4})*({eased}))*{w}))"
-                );
-                let ch = format!(
-                    "max(2\\,min(ih\\,({sh:.4}+({eh:.4}-{sh:.4})*({eased}))*{h}))"
-                );
-                let cx = format!(
-                    "max(0\\,min(iw-out_w\\,({sx:.4}+({ex:.4}-{sx:.4})*({eased}))*{w}))"
-                );
-                let cy = format!(
-                    "max(0\\,min(ih-out_h\\,({sy:.4}+({ey:.4}-{sy:.4})*({eased}))*{h}))"
-                );
+                // Current region in normalized coords, as ffmpeg expressions.
+                let cur_rw = format!("({sw:.4}+({ew:.4}-{sw:.4})*({eased}))");
+                let cur_rh = format!("({sh:.4}+({eh:.4}-{sh:.4})*({eased}))");
+                let cur_rx = format!("({sx:.4}+({ex:.4}-{sx:.4})*({eased}))");
+                let cur_ry = format!("({sy:.4}+({ey:.4}-{sy:.4})*({eased}))");
+
+                // Ken-Burns via time-varying scale + constant-size crop. The
+                // previous approach used a crop whose output size varied per
+                // frame, which triggered ffmpeg's "reinitializing filters"
+                // path and failed on the second chained crop with
+                // "Failed to configure input pad". With crop's W:H constant,
+                // no re-config is needed downstream.
+                //
+                // Upscale factor = 1 / region_size(t): at full-frame regions
+                // (rw=rh=1) the scale is identity; at small regions it's
+                // large. Clamp to [1, 20] so we never downscale or produce
+                // pathologically huge intermediates.
+                let scale_w =
+                    format!("max({w}\\,min({w}*20\\,{w}/max(0.05\\,{cur_rw})))");
+                let scale_h =
+                    format!("max({h}\\,min({h}*20\\,{h}/max(0.05\\,{cur_rh})))");
+                // Crop position in the scaled image = region_origin * scaled_dim.
+                // iw/ih inside crop = scale's output dims, so this resolves
+                // per frame without any self-reference.
+                let cx =
+                    format!("max(0\\,min(iw-{width}\\,{cur_rx}*iw))");
+                let cy =
+                    format!("max(0\\,min(ih-{height}\\,{cur_ry}*ih))");
 
                 let base = format!("zb{i}");
                 let zoom_src = format!("zs{i}");
                 let zoomed = format!("zd{i}");
                 parts.push(format!("[{prev_label}]split=2[{base}][{zoom_src}]"));
                 parts.push(format!(
-                    "[{zoom_src}]crop={cw}:{ch}:{cx}:{cy},scale={width}:{height}:flags=lanczos,setsar=1[{zoomed}]"
+                    "[{zoom_src}]scale=w='{scale_w}':h='{scale_h}':eval=frame:flags=lanczos,crop={width}:{height}:'{cx}':'{cy}',setsar=1[{zoomed}]"
                 ));
                 // Overlay only during the effect's time range; outside [s,e]
                 // the un-zoomed base shows through.
@@ -569,9 +682,17 @@ async fn run_ffmpeg_with_progress(
     total_duration: f64,
     on_progress: &impl Fn(f64),
 ) -> Result<(), NarratorError> {
+    // `-progress pipe:2` emits structured, newline-terminated progress events
+    // (`out_time=HH:MM:SS.xxx`) to stderr so our line reader can parse them.
+    // Default `frame=... time=...` stats use `\r` between updates, which
+    // tokio's `lines()` doesn't split on — progress would never stream.
+    // `-nostats` suppresses the default `\r`-terminated line. Both are global
+    // options and must precede any output URL, so we prepend them.
+    let mut full_args: Vec<&str> = vec!["-progress", "pipe:2", "-nostats"];
+    full_args.extend_from_slice(args);
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window()
-        .args(args)
+        .args(&full_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
@@ -649,8 +770,25 @@ async fn run_ffmpeg_with_progress(
 }
 
 /// Extract the time= value from an ffmpeg stderr line.
+///
+/// Handles both formats:
+/// - Structured `-progress pipe:2` output: `out_time=00:00:01.666000\n`
+///   (and `out_time_us=...`, `out_time_ms=...` — we prefer `out_time=`).
+/// - Legacy `-stats` output: `frame=100 ... time=00:00:01.66 bitrate=...\r`.
 fn extract_time_from_ffmpeg_line(line: &str) -> Option<String> {
-    // ffmpeg progress lines contain "time=HH:MM:SS.mm" or "time=N/A"
+    // Prefer the structured `-progress` format; it's \n-terminated so lines()
+    // can actually see it.
+    if let Some(i) = line.find("out_time=") {
+        let rest = &line[i + 9..];
+        let end = rest.find(|c: char| c == ' ' || c == '\n' || c == '\r').unwrap_or(rest.len());
+        let time_str = rest[..end].trim();
+        if time_str.is_empty() || time_str == "N/A" {
+            return None;
+        }
+        return Some(time_str.to_string());
+    }
+    // Fallback: legacy stats line. This only fires in contexts where we didn't
+    // pass -nostats (we always do now, but keep the fallback for safety).
     let time_idx = line.find("time=")?;
     let rest = &line[time_idx + 5..];
     let end = rest.find(' ').unwrap_or(rest.len());
@@ -790,7 +928,7 @@ async fn process_freeze_clip(
         "-c:v".into(),
         "libx264".into(),
         "-preset".into(),
-        "medium".into(),
+        "ultrafast".into(),
         "-crf".into(),
         "0".into(),
         "-pix_fmt".into(),
@@ -1030,6 +1168,21 @@ pub async fn apply_edits(
         return Ok(output_path.to_string());
     }
 
+    // Passthrough shortcut: if there's exactly one unmodified clip covering
+    // the full source and the only work is overlay effects, skip the per-clip
+    // re-encode entirely and feed `input_path` straight to the effects pass.
+    // This was previously doing a full lossless re-encode just to produce a
+    // concat target that the effects pass would read back seconds later —
+    // roughly halves render time for the common case (single take + overlays).
+    let covers_full_source = plan.clips[0].start_seconds < 0.5
+        && (plan.clips[0].end_seconds - meta.duration_seconds).abs() < 0.5;
+    let passthrough_to_fx = total == 1
+        && plan.clips[0].speed == 1.0
+        && plan.clips[0].fps_override.is_none()
+        && !has_clip_effects
+        && has_overlay_fx
+        && covers_full_source;
+
     // Process each clip
     let mut clip_files: Vec<PathBuf> = Vec::new();
 
@@ -1054,7 +1207,9 @@ pub async fn apply_edits(
         .collect();
     let total_weight: f64 = clip_weights.iter().sum::<f64>().max(0.01);
 
-    for (i, clip) in plan.clips.iter().enumerate() {
+    // Skip the per-clip loop entirely in passthrough mode — the effects pass
+    // will read `input_path` directly.
+    for (i, clip) in plan.clips.iter().enumerate().filter(|_| !passthrough_to_fx) {
         // Base progress = sum of previous clips' shares (in 0-80% band).
         let cum_before: f64 =
             clip_weights.iter().take(i).sum::<f64>() / total_weight * 80.0;
@@ -1149,7 +1304,7 @@ pub async fn apply_edits(
             "-c:v".into(),
             "libx264".into(),
             "-preset".into(),
-            "medium".into(),
+            "ultrafast".into(),
             "-crf".into(),
             "0".into(),
             "-avoid_negative_ts".into(),
@@ -1243,7 +1398,11 @@ pub async fn apply_edits(
         })
         .unwrap_or(false);
 
-    let concat_target: String = if has_overlay_effects {
+    let concat_target: String = if passthrough_to_fx {
+        // Feed the original directly to the effects pass. `concat_target` is
+        // not a temp file here, so the cleanup block below must NOT delete it.
+        input_path.to_string()
+    } else if has_overlay_effects {
         out_dir
             .join("_edit_concat_tmp.mp4")
             .to_string_lossy()
@@ -1253,7 +1412,9 @@ pub async fn apply_edits(
     };
 
     // Concat all clips — all clips are re-encoded with identical h264 settings
-    if clip_files.len() == 1 {
+    if passthrough_to_fx {
+        // Nothing to concat; input feeds effects pass directly.
+    } else if clip_files.len() == 1 {
         tokio::fs::rename(&clip_files[0], &concat_target).await?;
     } else {
         let concat_list = out_dir.join("_edit_concat.txt");
@@ -1293,7 +1454,7 @@ pub async fn apply_edits(
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "medium",
+                    "ultrafast",
                     "-crf",
                     "0",
                     "-pix_fmt",
@@ -1329,7 +1490,13 @@ pub async fn apply_edits(
 
     // Apply overlay effects (spotlight, blur, text, fade, zoom-pan) in a post-concat pass.
     if has_overlay_effects {
-        on_progress(90.0);
+        // In passthrough mode the effects pass IS the whole render, so it
+        // owns the full 0-99% band. Otherwise the per-clip encode already
+        // ran 0-85%, so effects own 90-99%.
+        let fx_start = if passthrough_to_fx { 0.0 } else { 90.0 };
+        let fx_end = 99.0;
+        on_progress(fx_start);
+
         let effects = plan.effects.as_deref().unwrap_or(&[]);
         // Masks (e.g. spotlight alpha PNGs) are cached inside the project dir.
         let mask_dir = out_dir.join("_fx_masks");
@@ -1338,7 +1505,7 @@ pub async fn apply_edits(
             build_effects_filter(effects, meta.width, meta.height, &mask_dir)
         {
             tracing::info!(
-                "Applying {} overlay effect(s) in post-concat pass ({} mask input(s))",
+                "Applying {} overlay effect(s) ({} mask input(s), passthrough={})",
                 effects
                     .iter()
                     .filter(|e| matches!(
@@ -1346,29 +1513,34 @@ pub async fn apply_edits(
                         "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
                     ))
                     .count(),
-                extra_inputs.len()
+                extra_inputs.len(),
+                passthrough_to_fx
             );
             tracing::debug!("Effects filter_complex: {}", filter_complex);
 
             // Build the ffmpeg argv: main input, then each extra mask/image
             // input in order. Their input indices in the filter_complex are
             // 1, 2, 3, ... corresponding to their order here.
-            let mut cmd = Command::new(ffmpeg.as_os_str());
-            cmd.no_window().args(["-y", "-i", &concat_target]);
-            for path in &extra_inputs {
-                cmd.args(["-loop", "1", "-i"]).arg(path);
+            let extra_input_strs: Vec<String> = extra_inputs
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let map_label = format!("[{final_label}]");
+            let mut args: Vec<&str> = vec!["-y", "-i", &concat_target];
+            for s in &extra_input_strs {
+                args.extend_from_slice(&["-loop", "1", "-i", s.as_str()]);
             }
-            cmd.args([
+            args.extend_from_slice(&[
                 "-filter_complex",
                 &filter_complex,
                 "-map",
-                &format!("[{final_label}]"),
+                &map_label,
                 "-map",
                 "0:a?",
                 "-c:v",
                 "libx264",
                 "-preset",
-                "medium",
+                "ultrafast",
                 "-crf",
                 "0",
                 "-pix_fmt",
@@ -1380,44 +1552,40 @@ pub async fn apply_edits(
                 "+faststart",
                 output_path,
             ]);
-            let output = cmd
-                .output()
-                .await
-                .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let tail = &stderr[stderr.len().saturating_sub(800)..];
-                let meaningful: String = tail
-                    .lines()
-                    .filter(|l| {
-                        let ll = l.to_lowercase();
-                        ll.contains("error")
-                            || ll.contains("invalid")
-                            || ll.contains("no such")
-                            || ll.contains("failed")
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ");
+            // Stream progress from stderr so the UI bar moves during the
+            // effects encode (previously a blocking `Command::output()` meant
+            // it sat at 90% for the entire pass).
+            let fx_progress_cb = |pct: f64| {
+                let scaled = fx_start + (pct / 100.0) * (fx_end - fx_start);
+                on_progress(scaled);
+            };
+            if let Err(e) = run_ffmpeg_with_progress(
+                &ffmpeg,
+                &args,
+                meta.duration_seconds,
+                &fx_progress_cb,
+            )
+            .await
+            {
                 tracing::error!(
                     "Effects pass failed. filter_complex: {}",
                     filter_complex
                 );
                 return Err(NarratorError::FfmpegFailed(format!(
-                    "Effects pass failed: {}",
-                    if meaningful.is_empty() {
-                        tail.trim().to_string()
-                    } else {
-                        meaningful
-                    }
+                    "Effects pass failed: {e}"
                 )));
             }
-        } else {
-            // No supported effects found — just move concat result to output
+        } else if !passthrough_to_fx {
+            // No supported effects found — just move concat result to output.
+            // (In passthrough mode concat_target IS the input, so never move it.)
             tokio::fs::rename(&concat_target, output_path).await?;
         }
-        // Clean up the intermediate concat file
-        let _ = tokio::fs::remove_file(&concat_target).await;
+        // Clean up the intermediate concat file — but NEVER delete the user's
+        // input in passthrough mode.
+        if !passthrough_to_fx {
+            let _ = tokio::fs::remove_file(&concat_target).await;
+        }
     }
 
     on_progress(100.0);
@@ -1639,7 +1807,7 @@ pub async fn burn_subtitles(
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "ultrafast",
             "-crf",
             "0",
             output_path,
@@ -1663,7 +1831,7 @@ pub async fn burn_subtitles(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "medium",
+                "ultrafast",
                 "-crf",
                 "0",
                 "-c:a",
@@ -2235,7 +2403,17 @@ mod tests {
         let (f, _, extras) =
             build_effects_filter(&[fx], 1920, 1080, dir.path()).unwrap();
         assert_eq!(extras.len(), 1, "spotlight should add 1 extra PNG input");
-        assert!(f.contains("[1:v]overlay"), "filter should overlay mask input: {f}");
+        // Mask is now pre-chained through format=rgba (and optionally fade
+        // filters when the effect has transitions) into a named label that
+        // overlay consumes — verify the overlay picks up the processed mask.
+        assert!(
+            f.contains("[1:v]format=rgba"),
+            "filter should normalize mask to rgba: {f}"
+        );
+        assert!(
+            f.contains("][sm0]overlay=0:0"),
+            "overlay should consume the normalized mask label: {f}"
+        );
         assert!(f.contains("between(t,0.000,5.000)"));
         assert!(extras[0].exists(), "mask PNG should be written");
     }
@@ -2340,9 +2518,21 @@ mod tests {
             easing: EasingPreset::Linear,
         });
         let (f, _, _) = run_effects_filter(&[fx], 1920, 1080).unwrap();
-        // Animated crop+scale bound to the effect's time range.
-        assert!(f.contains("crop="), "expected crop filter: {f}");
-        assert!(f.contains("scale=1920:1080"), "expected scale: {f}");
+        // Ken Burns via time-varying scale + constant-size crop (avoids the
+        // ffmpeg "reinitializing filters" path that killed the previous
+        // time-varying crop approach). Crop's W:H are now literal constants.
+        assert!(
+            f.contains("scale=w='"),
+            "expected time-varying scale: {f}"
+        );
+        assert!(
+            f.contains("eval=frame"),
+            "scale must re-evaluate per frame: {f}"
+        );
+        assert!(
+            f.contains("crop=1920:1080:"),
+            "expected constant-size crop: {f}"
+        );
         // Time range should be embedded in the overlay enable expression.
         assert!(
             f.contains("between(t,10.000,14.000)"),

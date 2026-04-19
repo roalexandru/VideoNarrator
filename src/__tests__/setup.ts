@@ -4,8 +4,8 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 
 // Force production-mode env so tests exercise prod code paths (auto-update check,
 // plain version string). Individual tests can `vi.stubEnv("DEV", true)` to cover dev.
-vi.stubEnv("DEV", "");
-vi.stubEnv("PROD", "1");
+vi.stubEnv("DEV", false);
+vi.stubEnv("PROD", true);
 
 // Polyfill scrollIntoView for jsdom (not implemented)
 if (typeof Element.prototype.scrollIntoView !== "function") {

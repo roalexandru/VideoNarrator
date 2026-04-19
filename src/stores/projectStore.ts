@@ -4,12 +4,17 @@ import type { VideoFile, ContextDocument } from "../types/project";
 interface ProjectStore {
   projectId: string;
   videoFile: VideoFile | null;
+  /** Populated when the OS refuses to read the video file (e.g. macOS TCC
+   *  denial). EditVideoScreen renders this as a banner so the user isn't
+   *  staring at a silent black preview. */
+  videoAccessError: string | null;
   contextDocuments: ContextDocument[];
   title: string;
   description: string;
   createdAt: string | null;
   setProjectId: (id: string) => void;
   setVideoFile: (file: VideoFile | null) => void;
+  setVideoAccessError: (msg: string | null) => void;
   setCreatedAt: (ts: string) => void;
   addDocuments: (docs: ContextDocument[]) => void;
   setDocuments: (docs: ContextDocument[]) => void;
@@ -23,6 +28,7 @@ interface ProjectStore {
 export const useProjectStore = create<ProjectStore>((set) => ({
   projectId: "",
   videoFile: null,
+  videoAccessError: null,
   contextDocuments: [],
   title: "",
   description: "",
@@ -31,6 +37,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
   setProjectId: (projectId) => set({ projectId }),
   setCreatedAt: (ts) => set({ createdAt: ts }),
   setVideoFile: (file) => set({ videoFile: file }),
+  setVideoAccessError: (msg) => set({ videoAccessError: msg }),
 
   addDocuments: (docs) =>
     set((state) => ({
@@ -59,6 +66,7 @@ export const useProjectStore = create<ProjectStore>((set) => ({
     set({
       projectId: "",
       videoFile: null,
+      videoAccessError: null,
       contextDocuments: [],
       title: "",
       description: "",

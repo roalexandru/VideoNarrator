@@ -28,6 +28,7 @@ const DEFAULT_ZOOM_PAN: ZoomPanEffect = {
 
 export function EditVideoScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
+  const videoAccessError = useProjectStore((s) => s.videoAccessError);
   const projectId = useProjectStore((s) => s.projectId);
   const store = useEditStore();
   const { clips, effects, selectedClipIndex, selectedEffectId, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSpeedLive, commitSpeedChange, setClipSkipFrames, moveClip, selectClip, undo, redo, canUndo, canRedo, insertFreezeFrame, setFreezeDuration, setClipZoomPanLive, commitZoomPanChange, addEffect, removeEffect, updateEffect, updateEffectLive, commitEffectChange, selectEffect } = store;
@@ -555,6 +556,25 @@ export function EditVideoScreen() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {videoAccessError && (
+        <div style={{
+          margin: "0 0 8px 0", padding: "10px 14px",
+          background: "rgba(239,68,68,0.12)",
+          border: "1px solid rgba(239,68,68,0.4)",
+          borderRadius: 8, color: "#fca5a5",
+          fontSize: 12, lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 700, color: "#fecaca", marginBottom: 4 }}>
+            Can't read the video file — preview is blank
+          </div>
+          <div style={{ color: "#fca5a5" }}>
+            {videoAccessError}
+          </div>
+          <div style={{ color: "#f87171", fontSize: 11, marginTop: 6 }}>
+            Path: <code style={{ color: "#fecaca" }}>{videoFile?.path}</code>
+          </div>
+        </div>
+      )}
       {/* VIDEO PLAYER */}
       <div ref={videoContainerRef} onClick={(e) => { if (selectedEffectId && e.target === e.currentTarget) selectEffect(null); }} style={{ borderRadius: 8, overflow: "hidden", background: "#000", flex: 1, minHeight: 100, position: "relative" }}>
         <div style={{

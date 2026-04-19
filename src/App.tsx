@@ -427,6 +427,20 @@ export default function App() {
           resolution: { width: cachedMeta.width, height: cachedMeta.height },
           codec: cachedMeta.codec, fps: cachedMeta.fps,
         });
+        // Verify the OS actually lets the app read this file. When cached
+        // metadata is used we skip `probeVideo` (which would have surfaced
+        // the error via ffmpeg), so we need an explicit read-check here.
+        // This converts a silent black preview into a visible banner
+        // telling the user what's wrong.
+        try {
+          const { checkFileReadable } = await import("./lib/tauri/commands");
+          await checkFileReadable(cleanedPath);
+          ps.setVideoAccessError(null);
+        } catch (err) {
+          const msg = String(err).replace(/^(Error: )?/, "");
+          console.warn("[load] video file read check failed:", msg);
+          ps.setVideoAccessError(msg);
+        }
       } else {
         try {
           const meta = await probeVideo(cfg.video_path);
