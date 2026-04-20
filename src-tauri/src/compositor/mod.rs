@@ -149,7 +149,7 @@ pub async fn run_pipeline(
     input_path: &Path,
     output_path: &Path,
     plan: &VideoEditPlan,
-    on_progress: &(impl Fn(f64) + Send + Sync),
+    on_progress: &(impl Fn(f64, Option<String>) + Send + Sync),
 ) -> Result<(), NarratorError> {
     if plan.clips.is_empty() {
         return Err(NarratorError::ExportError("No clips to process".into()));
@@ -218,10 +218,22 @@ pub async fn run_pipeline(
     let mut last_decoded = vec![0u8; (width as usize) * (height as usize) * 4];
     let mut total_emitted: u64 = 0;
 
+    let total_clips = plan.clips.len();
     for (clip_idx, clip) in plan.clips.iter().enumerate() {
         let clip_start = clip_starts[clip_idx];
         let out_dur = clip_output_duration(clip);
         let out_frames = (out_dur * fps).round().max(1.0) as u64;
+
+        // Announce the new clip once at its boundary so the UI shows a
+        // per-clip label. Intra-clip ticks below forward `None` so they
+        // inherit this label.
+        let clip_start_pct = (total_emitted as f64 / total_frames as f64).clamp(0.0, 1.0) * 100.0;
+        let clip_label = if clip.clip_type.as_deref() == Some("freeze") {
+            format!("Creating freeze frame {} of {}", clip_idx + 1, total_clips)
+        } else {
+            format!("Processing clip {} of {}", clip_idx + 1, total_clips)
+        };
+        on_progress(clip_start_pct, Some(clip_label));
 
         if clip.clip_type.as_deref() == Some("freeze") {
             // One source frame, repeated `out_frames` times. Per-clip
@@ -255,7 +267,7 @@ pub async fn run_pipeline(
                 total_emitted += 1;
                 if total_emitted.is_multiple_of(8) {
                     let pct = (total_emitted as f64 / total_frames as f64).clamp(0.0, 1.0) * 100.0;
-                    on_progress(pct);
+                    on_progress(pct, None);
                 }
             }
         } else {
@@ -345,7 +357,7 @@ pub async fn run_pipeline(
                 total_emitted += 1;
                 if total_emitted.is_multiple_of(8) {
                     let pct = (total_emitted as f64 / total_frames as f64).clamp(0.0, 1.0) * 100.0;
-                    on_progress(pct);
+                    on_progress(pct, None);
                 }
             }
 
@@ -365,6 +377,6 @@ pub async fn run_pipeline(
         let _ = tokio::fs::remove_file(p).await;
     }
 
-    on_progress(100.0);
+    on_progress(100.0, None);
     Ok(())
 }

@@ -1,9 +1,12 @@
 //! Video processing engine using ffmpeg for frame extraction and probing.
 
 use crate::error::NarratorError;
+use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
 use crate::models::{Frame, FrameConfig, VideoMetadata};
 use crate::process_utils::CommandNoWindow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 pub fn detect_ffmpeg() -> Result<PathBuf, NarratorError> {
@@ -207,11 +210,27 @@ fn parse_frame_rate(rate: &str) -> f64 {
     }
 }
 
+/// Extract sampled frames from `video_path` into `output_dir`.
+///
+/// Two callbacks are invoked during extraction so the UI can show live
+/// progress without waiting for ffmpeg to finish:
+///
+/// - `on_frame(Frame)` — fires once per kept frame (after dedupe + dimension
+///   read) so the filmstrip can paint each thumbnail as it's discovered.
+/// - `on_tick(fraction, message)` — fires repeatedly with `fraction` ∈ 0..=1
+///   across two sub-phases:
+///     * `0.0..=0.80` → ffmpeg decoding progress parsed from stderr
+///       (`-progress pipe:2` with `-nostats` forces line-terminated output).
+///     * `0.80..=1.00` → dimension read / dedup pass in the blocking pool.
+///
+/// Both callbacks must be `Send + Sync + 'static` because they cross task
+/// boundaries (spawn_blocking for dimensions, ffmpeg stderr reader task).
 pub async fn extract_frames(
     video_path: &Path,
     config: &FrameConfig,
     output_dir: &Path,
-    on_progress: impl Fn(Frame),
+    on_frame: impl Fn(Frame) + Send + Sync + 'static,
+    on_tick: impl Fn(f64, String) + Send + Sync + 'static,
 ) -> Result<Vec<Frame>, NarratorError> {
     let ffmpeg = detect_ffmpeg()?;
 
@@ -231,14 +250,31 @@ pub async fn extract_frames(
     } else {
         base_interval
     };
+    let expected_frames = if interval > 0.0 {
+        ((metadata.duration_seconds / interval).ceil() as usize).min(config.max_frames.max(1))
+    } else {
+        config.max_frames.max(1)
+    };
 
-    // Extract frames at fixed intervals
+    // Share the tick callback between the ffmpeg stderr reader and the
+    // spawn_blocking dimension pass without leaking its 'static bound into
+    // the outer signature twice.
+    let on_tick: Arc<dyn Fn(f64, String) + Send + Sync> = Arc::new(on_tick);
+
+    on_tick(0.0, "Starting frame extraction".to_string());
+
+    // Extract frames at fixed intervals. Use `-progress pipe:2` + `-nostats`
+    // so stderr is \n-terminated structured progress we can parse line-by-line
+    // (see ffmpeg_progress::extract_time_from_ffmpeg_line).
     let output_pattern = output_dir.join("frame_%04d.jpg");
     let vf_filter = format!("fps=1/{interval}");
 
-    let output = Command::new(ffmpeg.as_os_str())
+    let mut child = Command::new(ffmpeg.as_os_str())
         .no_window()
         .args([
+            "-progress",
+            "pipe:2",
+            "-nostats",
             "-i",
             &video_path.to_string_lossy(),
             "-vf",
@@ -248,14 +284,48 @@ pub async fn extract_frames(
             "-y",
         ])
         .arg(output_pattern.as_os_str())
-        .output()
-        .await
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::FfmpegFailed(stderr.to_string()));
+    // Tail stderr for `out_time=` and translate each tick into the 0..0.80
+    // sub-band. Short-lived extraction runs (<1s) may produce 0 ticks, so the
+    // post-ffmpeg passes always emit at least one progress update to move the
+    // UI forward even in that edge case.
+    const STDERR_TAIL: usize = 40;
+    let mut recent_stderr: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(STDERR_TAIL + 1);
+    if let Some(stderr) = child.stderr.take() {
+        let reader = BufReader::new(stderr);
+        let mut lines = reader.lines();
+        let total_duration = metadata.duration_seconds.max(0.001);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(time_str) = extract_time_from_ffmpeg_line(&line) {
+                let seconds = parse_ffmpeg_time(&time_str);
+                if seconds > 0.0 {
+                    let raw = (seconds / total_duration).clamp(0.0, 1.0);
+                    let fraction = raw * 0.80;
+                    on_tick(fraction, format!("Extracting frames ({:.0}%)", raw * 100.0));
+                }
+            }
+            if recent_stderr.len() >= STDERR_TAIL {
+                recent_stderr.pop_front();
+            }
+            recent_stderr.push_back(line);
+        }
     }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+    if !status.success() {
+        let tail: String = recent_stderr.iter().cloned().collect::<Vec<_>>().join("\n");
+        return Err(NarratorError::FfmpegFailed(tail));
+    }
+
+    on_tick(0.80, format!("Indexing frames (0 of ~{expected_frames})"));
 
     // Collect extracted frames — directory scan, image dimension reads, and blake3
     // hashing are CPU/IO-intensive, so run on the blocking thread pool.
@@ -263,6 +333,7 @@ pub async fn extract_frames(
     let max_frames = config.max_frames;
     let skip_dedup = config.skip_dedup;
     let duration = metadata.duration_seconds;
+    let tick_for_blocking = on_tick.clone();
     let frames = tokio::task::spawn_blocking(move || {
         let mut entries: Vec<_> = std::fs::read_dir(&output_dir_owned)
             .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
@@ -276,6 +347,7 @@ pub async fn extract_frames(
 
         entries.sort_by_key(|e| e.file_name());
 
+        let total = entries.len().min(max_frames).max(1);
         let mut frames = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
             if i >= max_frames {
@@ -300,22 +372,38 @@ pub async fn extract_frames(
                 width,
                 height,
             });
+
+            // 0.80..0.95 for dimension reads. Save the final 0.05 for dedupe.
+            let fraction = 0.80 + ((i + 1) as f64 / total as f64) * 0.15;
+            tick_for_blocking(fraction, format!("Reading frame {} of {}", i + 1, total));
         }
 
         // Deduplicate similar frames using blake3 hashing (unless skip_dedup is set)
         if skip_dedup {
             Ok::<_, NarratorError>(frames)
         } else {
-            Ok::<_, NarratorError>(deduplicate_frames(frames))
+            let count_before = frames.len();
+            let deduped = deduplicate_frames(frames);
+            tick_for_blocking(
+                0.98,
+                format!(
+                    "Deduplicating ({} → {} frames)",
+                    count_before,
+                    deduped.len()
+                ),
+            );
+            Ok::<_, NarratorError>(deduped)
         }
     })
     .await
     .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))??;
 
-    // Report progress for each frame back on the async task
+    // Report each kept frame back so the filmstrip can paint thumbnails live.
     for frame in &frames {
-        on_progress(frame.clone());
+        on_frame(frame.clone());
     }
+
+    on_tick(1.0, format!("Extracted {} frames", frames.len()));
 
     Ok(frames)
 }

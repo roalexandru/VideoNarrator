@@ -539,8 +539,17 @@ mod tests {
 pub enum ProgressEvent {
     #[serde(rename = "phase_change")]
     PhaseChange { phase: String },
+    /// Monotonic progress update. `percent` is 0..100 on the emitter's own
+    /// domain (the frontend weights/rescales to a global percent). `message`
+    /// is an optional human-readable sub-label for *what* is happening right
+    /// now ("Processing clip 2 of 5", "Analyzing batch 3 of 4") and is
+    /// omitted for intra-stage ticks that would only repeat the same label.
     #[serde(rename = "progress")]
-    Progress { percent: f64 },
+    Progress {
+        percent: f64,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        message: Option<String>,
+    },
     #[serde(rename = "frame_extracted")]
     FrameExtracted { frame: Frame },
     #[serde(rename = "segment_streamed")]
@@ -553,4 +562,24 @@ pub enum ProgressEvent {
     SegmentsReplaced { segments: Vec<Segment> },
     #[serde(rename = "error")]
     Error { message: String },
+}
+
+impl ProgressEvent {
+    /// Build a `Progress` event with no message. Use for intra-stage ticks
+    /// where a new sub-label would only repeat itself.
+    pub fn progress(percent: f64) -> Self {
+        ProgressEvent::Progress {
+            percent,
+            message: None,
+        }
+    }
+
+    /// Build a `Progress` event carrying a sub-label. Use at milestones
+    /// ("Processing clip N of M", "Analyzing batch N of M").
+    pub fn progress_msg(percent: f64, message: impl Into<String>) -> Self {
+        ProgressEvent::Progress {
+            percent,
+            message: Some(message.into()),
+        }
+    }
 }

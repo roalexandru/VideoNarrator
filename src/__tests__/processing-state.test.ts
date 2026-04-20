@@ -164,6 +164,65 @@ describe("progress percentage", () => {
     useProcessingStore.getState().setProgress(33.7);
     expect(useProcessingStore.getState().progress).toBe(33.7);
   });
+
+  it("setProgress is monotonic-forward: smaller values are ignored", () => {
+    // Matters because the edit channel (0–35%) closes just as the main
+    // channel (0–65%) opens; without the clamp the bar would snap back to 0
+    // on the first main tick.
+    const store = useProcessingStore.getState();
+    store.setProgress(40);
+    store.setProgress(20);
+    expect(useProcessingStore.getState().progress).toBe(40);
+    store.setProgress(45);
+    expect(useProcessingStore.getState().progress).toBe(45);
+  });
+
+  it("setProgress(0) is an explicit reset — used by the resume flow", () => {
+    // The resume flow calls setProgress(0) to re-open the bar from zero.
+    // If monotonic clamp treated 0 the same as other smaller values, retry
+    // would leave the bar pinned at the pre-failure percent.
+    const store = useProcessingStore.getState();
+    store.setProgress(75);
+    store.setProgress(0);
+    expect(useProcessingStore.getState().progress).toBe(0);
+  });
+
+  it("setProgress clamps negative values to 0 (defensive)", () => {
+    const store = useProcessingStore.getState();
+    store.setProgress(50);
+    store.setProgress(-5);
+    expect(useProcessingStore.getState().progress).toBe(0);
+  });
+});
+
+describe("status message (live sub-label)", () => {
+  it("statusMessage defaults to null", () => {
+    expect(useProcessingStore.getState().statusMessage).toBeNull();
+  });
+
+  it("setStatusMessage updates the label", () => {
+    const store = useProcessingStore.getState();
+    store.setStatusMessage("Analyzing batch 2 of 5");
+    expect(useProcessingStore.getState().statusMessage).toBe("Analyzing batch 2 of 5");
+  });
+
+  it("setStatusMessage(null) clears the label so UI falls back to phase label", () => {
+    const store = useProcessingStore.getState();
+    store.setStatusMessage("temporary");
+    store.setStatusMessage(null);
+    expect(useProcessingStore.getState().statusMessage).toBeNull();
+  });
+
+  it("reset clears statusMessage alongside other state", () => {
+    const store = useProcessingStore.getState();
+    store.setStatusMessage("mid-run label");
+    store.setProgress(42);
+    store.reset();
+
+    const state = useProcessingStore.getState();
+    expect(state.statusMessage).toBeNull();
+    expect(state.progress).toBe(0);
+  });
 });
 
 describe("reset returns to initial state", () => {

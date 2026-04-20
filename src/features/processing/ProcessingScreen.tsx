@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect } from "react";
+import { useCallback, useState, useEffect, useMemo } from "react";
 import { Channel, convertFileSrc } from "@tauri-apps/api/core";
 import { useProcessingStore } from "../../stores/processingStore";
 import { useProjectStore } from "../../stores/projectStore";
@@ -13,16 +13,43 @@ import { toUserMessage, isContextOverflowError } from "../../lib/errorMessages";
 import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
-import { secondsToTimestamp } from "../../lib/formatters";
 import type { ProgressEvent, ProcessingPhase } from "../../types/processing";
 import type { GenerationParams } from "../../types/config";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
+// Global weighting for the progress bar. The edit channel (separate Tauri
+// command) maps 0–100% into 0–EDIT_BUDGET% of the global scale when edits run;
+// the main generation channel then maps 0–100% into the remaining slice.
+// Without edits the main channel drives the full 0–100%.
+const EDIT_BUDGET = 35;
+
 const PHASE_LABELS: Record<ProcessingPhase, string> = {
-  idle: "Preparing...", extracting_frames: "Extracting frames from video...",
-  processing_docs: "Processing context documents...", generating_narration: "Generating narration with AI...",
-  done: "Generation complete!", error: "Error occurred", cancelled: "Cancelled",
+  idle: "Preparing...",
+  applying_edits: "Applying video edits...",
+  extracting_frames: "Extracting frames from video...",
+  processing_docs: "Processing context documents...",
+  generating_narration: "Generating narration with AI...",
+  done: "Generation complete!",
+  error: "Error occurred",
+  cancelled: "Cancelled",
+};
+
+// Ordered phase list. `idle` / `done` / `error` / `cancelled` are pseudo-states
+// handled by the outer branches and don't appear in the step tracker.
+const FULL_PHASES = [
+  "applying_edits",
+  "extracting_frames",
+  "processing_docs",
+  "generating_narration",
+] as const satisfies ReadonlyArray<ProcessingPhase>;
+type ActivePhase = (typeof FULL_PHASES)[number];
+
+const STEP_LABELS: Record<ActivePhase, string> = {
+  applying_edits: "Apply Edits",
+  extracting_frames: "Extract Frames",
+  processing_docs: "Process Docs",
+  generating_narration: "Generate Narration",
 };
 
 export function ProcessingScreen() {
@@ -41,15 +68,18 @@ export function ProcessingScreen() {
 
   const run = useCallback(async ({ resume = false }: { resume?: boolean } = {}) => {
     const generationStart = Date.now();
-    // Snapshot segments from any prior partial run BEFORE we reset state.
+    // Snapshot segments from any prior partial run BEFORE we clear state.
     // On resume we send them to the backend so completed chunks aren't re-billed.
-    // Reset clears everything (frames re-extract, progress from 0) — then we
-    // re-seed streamingSegments so the prior partial preview stays visible and
-    // goes back to the backend as resume_segments.
     const resumeSegments = resume ? useProcessingStore.getState().streamingSegments : [];
-    proc.reset();
-    if (resume && resumeSegments.length > 0) {
-      proc.replaceStreamingSegments(resumeSegments);
+    if (resume) {
+      // Preserve streamingSegments; explicitly reset progress (setProgress
+      // treats 0 as explicit reset), clear error + statusMessage so the UI
+      // unblocks.
+      proc.setError(null);
+      proc.setProgress(0);
+      proc.setStatusMessage(null);
+    } else {
+      proc.reset();
     }
     proc.setPhase("extracting_frames");
     trackEvent("generation_started", {
@@ -67,17 +97,8 @@ export function ProcessingScreen() {
     // Snapshot edit state at generation start to prevent mid-run mutations
     const editSnapshot = useEditStore.getState();
 
-    const ch = new Channel<ProgressEvent>();
-    ch.onmessage = (e: ProgressEvent) => {
-      if (e.kind === "phase_change") proc.setPhase(e.phase);
-      else if (e.kind === "progress") proc.setProgress(e.percent);
-      else if (e.kind === "frame_extracted") proc.appendFrame(e.frame);
-      else if (e.kind === "segment_streamed") proc.appendSegment(e.segment);
-      else if (e.kind === "segments_replaced") proc.replaceStreamingSegments(e.segments);
-      else if (e.kind === "error") proc.setError(e.message);
-    };
-
-    // Check if video edits need to be applied first
+    // Decide edit branch BEFORE wiring the main-channel handler so its
+    // percent scaling matches.
     let videoPath = project.videoFile!.path;
     const hasEdits = editSnapshot.clips.length > 1
       || editSnapshot.clips.some((c) => c.speed !== 1.0)
@@ -86,6 +107,25 @@ export function ProcessingScreen() {
       || (editSnapshot.effects && editSnapshot.effects.length > 0 && editSnapshot.effects.some((e) => e.type === 'zoom-pan'))
       || (editSnapshot.clips.length === 1 && editSnapshot.sourceDuration > 0
           && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
+
+    // Main generation channel. `progress` events scale into the remaining
+    // budget (whole bar when no edits, EDIT_BUDGET→100 when edits ran).
+    // Messages become the live sub-label.
+    const ch = new Channel<ProgressEvent>();
+    ch.onmessage = (e: ProgressEvent) => {
+      if (e.kind === "phase_change") proc.setPhase(e.phase);
+      else if (e.kind === "progress") {
+        const global = hasEdits
+          ? EDIT_BUDGET + (e.percent / 100) * (100 - EDIT_BUDGET)
+          : e.percent;
+        proc.setProgress(global);
+        if (e.message !== undefined) proc.setStatusMessage(e.message);
+      }
+      else if (e.kind === "frame_extracted") proc.appendFrame(e.frame);
+      else if (e.kind === "segment_streamed") proc.appendSegment(e.segment);
+      else if (e.kind === "segments_replaced") proc.replaceStreamingSegments(e.segments);
+      else if (e.kind === "error") proc.setError(e.message);
+    };
 
     if (hasEdits && editSnapshot.clips.length > 0) {
       trackEvent("video_edited", {
@@ -97,14 +137,21 @@ export function ProcessingScreen() {
         has_trim: editSnapshot.clips.length === 1 && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5),
       });
       try {
-        proc.setPhase("extracting_frames"); // reuse phase for "applying edits" visual
+        // Backend emits phase_change("applying_edits") on this channel before
+        // the first percent tick so the step tracker highlights correctly.
         const homeDir = await getHomeDir();
         const ext = videoPath.split(".").pop() || "mp4";
         const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
         const editPlan = buildEditPlan(editSnapshot.clips, editSnapshot.effects);
         const editCh = new Channel<ProgressEvent>();
         editCh.onmessage = (e: ProgressEvent) => {
-          if (e.kind === "progress") proc.setProgress(e.percent * 0.3); // 0-30% for edits
+          if (e.kind === "phase_change") proc.setPhase(e.phase);
+          else if (e.kind === "progress") {
+            // Edit channel owns 0 → EDIT_BUDGET% of the global bar.
+            proc.setProgress((e.percent / 100) * EDIT_BUDGET);
+            if (e.message !== undefined) proc.setStatusMessage(e.message);
+          }
+          else if (e.kind === "error") proc.setError(e.message);
         };
         videoPath = await applyVideoEdits(videoPath, editedPath, editPlan, editCh);
         editSnapshot.setEditedVideoPath(videoPath);
@@ -199,12 +246,37 @@ export function ProcessingScreen() {
   // Show start button when idle with no script (first time on this step)
   const showStart = !hasScript && proc.phase === "idle";
 
-  const phases = ["extracting_frames", "processing_docs", "generating_narration"] as const;
-  const pi = phases.indexOf(proc.phase as any);
-  const pct = showCompleted ? 100 : proc.phase === "done" ? 100 : proc.phase === "generating_narration" && proc.progress > 0 ? 67 + (proc.progress / 100) * 33 : (proc.phase === "extracting_frames" && proc.frames.length === 0) ? 5 : pi >= 0 ? ((pi + 0.5) / 3) * 100 : 5;
+  // `hasEdits` must match the `run()` branch so the step tracker counts right
+  // even before the first edit-channel event lands.
+  const editSnapshot = useEditStore();
+  const editsDetected = editSnapshot.clips.length > 1
+    || editSnapshot.clips.some((c) => c.speed !== 1.0)
+    || editSnapshot.clips.some((c) => c.type === 'freeze')
+    || editSnapshot.clips.some((c) => !!c.zoomPan)
+    || (editSnapshot.effects && editSnapshot.effects.length > 0 && editSnapshot.effects.some((e) => e.type === 'zoom-pan'))
+    || (editSnapshot.clips.length === 1 && editSnapshot.sourceDuration > 0
+        && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
+  // Include an observed `applying_edits` phase too — covers edge cases where
+  // the edit store was wiped between render cycles while the backend is mid-run.
+  const showEditStep = editsDetected || proc.phase === "applying_edits";
+
+  const activePhases: readonly ActivePhase[] = useMemo(
+    () => (showEditStep ? FULL_PHASES : (FULL_PHASES.slice(1) as unknown as readonly ActivePhase[])),
+    [showEditStep],
+  );
+  const activeIdx = activePhases.indexOf(proc.phase as ActivePhase);
+
+  // Backend emits a monotonic percent that the frontend scales into the
+  // global bar. No phase-index math — we just render the store value.
+  const pct = showCompleted ? 100
+    : proc.phase === "done" ? 100
+    : Math.min(100, Math.max(0, proc.progress));
+
   const elapsed = proc.frames.length > 0 ? `${proc.frames.length} frames extracted` : "";
   const segCount = proc.streamingSegments.length;
   const scriptSegCount = Object.values(useScriptStore.getState().scripts)[0]?.segments.length || 0;
+
+  const statusLine = proc.statusMessage ?? PHASE_LABELS[proc.phase];
 
   const [hasApiKey, setHasApiKey] = useState(true);
   useEffect(() => {
@@ -260,15 +332,15 @@ export function ProcessingScreen() {
   }
 
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", maxWidth: 1100, margin: "0 auto", width: "100%" }}>
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 22, fontWeight: 700, color: C.text }}>Processing</h2>
-        <p style={{ color: C.dim, marginTop: 4, fontSize: 14 }}>{PHASE_LABELS[proc.phase]}</p>
+        <p style={{ color: C.dim, marginTop: 4, fontSize: 14 }}>{statusLine}</p>
       </div>
 
       {/* Progress bar with percentage */}
-      <div style={{ marginBottom: 20 }}>
+      <div style={{ marginBottom: 24 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
           <span style={{ fontSize: 12, color: C.dim }}>
             {elapsed}{elapsed && segCount > 0 ? " · " : ""}{segCount > 0 ? `${segCount} segments generated` : ""}
@@ -278,136 +350,72 @@ export function ProcessingScreen() {
         <ProgressBar value={pct} height={6} />
       </div>
 
-      {/* Two-column: steps + live preview */}
-      <div style={{ flex: 1, display: "grid", gridTemplateColumns: "280px 1fr", gap: 20, minHeight: 0 }}>
-        {/* Left: Steps + frames */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
-          {/* Phase steps */}
-          {([
-            { p: "extracting_frames", l: "Extract Frames", detail: `${proc.frames.length} frames` },
-            { p: "processing_docs", l: "Process Documents", detail: "Analyzing context" },
-            { p: "generating_narration", l: "Generate Narration", detail: `${segCount} segments` },
-          ] as const).map(({ p, l, detail }, i) => {
-            const active = proc.phase === p;
-            const done = proc.phase === "done" || (pi > i && pi >= 0);
-            return (
-              <div key={p} style={{
-                display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
-                borderRadius: 10, background: active ? "rgba(99,102,241,0.06)" : "rgba(255,255,255,0.02)",
-                border: active ? "1px solid rgba(99,102,241,0.2)" : `1px solid ${C.border}`,
+      {/* Horizontal step tracker */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 28 }}>
+        {activePhases.map((p, i) => {
+          const active = proc.phase === p;
+          const done = proc.phase === "done" || (activeIdx > i && activeIdx >= 0);
+          return (
+            <div key={p} style={{
+              flex: 1, minWidth: 0,
+              display: "flex", alignItems: "center", gap: 10, padding: "12px 14px",
+              borderRadius: 10,
+              background: active ? "rgba(99,102,241,0.06)" : "rgba(255,255,255,0.02)",
+              border: active ? "1px solid rgba(99,102,241,0.2)" : `1px solid ${C.border}`,
+            }}>
+              <div style={{
+                width: 32, height: 32, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                background: done ? "rgba(34,197,94,0.12)" : active ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.04)",
+                color: done ? "#4ade80" : active ? C.accent : C.muted,
               }}>
-                <div style={{
-                  width: 36, height: 36, borderRadius: 9, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-                  background: done ? "rgba(34,197,94,0.12)" : active ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.04)",
-                  color: done ? "#4ade80" : active ? C.accent : C.muted,
-                }}>
-                  {done ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
-                    : active ? <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.accent, animation: "pulse 1.5s infinite" }} />
-                    : <span style={{ fontSize: 13, fontWeight: 600 }}>{i + 1}</span>}
-                </div>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: active ? 600 : 400, color: active ? C.text : C.dim }}>{l}</div>
-                  {(active || done) && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{detail}</div>}
-                </div>
+                {done ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+                  : active ? <div style={{ width: 7, height: 7, borderRadius: "50%", background: C.accent, animation: "pulse 1.5s infinite" }} />
+                  : <span style={{ fontSize: 12, fontWeight: 600 }}>{i + 1}</span>}
               </div>
-            );
-          })}
-
-          {/* Frames filmstrip */}
-          {proc.frames.length > 0 && (
-            <div>
-              <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
-                Extracted Frames
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4 }}>
-                {proc.frames.slice(0, 16).map((f) => (
-                  <div key={f.index} style={{
-                    aspectRatio: "16/10", borderRadius: 5, overflow: "hidden", position: "relative",
-                    border: `1px solid ${C.border}`,
-                  }}>
-                    <img
-                      src={convertFileSrc(typeof f.path === 'string' ? f.path : (f.path as { toString(): string }).toString())}
-                      alt={`Frame at ${f.timestamp_seconds.toFixed(2)}s`}
-                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-                      onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-                    />
-                    <div style={{
-                      position: "absolute", bottom: 2, left: 2, fontSize: 9, fontWeight: 700,
-                      color: "#fff", background: "rgba(0,0,0,0.6)", padding: "1px 4px", borderRadius: 3,
-                    }}>
-                      {f.timestamp_seconds.toFixed(1)}s
-                    </div>
-                  </div>
-                ))}
-                {proc.frames.length > 16 && (
-                  <div style={{ aspectRatio: "16/10", background: "rgba(99,102,241,0.06)", borderRadius: 5, display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontSize: 10, border: `1px solid rgba(99,102,241,0.15)` }}>
-                    +{proc.frames.length - 16}
-                  </div>
-                )}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: active ? 600 : 400, color: active ? C.text : C.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{STEP_LABELS[p]}</div>
               </div>
             </div>
-          )}
-        </div>
+          );
+        })}
+      </div>
 
-        {/* Right: Live narration preview */}
-        <div style={{
-          borderRadius: 12, border: `1px solid ${C.border}`, background: "rgba(255,255,255,0.02)",
-          display: "flex", flexDirection: "column", overflow: "hidden",
-        }}>
-          <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: C.dim, textTransform: "uppercase", letterSpacing: 0.8 }}>
-              Live Narration Preview
-            </span>
-            {segCount > 0 && (
-              <span style={{ fontSize: 12, color: C.accent }}>{segCount} segment{segCount !== 1 ? "s" : ""}</span>
+      {/* Filmstrip — full width, auto-fills across the row */}
+      {proc.frames.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.8 }}>
+            Extracted Frames
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 6 }}>
+            {proc.frames.slice(0, 32).map((f) => (
+              <div key={f.index} style={{
+                aspectRatio: "16/10", borderRadius: 6, overflow: "hidden", position: "relative",
+                border: `1px solid ${C.border}`,
+              }}>
+                <img
+                  src={convertFileSrc(typeof f.path === 'string' ? f.path : (f.path as { toString(): string }).toString())}
+                  alt={`Frame at ${f.timestamp_seconds.toFixed(2)}s`}
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
+                />
+                <div style={{
+                  position: "absolute", bottom: 2, left: 2, fontSize: 9, fontWeight: 700,
+                  color: "#fff", background: "rgba(0,0,0,0.6)", padding: "1px 4px", borderRadius: 3,
+                }}>
+                  {f.timestamp_seconds.toFixed(1)}s
+                </div>
+              </div>
+            ))}
+            {proc.frames.length > 32 && (
+              <div style={{ aspectRatio: "16/10", background: "rgba(99,102,241,0.06)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontSize: 11, border: `1px solid rgba(99,102,241,0.15)` }}>
+                +{proc.frames.length - 32}
+              </div>
             )}
           </div>
-
-          {segCount === 0 ? (
-            <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: C.muted, fontSize: 14 }}>
-              {proc.phase === "generating_narration" ? (
-                <div style={{ textAlign: "center", maxWidth: 300 }}>
-                  <div style={{ width: 28, height: 28, border: "2.5px solid rgba(99,102,241,0.2)", borderTopColor: C.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 16px" }} />
-                  <div style={{ fontSize: 14, fontWeight: 600, color: C.dim, marginBottom: 8 }}>Generating narration with AI...</div>
-                  <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
-                    The AI is analyzing your video frames and creating a timed narration script. This typically takes 30–90 seconds.
-                  </div>
-                  {proc.progress > 0 && (
-                    <div style={{ marginTop: 12, fontSize: 11, color: C.accent, fontWeight: 600 }}>
-                      {Math.round(proc.progress)}% complete
-                    </div>
-                  )}
-                </div>
-              ) : "Narration will appear here as it's generated..."}
-            </div>
-          ) : (
-            <div style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
-              {proc.streamingSegments.map((s, i) => {
-                const isLast = i === segCount - 1;
-                return (
-                  <div key={s.index} style={{
-                    padding: "12px 16px", borderRadius: 8,
-                    background: isLast ? "rgba(99,102,241,0.06)" : "rgba(255,255,255,0.02)",
-                    border: isLast ? "1px solid rgba(99,102,241,0.2)" : `1px solid ${C.border}`,
-                    animation: isLast ? "fadeIn 0.3s ease" : "none",
-                  }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                      <span style={{ fontSize: 11, fontFamily: "monospace", color: C.accent, fontWeight: 600 }}>
-                        {secondsToTimestamp(s.start_seconds)} - {secondsToTimestamp(s.end_seconds)}
-                      </span>
-                      <span style={{ fontSize: 10, color: C.muted }}>{s.pace}</span>
-                    </div>
-                    <p style={{ fontSize: 13, color: isLast ? C.text : C.dim, lineHeight: 1.6, margin: 0 }}>{s.text}</p>
-                    {s.visual_description && (
-                      <p style={{ fontSize: 11, color: C.muted, marginTop: 6, fontStyle: "italic" }}>{s.visual_description}</p>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
-      </div>
+      )}
+
+      <div style={{ flex: 1 }} />
 
       {/* Error — click to copy */}
       {proc.error && (
@@ -442,8 +450,6 @@ export function ProcessingScreen() {
 
       {/* CSS animations */}
       <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
     </div>

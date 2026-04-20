@@ -66,9 +66,21 @@ where
 }
 
 /// Helper for callers that only care about percent updates.
+#[allow(dead_code)]
 fn forward_percent(reporter: &Arc<dyn ProgressReporter>) -> impl Fn(f64) + Send + Sync + use<'_> {
     let reporter = reporter.clone();
-    move |percent| reporter.report(ProgressEvent::Progress { percent })
+    move |percent| reporter.report(ProgressEvent::progress(percent))
+}
+
+/// Helper for callers that emit `(percent, message)` pairs. Use this when
+/// the producer wants to attach a human-readable sub-label at milestones
+/// (e.g. "Processing clip 2 of 5", "Combining clips"). For plain ticks, pass
+/// `None` and the UI will keep the current label.
+fn forward_percent_msg(
+    reporter: &Arc<dyn ProgressReporter>,
+) -> impl Fn(f64, Option<String>) + Send + Sync + use<'_> {
+    let reporter = reporter.clone();
+    move |percent, message| reporter.report(ProgressEvent::Progress { percent, message })
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -87,7 +99,7 @@ pub async fn apply_edits(
     plan: &VideoEditPlan,
     reporter: Arc<dyn ProgressReporter>,
 ) -> Result<String, NarratorError> {
-    let on_progress = forward_percent(&reporter);
+    let on_progress = forward_percent_msg(&reporter);
     video_edit::apply_edits(input_path, output_path, plan, on_progress).await
 }
 
@@ -100,7 +112,7 @@ pub async fn merge_audio_video(
     replace_audio: bool,
     reporter: Arc<dyn ProgressReporter>,
 ) -> Result<String, NarratorError> {
-    let on_progress = forward_percent(&reporter);
+    let on_progress = forward_percent_msg(&reporter);
     video_edit::merge_audio_video(
         video_path,
         audio_path,
@@ -119,7 +131,7 @@ pub async fn burn_subtitles(
     style: &SubtitleStyle,
     reporter: Arc<dyn ProgressReporter>,
 ) -> Result<String, NarratorError> {
-    let on_progress = forward_percent(&reporter);
+    let on_progress = forward_percent_msg(&reporter);
     video_edit::burn_subtitles(video_path, srt_path, output_path, style, on_progress).await
 }
 
@@ -150,7 +162,7 @@ mod tests {
     #[test]
     fn noop_reporter_is_silent() {
         let r: Arc<dyn ProgressReporter> = Arc::new(NoopReporter);
-        r.report(ProgressEvent::Progress { percent: 42.0 });
+        r.report(ProgressEvent::progress(42.0));
         // Nothing to assert — just shouldn't panic.
     }
 
@@ -161,8 +173,38 @@ mod tests {
         let r: Arc<dyn ProgressReporter> = Arc::new(FnReporter(move |_e| {
             count_inner.fetch_add(1, Ordering::SeqCst);
         }));
-        r.report(ProgressEvent::Progress { percent: 10.0 });
-        r.report(ProgressEvent::Progress { percent: 20.0 });
+        r.report(ProgressEvent::progress(10.0));
+        r.report(ProgressEvent::progress(20.0));
         assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn forward_percent_msg_wraps_into_progress_event() {
+        use std::sync::Mutex;
+        let events: Arc<Mutex<Vec<ProgressEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let reporter: Arc<dyn ProgressReporter> = Arc::new(FnReporter(move |e| {
+            sink.lock().unwrap().push(e);
+        }));
+        let forward = forward_percent_msg(&reporter);
+        forward(12.0, None);
+        forward(34.5, Some("Processing clip 2 of 5".to_string()));
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        match &captured[0] {
+            ProgressEvent::Progress { percent, message } => {
+                assert_eq!(*percent, 12.0);
+                assert!(message.is_none());
+            }
+            other => panic!("expected Progress, got {:?}", other),
+        }
+        match &captured[1] {
+            ProgressEvent::Progress { percent, message } => {
+                assert_eq!(*percent, 34.5);
+                assert_eq!(message.as_deref(), Some("Processing clip 2 of 5"));
+            }
+            other => panic!("expected Progress, got {:?}", other),
+        }
     }
 }

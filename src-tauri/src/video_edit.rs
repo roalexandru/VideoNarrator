@@ -9,6 +9,7 @@
 //! subtitle-burn pass-through, etc.).
 
 use crate::error::NarratorError;
+use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
 use crate::models::ZoomPanEffect;
 use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
@@ -232,12 +233,15 @@ pub struct EditClip {
 }
 
 /// Run an ffmpeg command with real-time progress reporting.
-/// Parses stderr for `time=` values and reports progress as 0.0-100.0.
+/// Parses stderr for `time=` values and reports progress as 0.0-100.0. The
+/// callback's second argument is an optional human-readable sub-label — the
+/// parser itself has nothing interesting to say so always forwards `None`; the
+/// caller is expected to emit its own milestone messages before/after.
 async fn run_ffmpeg_with_progress(
     ffmpeg: &Path,
     args: &[&str],
     total_duration: f64,
-    on_progress: &impl Fn(f64),
+    on_progress: &(impl Fn(f64, Option<String>) + ?Sized),
 ) -> Result<(), NarratorError> {
     // `-progress pipe:2` emits structured, newline-terminated progress events
     // (`out_time=HH:MM:SS.xxx`) to stderr so our line reader can parse them.
@@ -272,7 +276,7 @@ async fn run_ffmpeg_with_progress(
                 let seconds = parse_ffmpeg_time(&time_str);
                 if total_duration > 0.0 && seconds > 0.0 {
                     let pct = (seconds / total_duration * 100.0).min(100.0);
-                    on_progress(pct);
+                    on_progress(pct, None);
                 }
             }
             if recent_stderr.len() >= STDERR_TAIL {
@@ -322,58 +326,8 @@ async fn run_ffmpeg_with_progress(
         )));
     }
 
-    on_progress(100.0);
+    on_progress(100.0, None);
     Ok(())
-}
-
-/// Extract the time= value from an ffmpeg stderr line.
-///
-/// Handles both formats:
-/// - Structured `-progress pipe:2` output: `out_time=00:00:01.666000\n`
-///   (and `out_time_us=...`, `out_time_ms=...` — we prefer `out_time=`).
-/// - Legacy `-stats` output: `frame=100 ... time=00:00:01.66 bitrate=...\r`.
-fn extract_time_from_ffmpeg_line(line: &str) -> Option<String> {
-    // Prefer the structured `-progress` format; it's \n-terminated so lines()
-    // can actually see it.
-    if let Some(i) = line.find("out_time=") {
-        let rest = &line[i + 9..];
-        let end = rest.find([' ', '\n', '\r']).unwrap_or(rest.len());
-        let time_str = rest[..end].trim();
-        if time_str.is_empty() || time_str == "N/A" {
-            return None;
-        }
-        return Some(time_str.to_string());
-    }
-    // Fallback: legacy stats line. This only fires in contexts where we didn't
-    // pass -nostats (we always do now, but keep the fallback for safety).
-    let time_idx = line.find("time=")?;
-    let rest = &line[time_idx + 5..];
-    let end = rest.find(' ').unwrap_or(rest.len());
-    let time_str = &rest[..end];
-    if time_str == "N/A" {
-        return None;
-    }
-    Some(time_str.to_string())
-}
-
-/// Parse ffmpeg time format "HH:MM:SS.ms" to seconds.
-fn parse_ffmpeg_time(time_str: &str) -> f64 {
-    let parts: Vec<&str> = time_str.split(':').collect();
-    match parts.len() {
-        3 => {
-            let hours: f64 = parts[0].parse().unwrap_or(0.0);
-            let minutes: f64 = parts[1].parse().unwrap_or(0.0);
-            let seconds: f64 = parts[2].parse().unwrap_or(0.0);
-            hours * 3600.0 + minutes * 60.0 + seconds
-        }
-        2 => {
-            let minutes: f64 = parts[0].parse().unwrap_or(0.0);
-            let seconds: f64 = parts[1].parse().unwrap_or(0.0);
-            minutes * 60.0 + seconds
-        }
-        1 => parts[0].parse().unwrap_or(0.0),
-        _ => 0.0,
-    }
 }
 
 /// Extract a single frame from a video at a given timestamp.
@@ -419,7 +373,7 @@ pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
-    on_progress: impl Fn(f64) + Send + Sync,
+    on_progress: impl Fn(f64, Option<String>) + Send + Sync,
 ) -> Result<String, NarratorError> {
     validate_path(input_path)?;
     validate_path(output_path)?;
@@ -429,6 +383,7 @@ pub async fn apply_edits(
         return Err(NarratorError::ExportError("No clips to process".into()));
     }
 
+    on_progress(0.0, Some("Preparing edit plan".to_string()));
     let meta = video_engine::probe_video(Path::new(input_path)).await?;
 
     let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
@@ -474,14 +429,16 @@ pub async fn apply_edits(
         let covers_full =
             first.start_seconds < 0.5 && (first.end_seconds - meta.duration_seconds).abs() < 0.5;
         if covers_full {
+            on_progress(0.0, Some("Copying source video".to_string()));
             if input_path != output_path {
                 tokio::fs::copy(input_path, output_path).await?;
             }
-            on_progress(100.0);
+            on_progress(100.0, Some("Edit complete".to_string()));
             return Ok(output_path.to_string());
         }
 
         // Single trimmed clip with no effects → ffmpeg stream-copy trim.
+        on_progress(0.0, Some("Trimming video".to_string()));
         let ffmpeg = video_engine::detect_ffmpeg()?;
         let duration = first.end_seconds - first.start_seconds;
         let output = Command::new(ffmpeg.as_os_str())
@@ -507,11 +464,12 @@ pub async fn apply_edits(
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NarratorError::FfmpegFailed(stderr.to_string()));
         }
-        on_progress(100.0);
+        on_progress(100.0, Some("Edit complete".to_string()));
         return Ok(output_path.to_string());
     }
 
-    // Anything else → the in-process compositor handles the whole render.
+    // Anything else → the in-process compositor handles the whole render. The
+    // compositor emits per-clip milestone messages of its own, so just relay.
     crate::compositor::run_pipeline(
         Path::new(input_path),
         Path::new(output_path),
@@ -519,7 +477,7 @@ pub async fn apply_edits(
         &on_progress,
     )
     .await?;
-    on_progress(100.0);
+    on_progress(100.0, Some("Edit complete".to_string()));
     Ok(output_path.to_string())
 }
 
@@ -528,13 +486,14 @@ pub async fn merge_audio_video(
     audio_path: &str,
     output_path: &str,
     replace_audio: bool,
-    on_progress: impl Fn(f64),
+    on_progress: impl Fn(f64, Option<String>),
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
     if replace_audio {
         // Replace original audio entirely with narration.
         // Uses -c:v copy so it's fast — no re-encoding needed.
+        on_progress(0.0, Some("Replacing audio track".to_string()));
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args([
@@ -565,14 +524,14 @@ pub async fn merge_audio_video(
             )));
         }
 
-        on_progress(100.0);
+        on_progress(100.0, Some("Audio complete".to_string()));
         return Ok(output_path.to_string());
     }
 
     // Mix original + narration audio. Phase 5: this happens in Rust via the
     // compositor::audio mixer (sample-level math + optional ducking) instead
     // of ffmpeg amix. ffmpeg only does the final mux.
-    on_progress(5.0);
+    on_progress(5.0, Some("Mixing narration with source audio".to_string()));
 
     let tmp_dir = std::env::temp_dir();
     let mixed_wav = tmp_dir.join(format!("_narrator_mix_{}.wav", uuid::Uuid::new_v4()));
@@ -625,11 +584,11 @@ pub async fn merge_audio_video(
                 &stderr[stderr.len().saturating_sub(500)..]
             )));
         }
-        on_progress(100.0);
+        on_progress(100.0, Some("Audio complete".to_string()));
         return Ok(output_path.to_string());
     }
 
-    on_progress(70.0);
+    on_progress(70.0, Some("Encoding final audio".to_string()));
 
     // Mux: video stream copied through, audio = the mixed WAV → AAC.
     let mux = Command::new(ffmpeg.as_os_str())
@@ -670,7 +629,7 @@ pub async fn merge_audio_video(
         )));
     }
 
-    on_progress(100.0);
+    on_progress(100.0, Some("Audio complete".to_string()));
     Ok(output_path.to_string())
 }
 
@@ -733,7 +692,7 @@ pub async fn burn_subtitles(
     srt_path: &str,
     output_path: &str,
     style: &SubtitleStyle,
-    on_progress: impl Fn(f64),
+    on_progress: impl Fn(f64, Option<String>),
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
@@ -835,7 +794,7 @@ pub async fn burn_subtitles(
     }
 
     let _ = tokio::fs::remove_file(&temp_srt).await;
-    on_progress(100.0);
+    on_progress(100.0, Some("Subtitles burned".to_string()));
 
     Ok(output_path.to_string())
 }
@@ -938,40 +897,6 @@ pub async fn extract_edit_thumbnails(
 mod tests {
     use super::*;
     use crate::models::EasingPreset;
-
-    #[test]
-    fn test_extract_time_from_ffmpeg_line() {
-        assert_eq!(
-            extract_time_from_ffmpeg_line(
-                "frame=  120 fps=30 q=28.0 size=    1024kB time=00:01:30.50 bitrate= 2094.1kbits/s"
-            ),
-            Some("00:01:30.50".to_string())
-        );
-        assert_eq!(extract_time_from_ffmpeg_line("time=N/A"), None);
-        assert_eq!(extract_time_from_ffmpeg_line("no time here"), None);
-    }
-
-    #[test]
-    fn test_parse_ffmpeg_time() {
-        assert!((parse_ffmpeg_time("00:01:30.50") - 90.5).abs() < 0.01);
-        assert!((parse_ffmpeg_time("01:00:00.00") - 3600.0).abs() < 0.01);
-        assert!((parse_ffmpeg_time("00:00:05.25") - 5.25).abs() < 0.01);
-        assert!((parse_ffmpeg_time("") - 0.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_parse_ffmpeg_time_two_parts() {
-        assert!((parse_ffmpeg_time("01:30.00") - 90.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_extract_time_at_end_of_line() {
-        // time= at end of line with no trailing space
-        assert_eq!(
-            extract_time_from_ffmpeg_line("size=1024kB time=00:00:10.00"),
-            Some("00:00:10.00".to_string())
-        );
-    }
 
     #[test]
     fn test_atempo_chaining_for_high_speeds() {
@@ -1319,7 +1244,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1429,7 +1354,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -1668,7 +1593,7 @@ mod tests {
             audio.to_str().unwrap(),
             output.to_str().unwrap(),
             true, // replace
-            |_| {},
+            |_, _| {},
         )
         .await;
         assert!(res.is_ok(), "merge failed: {:?}", res.err());
@@ -1698,7 +1623,7 @@ mod tests {
             audio.to_str().unwrap(),
             output.to_str().unwrap(),
             false, // mix
-            |_| {},
+            |_, _| {},
         )
         .await;
         assert!(res.is_ok(), "merge mix failed: {:?}", res.err());
@@ -1737,7 +1662,7 @@ mod tests {
             input.to_str().unwrap(),
             edited.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -1755,7 +1680,7 @@ mod tests {
             audio.to_str().unwrap(),
             final_out.to_str().unwrap(),
             true,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -1883,7 +1808,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -1912,7 +1837,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -1953,7 +1878,7 @@ mod tests {
             srt_path.to_str().unwrap(),
             output.to_str().unwrap(),
             &style,
-            |_| {},
+            |_, _| {},
         )
         .await;
         assert!(res.is_ok(), "burn_subtitles failed: {:?}", res.err());
@@ -1994,7 +1919,7 @@ mod tests {
             srt_path.to_str().unwrap(),
             output.to_str().unwrap(),
             &style,
-            |_| {},
+            |_, _| {},
         )
         .await;
         assert!(
@@ -2026,7 +1951,7 @@ mod tests {
             srt_path.to_str().unwrap(),
             output.to_str().unwrap(),
             &style,
-            |_| {},
+            |_, _| {},
         )
         .await;
         assert!(res.is_ok(), "unicode SRT should work: {:?}", res.err());
@@ -2197,7 +2122,7 @@ mod tests {
             input.to_str().unwrap(),
             edited.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -2221,7 +2146,7 @@ mod tests {
             audio.to_str().unwrap(),
             merged.to_str().unwrap(),
             true,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -2247,7 +2172,7 @@ mod tests {
             srt.to_str().unwrap(),
             final_out.to_str().unwrap(),
             &style,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -2299,7 +2224,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();
@@ -2349,7 +2274,7 @@ mod tests {
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             &plan,
-            |_| {},
+            |_, _| {},
         )
         .await
         .unwrap();

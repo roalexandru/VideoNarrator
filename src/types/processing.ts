@@ -10,6 +10,7 @@ export interface Frame {
 
 export type ProcessingPhase =
   | "idle"
+  | "applying_edits"
   | "extracting_frames"
   | "processing_docs"
   | "generating_narration"
@@ -19,7 +20,12 @@ export type ProcessingPhase =
 
 export type ProgressEvent =
   | { kind: "phase_change"; phase: ProcessingPhase }
-  | { kind: "progress"; percent: number }
+  /**
+   * Monotonic percent update. `message` is an optional human-readable
+   * sub-label shown under the progress bar (e.g. "Analyzing batch 2 of 5"),
+   * omitted for intra-stage ticks that would only repeat the previous label.
+   */
+  | { kind: "progress"; percent: number; message?: string }
   | { kind: "frame_extracted"; frame: Frame }
   | { kind: "segment_streamed"; segment: Segment }
   /** Terminal event: the full normalized script. Replaces streaming preview. */

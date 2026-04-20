@@ -539,17 +539,25 @@ pub async fn generate_narration(
         .await
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
-    let channel_clone = channel.clone();
+    let channel_for_frames = channel.clone();
+    let channel_for_ticks = channel.clone();
     let frames_dir_cleanup = frames_dir.clone();
     let frames = match video_engine::extract_frames(
         Path::new(&params.video_path),
         &frame_config,
         &frames_dir,
         move |frame| {
-            channel_clone
+            channel_for_frames
                 .send(ProgressEvent::FrameExtracted {
                     frame: frame.clone(),
                 })
+                .ok();
+        },
+        move |fraction, message| {
+            // Frame extraction owns 0..25% of the global bar.
+            let percent = (fraction.clamp(0.0, 1.0)) * 25.0;
+            channel_for_ticks
+                .send(ProgressEvent::progress_msg(percent, message))
                 .ok();
         },
     )
@@ -567,25 +575,46 @@ pub async fn generate_narration(
         return Err(NarratorError::Cancelled);
     }
 
-    // Phase 2: Process documents
+    // Phase 2: Process documents — the 25%→30% slice of the global bar.
     channel
         .send(ProgressEvent::PhaseChange {
             phase: "processing_docs".to_string(),
         })
         .ok();
 
+    let total_docs = params.document_paths.len();
     let mut docs = Vec::new();
-    for path in &params.document_paths {
-        match doc_processor::process_document(Path::new(path)) {
-            Ok(doc) => docs.push(doc),
-            Err(e) => {
-                channel
-                    .send(ProgressEvent::Error {
-                        message: format!("Warning: {e}"),
-                    })
-                    .ok();
+    if total_docs == 0 {
+        channel
+            .send(ProgressEvent::progress_msg(30.0, "No context documents"))
+            .ok();
+    } else {
+        for (i, path) in params.document_paths.iter().enumerate() {
+            // Base of the slice for this document.
+            let base = 25.0 + (i as f64 / total_docs as f64) * 5.0;
+            let name = Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("document");
+            channel
+                .send(ProgressEvent::progress_msg(
+                    base,
+                    format!("Reading {name} ({}/{total_docs})", i + 1),
+                ))
+                .ok();
+
+            match doc_processor::process_document(Path::new(path)) {
+                Ok(doc) => docs.push(doc),
+                Err(e) => {
+                    channel
+                        .send(ProgressEvent::Error {
+                            message: format!("Warning: {e}"),
+                        })
+                        .ok();
+                }
             }
         }
+        channel.send(ProgressEvent::progress(30.0)).ok();
     }
     let docs = doc_processor::truncate_to_budget(docs, 50000);
 
@@ -619,31 +648,57 @@ pub async fn generate_narration(
     .await
     .map_err(|e| NarratorError::ApiError(e.to_string()))??;
 
-    // Start estimated progress reporter — gives the user a smooth progress bar
-    // during the 30-60 second AI call instead of a frozen UI.
-    let progress_channel = channel.clone();
-    let cancel_progress = Arc::new(AtomicBool::new(false));
-    let cancel_clone = cancel_progress.clone();
+    // Pre-count image parts so we know which path `generate_narration` will
+    // take. Chunked path drives real per-chunk progress ticks; single-call
+    // path has none, so we fall back to a smooth logarithmic timer. Running
+    // both would race, so they're mutually exclusive.
+    let image_count = user_message
+        .as_array()
+        .map(|p| p.iter().filter(|v| v["type"] == "image").count())
+        .unwrap_or(0);
+    let will_chunk = image_count > ai_client::MAX_FRAMES_PER_CALL;
 
-    let progress_task = tokio::spawn(async move {
-        let mut pct = 0.0_f64;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            if cancel_clone.load(Ordering::SeqCst) {
-                break;
+    // Narration owns 30% → 99% of the global bar. Both callback branches
+    // (chunked per-chunk ticks AND the single-call logarithmic fallback) map
+    // their local 0..1 / 0..95 range into that slice via the same helper so
+    // the frontend just reads `percent` — no phase-aware math.
+    const NARRATION_BASE: f64 = 30.0;
+    const NARRATION_SPAN: f64 = 69.0;
+    let scale_narration =
+        |fraction: f64| NARRATION_BASE + fraction.clamp(0.0, 1.0) * NARRATION_SPAN;
+
+    // Logarithmic progress reporter: ONLY runs on the single-call path
+    // (no chunking ⇒ nothing else to report ticks). On the chunked path the
+    // per-chunk callback is the source of truth and the timer is never
+    // spawned (would race with real progress and walk the bar backward on
+    // monotonic clamp).
+    let progress_task_handle = if !will_chunk {
+        let progress_channel = channel.clone();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel_flag.clone();
+        let handle = tokio::spawn(async move {
+            let mut local_pct = 0.0_f64;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if cancel_clone.load(Ordering::SeqCst) {
+                    break;
+                }
+                // Logarithmic progress: approaches but never reaches 95% of
+                // the narration slice.
+                local_pct += (95.0 - local_pct) * 0.15;
+                let percent = NARRATION_BASE + (local_pct / 100.0) * NARRATION_SPAN;
+                progress_channel.send(ProgressEvent::progress(percent)).ok();
             }
-            // Logarithmic progress: approaches but never reaches 95%
-            pct += (95.0 - pct) * 0.15;
-            progress_channel
-                .send(ProgressEvent::Progress { percent: pct })
-                .ok();
-        }
-    });
+        });
+        Some((handle, cancel_flag))
+    } else {
+        None
+    };
 
     // Stream per-chunk segments to the frontend as generate_chunked produces
-    // them. This is the primary source of "live" preview during chunked
-    // generation, and the segments the frontend sends back on retry via
-    // `resume_segments` to skip already-completed chunks.
+    // them. Primary "live" preview source during chunked generation, and the
+    // segments the frontend sends back via `resume_segments` on retry to skip
+    // already-completed chunks.
     let stream_channel = channel.clone();
     let on_segment: ai_client::SegmentCallback = Arc::new(move |seg: &Segment| {
         stream_channel
@@ -653,6 +708,20 @@ pub async fn generate_narration(
             .ok();
     });
 
+    // Per-chunk percent + label. The chunked path calls this at the start
+    // and end of every chunk (plus once on resume to jump the bar forward);
+    // the single-call path calls it once at ~5% with a kickoff label.
+    let progress_ch = channel.clone();
+    let on_progress_cb: ai_client::ProgressCallback =
+        Arc::new(move |fraction: f64, message: Option<String>| {
+            let percent = scale_narration(fraction);
+            let event = match message {
+                Some(msg) => ProgressEvent::progress_msg(percent, msg),
+                None => ProgressEvent::progress(percent),
+            };
+            progress_ch.send(event).ok();
+        });
+
     let script = ai_client::generate_narration(
         provider.as_ref(),
         &system_prompt,
@@ -661,21 +730,27 @@ pub async fn generate_narration(
         &params.primary_language,
         params.resume_segments.clone(),
         Some(on_segment),
+        Some(on_progress_cb),
     )
     .await;
 
-    // Stop estimated progress reporter
-    cancel_progress.store(true, Ordering::SeqCst);
-    if let Err(e) = progress_task.await {
-        tracing::warn!("Progress reporter task failed: {e}");
+    // Stop estimated progress reporter (single-call path only).
+    if let Some((handle, cancel_flag)) = progress_task_handle {
+        cancel_flag.store(true, Ordering::SeqCst);
+        if let Err(e) = handle.await {
+            tracing::warn!("Progress reporter task failed: {e}");
+        }
     }
 
-    // Jump to 100% once the AI call completes
-    channel
-        .send(ProgressEvent::Progress { percent: 100.0 })
-        .ok();
-
     let script = script?;
+
+    // Finalize: pin the bar to 100% with a one-word label so the UI shows
+    // a clean endcap before the terminal events. Must fire BEFORE
+    // SegmentsReplaced so the frontend's monotonic clamp is at 100 when it
+    // transitions to "done".
+    channel
+        .send(ProgressEvent::progress_msg(100.0, "Complete"))
+        .ok();
 
     // Terminal event: replace the live per-chunk preview with the final,
     // normalized/polished script so what the user sees matches what's saved.
@@ -1270,9 +1345,7 @@ pub async fn generate_tts(
         let mut segment_files: Vec<(usize, PathBuf, f64, f64)> = Vec::new(); // (index, path, start, end)
         for (i, seg) in segments.iter().enumerate() {
             channel
-                .send(ProgressEvent::Progress {
-                    percent: (i as f64 / total as f64) * 80.0,
-                })
+                .send(ProgressEvent::progress((i as f64 / total as f64) * 80.0))
                 .ok();
 
             let filename = format!("_tmp_seg_{:03}.mp3", seg.index);
@@ -1294,7 +1367,7 @@ pub async fn generate_tts(
             }
         }
 
-        channel.send(ProgressEvent::Progress { percent: 85.0 }).ok();
+        channel.send(ProgressEvent::progress(85.0)).ok();
 
         // Merge using concat demuxer: silence gaps + segments in sequence
         // This preserves full volume for each segment (no amix normalization)
@@ -1395,7 +1468,7 @@ pub async fn generate_tts(
                 .join("\n");
             tokio::fs::write(&concat_list_path, &concat_content).await?;
 
-            channel.send(ProgressEvent::Progress { percent: 92.0 }).ok();
+            channel.send(ProgressEvent::progress(92.0)).ok();
 
             // Run concat
             let concat_output = tokio::process::Command::new(ffmpeg.as_os_str())
@@ -1457,9 +1530,7 @@ pub async fn generate_tts(
         let total = segments.len();
         for (i, seg) in segments.iter().enumerate() {
             channel
-                .send(ProgressEvent::Progress {
-                    percent: (i as f64 / total as f64) * 100.0,
-                })
+                .send(ProgressEvent::progress((i as f64 / total as f64) * 100.0))
                 .ok();
 
             let filename = format!("segment_{:03}.mp3", seg.index);
@@ -1487,9 +1558,7 @@ pub async fn generate_tts(
         }
     }
 
-    channel
-        .send(ProgressEvent::Progress { percent: 100.0 })
-        .ok();
+    channel.send(ProgressEvent::progress(100.0)).ok();
     Ok(results)
 }
 
@@ -1722,6 +1791,15 @@ pub async fn apply_video_edits(
     edits: video_edit::VideoEditPlan,
     channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
+    // Announce the phase BEFORE the first percent tick so the frontend can
+    // light up the "Apply Edits" step card on the very first event. The
+    // subsequent `ProgressEvent::Progress` stream (with optional messages)
+    // flows through the shared reporter.
+    channel
+        .send(ProgressEvent::PhaseChange {
+            phase: "applying_edits".to_string(),
+        })
+        .ok();
     render::apply_edits(&input_path, &output_path, &edits, channel_reporter(channel)).await
 }
 

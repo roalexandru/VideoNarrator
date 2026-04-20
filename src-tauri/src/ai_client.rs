@@ -14,6 +14,12 @@ use std::sync::Arc;
 /// same segments back via `resume_segments` to skip completed chunks on retry.
 pub type SegmentCallback = Arc<dyn Fn(&Segment) + Send + Sync>;
 
+/// Callback invoked with a coarse (fraction, message) pair at chunk boundaries.
+/// `fraction` is 0..=1 of *the narration stage*, not the global progress bar —
+/// the caller re-scales. `message` is the label users see under the progress
+/// bar ("Analyzing batch 2 of 5"). `None` means "keep the previous label".
+pub type ProgressCallback = Arc<dyn Fn(f64, Option<String>) + Send + Sync>;
+
 /// Truncate a string to at most `max_chars` CHARACTERS (not bytes), safe for
 /// multi-byte UTF-8 text like Japanese or emoji. Returns a borrowed slice when
 /// the string already fits, otherwise an owned String.
@@ -571,6 +577,7 @@ pub fn build_user_message(
 /// clamping + ordering checks). Not called for resumed segments — the caller
 /// already has them. Use this to stream partial progress to the UI so users
 /// can see what's been generated mid-flight.
+#[allow(clippy::too_many_arguments)]
 async fn generate_chunked(
     provider: &dyn AiProvider,
     system_prompt: &str,
@@ -578,6 +585,7 @@ async fn generate_chunked(
     image_count: usize,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<String, NarratorError> {
     let parts = user_message
         .as_array()
@@ -633,9 +641,11 @@ async fn generate_chunked(
     // timestamp. `resume_cutoff` is used below to skip chunks the prior run
     // already completed.
     let resume_cutoff = resume_segments.last().map(|s| s.end_seconds).unwrap_or(0.0);
+    let had_resume_segments = !resume_segments.is_empty();
     let mut all_segments: Vec<crate::models::Segment> = resume_segments;
     let mut merged_script: Option<NarrationScript> = None;
     let mut skipped_chunks = 0usize;
+    let mut emitted_resume_jump = !had_resume_segments;
 
     for chunk_idx in 0..num_chunks {
         let start = chunk_idx * MAX_FRAMES_PER_CALL;
@@ -664,6 +674,30 @@ async fn generate_chunked(
                 resume_cutoff
             );
             continue;
+        }
+
+        // First live chunk after a resume: jump the progress bar forward to
+        // reflect completed work so the user doesn't watch the bar rebuild
+        // from 0%. Emitted once, only when we actually start running.
+        if !emitted_resume_jump {
+            emitted_resume_jump = true;
+            if let Some(cb) = on_progress.as_ref() {
+                let fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0);
+                cb(fraction, Some("Resuming from saved segments".to_string()));
+            }
+        }
+
+        // Announce the incoming chunk so the UI can label the active step.
+        if let Some(cb) = on_progress.as_ref() {
+            let fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0);
+            cb(
+                fraction,
+                Some(format!(
+                    "Analyzing batch {} of {}",
+                    chunk_idx + 1,
+                    num_chunks
+                )),
+            );
         }
 
         // Bound the chunk strictly between the first frame and the first frame of the next chunk.
@@ -805,6 +839,13 @@ async fn generate_chunked(
                 kept,
                 skipped
             );
+        }
+
+        // Close out this chunk. No message — the UI keeps the "Analyzing
+        // batch X of N" label until the next chunk starts.
+        if let Some(cb) = on_progress.as_ref() {
+            let fraction = ((chunk_idx + 1) as f64 / num_chunks as f64).clamp(0.0, 1.0);
+            cb(fraction, None);
         }
     }
 
@@ -1120,8 +1161,13 @@ async fn generate_with_retry(
 /// Generate narration, chunking the request if there are too many frames.
 /// Each chunk gets up to MAX_FRAMES_PER_CALL frames. Subsequent chunks receive
 /// context about previously generated segments so the narrative is coherent.
-const MAX_FRAMES_PER_CALL: usize = 10;
+///
+/// Exposed to the command layer so callers can pre-count images and decide
+/// whether to spawn the single-call fallback progress timer (it would race
+/// real per-chunk ticks on the chunked path).
+pub const MAX_FRAMES_PER_CALL: usize = 10;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_narration(
     provider: &dyn AiProvider,
     system_prompt: &str,
@@ -1130,6 +1176,7 @@ pub async fn generate_narration(
     _language: &str,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<NarrationScript, NarratorError> {
     // Check if the message has too many image parts — if so, chunk it
     let parts = user_message.as_array();
@@ -1146,6 +1193,7 @@ pub async fn generate_narration(
             image_count,
             resume_segments,
             on_segment.clone(),
+            on_progress.clone(),
         )
         .await?
     } else {
@@ -1153,6 +1201,9 @@ pub async fn generate_narration(
         // per-segment streaming happens here — the caller emits a single
         // `SegmentsReplaced` event with the final segments after we return.
         let _ = on_segment.as_ref(); // only used by the chunked path
+        if let Some(cb) = on_progress.as_ref() {
+            cb(0.05, Some("Generating narration with AI…".to_string()));
+        }
         generate_with_retry(provider, system_prompt, user_message).await?
     };
 
@@ -1794,6 +1845,7 @@ mod tests {
             "en",
             vec![],
             None,
+            None,
         )
         .await;
 
@@ -1824,6 +1876,7 @@ mod tests {
             "en",
             vec![],
             None,
+            None,
         )
         .await;
 
@@ -1848,6 +1901,7 @@ mod tests {
             "test",
             "en",
             vec![],
+            None,
             None,
         )
         .await;
@@ -2245,7 +2299,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
 
         let msg = user_msg_with_frames(25, 1.0);
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2287,7 +2341,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0); // 2 chunks
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2310,7 +2364,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2350,7 +2404,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2380,7 +2434,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2401,7 +2455,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
 
@@ -2480,7 +2534,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .expect("must not panic on multibyte text");
         // Monotonic order preserved
@@ -2500,7 +2554,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
         assert_eq!(result.segments.len(), 1);
@@ -2521,7 +2575,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "ja", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "ja", vec![], None, None)
             .await
             .unwrap();
         assert_eq!(result.segments.len(), 3);
@@ -2535,7 +2589,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
         // Exactly one call — confirms the threshold check is `>` not `>=`
@@ -2550,7 +2604,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL + 1, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
         assert_eq!(provider.captured().len(), 2);
@@ -2573,7 +2627,8 @@ mod tests {
         }
         let msg = serde_json::Value::Array(parts);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None).await;
+        let result =
+            generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None).await;
         assert!(
             result.is_ok(),
             "should still succeed with unparseable timestamps"
@@ -2587,7 +2642,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, "NOT JSON AT ALL"]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let err = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let err = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap_err();
         let err_str = err.to_string();
@@ -2605,7 +2660,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
         let first_call_text: String = provider.captured()[0]
@@ -2630,11 +2685,151 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
             .await
             .unwrap();
         // Should succeed with empty segments — not crash
         assert_eq!(result.segments.len(), 0);
+    }
+
+    type ProgressTicks = Arc<std::sync::Mutex<Vec<(f64, Option<String>)>>>;
+
+    #[tokio::test]
+    async fn test_chunked_progress_callback_fires_bounds() {
+        // 25 frames → 3 chunks. Progress callback must fire at least once
+        // near 0.0 (before chunk 1) and once near 1.0 (after chunk 3), so the
+        // UI bar smoothly traverses the narration slice.
+        let r1 = chunk_response_json("T", 25.0, &[(0.0, 5.0, "a"), (5.0, 10.0, "b")]);
+        let r2 = chunk_response_json("T", 25.0, &[(10.0, 15.0, "c"), (15.0, 20.0, "d")]);
+        let r3 = chunk_response_json("T", 25.0, &[(20.0, 25.0, "e")]);
+        let polish = chunk_response_json(
+            "T",
+            25.0,
+            &[
+                (0.0, 5.0, "a"),
+                (5.0, 10.0, "b"),
+                (10.0, 15.0, "c"),
+                (15.0, 20.0, "d"),
+                (20.0, 25.0, "e"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&r1, &r2, &r3, &polish]);
+        let msg = user_msg_with_frames(25, 1.0);
+
+        let captured: ProgressTicks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let cb: ProgressCallback = Arc::new(move |f, m| {
+            sink.lock().unwrap().push((f, m));
+        });
+
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, Some(cb))
+            .await
+            .unwrap();
+
+        let ticks = captured.lock().unwrap();
+        assert!(!ticks.is_empty(), "no progress ticks were captured");
+
+        // First tick: start of chunk 1 → fraction 0.0, label describes batch 1/3.
+        let (first_frac, first_msg) = &ticks[0];
+        assert!(
+            (*first_frac - 0.0).abs() < 1e-6,
+            "first tick should start at 0.0, got {first_frac}"
+        );
+        assert_eq!(first_msg.as_deref(), Some("Analyzing batch 1 of 3"));
+
+        // Last tick: after chunk 3 → fraction 1.0.
+        let (last_frac, _) = ticks.last().unwrap();
+        assert!(
+            (*last_frac - 1.0).abs() < 1e-6,
+            "last tick should reach 1.0, got {last_frac}"
+        );
+
+        // Each chunk emits (start_msg, end_none) so we should see all
+        // three "Analyzing batch X of 3" labels in order.
+        let labels: Vec<&str> = ticks.iter().filter_map(|(_, m)| m.as_deref()).collect();
+        assert!(labels.iter().any(|l| l.contains("batch 1 of 3")));
+        assert!(labels.iter().any(|l| l.contains("batch 2 of 3")));
+        assert!(labels.iter().any(|l| l.contains("batch 3 of 3")));
+    }
+
+    #[tokio::test]
+    async fn test_chunked_progress_resume_jumps_forward() {
+        // With resume_segments covering the first 2/3 chunks, the bar must
+        // jump straight to ~0.667 before the live chunk starts — not rebuild
+        // from 0 and re-bill the skipped chunks.
+        let r3 = chunk_response_json("T", 25.0, &[(20.0, 25.0, "e")]);
+        // Single live chunk + polish.
+        let polish = chunk_response_json(
+            "T",
+            25.0,
+            &[
+                (0.0, 5.0, "a"),
+                (5.0, 10.0, "b"),
+                (10.0, 15.0, "c"),
+                (15.0, 20.0, "d"),
+                (20.0, 25.0, "e"),
+            ],
+        );
+        let provider = ScriptedProvider::new(vec![&r3, &polish]);
+
+        let msg = user_msg_with_frames(25, 1.0);
+        let resume = vec![
+            Segment {
+                index: 0,
+                start_seconds: 0.0,
+                end_seconds: 5.0,
+                text: "a".into(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: crate::models::Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            },
+            Segment {
+                index: 1,
+                start_seconds: 5.0,
+                end_seconds: 10.0,
+                text: "b".into(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: crate::models::Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            },
+            Segment {
+                index: 2,
+                start_seconds: 10.0,
+                end_seconds: 20.0,
+                text: "cd".into(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: crate::models::Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            },
+        ];
+
+        let captured: ProgressTicks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        let cb: ProgressCallback = Arc::new(move |f, m| {
+            sink.lock().unwrap().push((f, m));
+        });
+
+        generate_narration(&provider, "sys", msg, "test", "en", resume, None, Some(cb))
+            .await
+            .unwrap();
+
+        let ticks = captured.lock().unwrap();
+        // The first emitted tick should be the resume-cutoff jump, not 0.0.
+        let (first_frac, first_msg) = &ticks[0];
+        assert!(
+            *first_frac > 0.5,
+            "resume jump should land in the second half, got {first_frac}"
+        );
+        assert_eq!(first_msg.as_deref(), Some("Resuming from saved segments"));
     }
 
     // ── translate_script ───────────────────────────────────────────────
