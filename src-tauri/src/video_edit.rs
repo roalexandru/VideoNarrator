@@ -560,6 +560,50 @@ pub async fn merge_audio_video(
     // of ffmpeg amix. ffmpeg only does the final mux.
     on_progress(5.0, Some("Mixing narration with source audio".to_string()));
 
+    // Probe upfront so "source has no audio stream" is caught
+    // deterministically, without depending on ffmpeg's (English-only) error
+    // string. If ffprobe can't answer we fall through to the old
+    // stderr-string path below.
+    if let Ok(false) = video_engine::probe_has_audio_stream(Path::new(video_path)).await {
+        tracing::warn!("Source has no audio — falling back to narration-only mux");
+        let fallback = Command::new(ffmpeg.as_os_str())
+            .no_window()
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                video_path,
+                "-i",
+                audio_path,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                output_path,
+            ])
+            .output()
+            .await
+            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        if !fallback.status.success() {
+            let stderr = String::from_utf8_lossy(&fallback.stderr);
+            return Err(NarratorError::FfmpegFailed(format!(
+                "Audio merge fallback failed: {}",
+                &stderr[stderr.len().saturating_sub(500)..]
+            )));
+        }
+        on_progress(100.0, Some("Audio complete".to_string()));
+        return Ok(MergeOutcome {
+            output_path: output_path.to_string(),
+            fell_back_to_narration_only: true,
+        });
+    }
+
     let tmp_dir = std::env::temp_dir();
     let mixed_wav = tmp_dir.join(format!("_narrator_mix_{}.wav", uuid::Uuid::new_v4()));
     let _cleanup = TempCleanup(vec![mixed_wav.clone()]);
@@ -740,13 +784,14 @@ fn hex_rgb_to_ass_bgr(hex: &str) -> String {
 ///   `:` inside the quotes is safe — the older code escaped `\:` on top of
 ///   the quotes, which some ffmpeg builds render into the path literally
 ///   and fail with "No such file".
-/// - Backslashes and single quotes still need literal escaping even inside
-///   single quotes, per https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping.
+/// - Single quotes inside the path still need literal escaping (`\'`), per
+///   https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping.
 /// - Forward slashes are universal, so we normalize Windows separators
 ///   first to keep the drive-letter colon inside the single-quoted value.
+///   After normalization there are no backslashes left to escape.
 fn build_subtitles_filter(srt_path: &Path, style: &SubtitleStyle) -> String {
     let normalized = srt_path.to_string_lossy().replace('\\', "/");
-    let escaped_path = normalized.replace('\\', "\\\\").replace('\'', "\\'");
+    let escaped_path = normalized.replace('\'', r"\'");
 
     let primary_colour = hex_rgb_to_ass_bgr(&style.color);
     let outline_colour = hex_rgb_to_ass_bgr(&style.outline_color);

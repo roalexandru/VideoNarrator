@@ -2056,10 +2056,45 @@ pub async fn burn_subtitles(
     let _ = tokio::fs::remove_file(&srt_path).await;
     if result.is_ok() {
         if let Some(path) = cleanup_intermediate {
-            let _ = tokio::fs::remove_file(&path).await;
+            if is_safe_intermediate_path(&path, &output_path) {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::warn!(
+                        "failed to remove intermediate {path}: {e} (burn succeeded, leaving file behind)"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "refusing to cleanup_intermediate {path:?}: must end with '_merged.mp4', live in the output directory, and differ from the output path"
+                );
+            }
         }
     }
     result
+}
+
+/// Guard the `cleanup_intermediate` IPC arg against deleting arbitrary
+/// files. The UI passes `<output_dir>/<base>_merged.mp4`; anything else
+/// (a different directory, a different filename, or the output path
+/// itself) is rejected without even attempting the delete.
+fn is_safe_intermediate_path(candidate: &str, output_path: &str) -> bool {
+    if candidate.is_empty() || candidate == output_path {
+        return false;
+    }
+    let cand = std::path::Path::new(candidate);
+    let out = std::path::Path::new(output_path);
+    let Some(cand_name) = cand.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    // We only ever produce `<base>_merged.mp4` as an intermediate. Insist
+    // on that suffix so a future UI bug can't ask us to delete something
+    // else.
+    if !cand_name.ends_with("_merged.mp4") {
+        return false;
+    }
+    match (cand.parent(), out.parent()) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 // ── Style commands ──
@@ -2072,6 +2107,49 @@ pub async fn list_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── is_safe_intermediate_path tests ──
+
+    #[test]
+    fn is_safe_intermediate_accepts_sibling_merged_mp4() {
+        assert!(is_safe_intermediate_path(
+            "/tmp/out/video_merged.mp4",
+            "/tmp/out/video_burned.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_output_path() {
+        let out = "/tmp/out/video.mp4";
+        assert!(!is_safe_intermediate_path(out, out));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_non_merged_suffix() {
+        assert!(!is_safe_intermediate_path(
+            "/tmp/out/important.mov",
+            "/tmp/out/video.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_different_directory() {
+        assert!(!is_safe_intermediate_path(
+            "/var/other/video_merged.mp4",
+            "/tmp/out/video.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_empty_and_bare_filename() {
+        assert!(!is_safe_intermediate_path("", "/tmp/out/video.mp4"));
+        // A bare filename has no parent — reject rather than risk resolving
+        // against the process cwd.
+        assert!(!is_safe_intermediate_path(
+            "video_merged.mp4",
+            "/tmp/out/video.mp4"
+        ));
+    }
 
     // ── sanitize_tts_text tests ──
 

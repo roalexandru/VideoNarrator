@@ -222,13 +222,19 @@ fn read_wav_to_f32(path: &Path) -> Result<(Vec<f32>, u32), NarratorError> {
 }
 
 /// Soft-clip a single sample: linear up to ±0.95, then tanh-shaped toward
-/// a strict ±0.99 ceiling. Needed because the mixer sums narration +
+/// (but never reaching) ±0.99. Needed because the mixer sums narration +
 /// (possibly unducked) original, which can exceed ±1.0 during narration
 /// pauses over loud source audio — hard-clamping there produced audible
-/// crunch. The 0.99 ceiling ensures no f32 rounding can hand int16
-/// conversion a value that saturates to ±32767 (and would wrap with
-/// `i16::MAX - 1` scaling).
+/// crunch. Output asymptotes to ±0.99 as |s| → ∞, so f32 rounding can't
+/// hand int16 conversion a value that saturates to ±32767 (and would wrap
+/// with `i16::MAX - 1` scaling).
+///
+/// Non-finite inputs (NaN / ±Inf) return 0 so a bad decoded sample can't
+/// poison downstream math or trip the `y.signum() == s.signum()` test.
 fn soft_clip(s: f32) -> f32 {
+    if !s.is_finite() {
+        return 0.0;
+    }
     const KNEE: f32 = 0.95;
     const CEIL: f32 = 0.99;
     if s.abs() <= KNEE {
@@ -358,7 +364,10 @@ pub async fn mix_narration(
             let pos = i as f32 / block as f32;
             let bi = pos.floor() as usize;
             let frac = pos - bi as f32;
-            let last = envelope.len() - 1;
+            // `last` is computed with `saturating_sub(1)` so a future refactor
+            // that lets an empty envelope reach this branch doesn't wrap to
+            // `usize::MAX` and out-of-bounds index.
+            let last = envelope.len().saturating_sub(1);
             let a = envelope[bi.min(last)];
             let b = envelope[(bi + 1).min(last)];
             a + (b - a) * frac
@@ -461,6 +470,18 @@ mod tests {
                 y.signum() == s.signum(),
                 "soft_clip must preserve sign: soft_clip({s})={y}"
             );
+        }
+    }
+
+    /// Non-finite samples (NaN / ±Inf) must collapse to 0 instead of
+    /// propagating into the output. A single corrupt decoded sample would
+    /// otherwise NaN-poison everything that sums it and trip the sign /
+    /// magnitude asserts above.
+    #[test]
+    fn soft_clip_collapses_non_finite_samples() {
+        for s in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let y = soft_clip(s);
+            assert!(y == 0.0, "soft_clip({s}) must return 0, got {y}");
         }
     }
 
