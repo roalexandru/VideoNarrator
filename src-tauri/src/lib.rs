@@ -18,8 +18,11 @@ mod process_utils;
 mod project_store;
 mod render;
 mod screen_recorder;
+mod script_validator;
 mod secure_store;
+mod speech_rate;
 mod telemetry;
+mod tts_pack;
 mod video_edit;
 mod video_engine;
 

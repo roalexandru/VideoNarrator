@@ -81,3 +81,4 @@ The PR quality gate enforces this.
 - Telemetry events are fire-and-forget via `trackEvent()` from `src/features/telemetry/analytics.ts`
 - API keys stored locally at `~/.narrator/config.json` with 0600 permissions
 - No PII in telemetry — never track file paths, content, or user identifiers
+- Speech-rate budget is mirrored between `src-tauri/src/speech_rate.rs` and `src/lib/speechRate.ts` — both sides must produce identical numbers so Review's overflow prediction matches Export's actual behavior. Update both in the same commit.

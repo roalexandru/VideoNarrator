@@ -13,6 +13,7 @@ import {
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
 import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { predictExport } from "../../lib/speechRate";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { EXPORT_FORMATS } from "../../lib/constants";
 import { useOpenSettings } from "../../contexts/SettingsContext";
@@ -345,6 +346,31 @@ export function ExportScreen() {
       setVideoOutputPath(finalPath);
       setVideoPhase("done");
       trackEvent("export_completed", { type: "video", tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio, wall_time_s: Math.round((Date.now() - exportStart) / 1000) });
+
+      // Predicted compression / padding stats — computed from the same
+      // deterministic math Export uses (see speechRate.predictExport).
+      // We don't plumb per-segment actuals back through IPC because the
+      // prediction is provably accurate for the non-error path.
+      const scriptLang = script.metadata.language || "en";
+      const videoDur = script.total_duration_seconds || 0;
+      // Same speed multiplier the backend applies, so the prediction matches
+      // the actual compression/padding counters at export time.
+      const ttsSpeed = (() => {
+        if (ttsProviderRaw === "elevenlabs") return elConfig?.speed || 1.0;
+        if (ttsProviderRaw === "azure") return azureConfig?.speed || 1.0;
+        // builtin: parse from ttsProvider string "builtin:voice:speed"
+        const parts = ttsProvider.split(":");
+        return Number.parseFloat(parts[2] || "1.0") || 1.0;
+      })();
+      const prediction = predictExport(script.segments, scriptLang, videoDur, ttsSpeed);
+      trackEvent("export_tts_compression", {
+        segments_total: script.segments.length,
+        segments_compressed: prediction.compressed,
+        segments_over_cap: prediction.overCap,
+        video_padded_ms: Math.round(prediction.padSeconds * 1000),
+        language: scriptLang,
+        tts_provider: ttsProvider,
+      });
     } catch (e: any) {
       console.error("Export video:", e);
       trackError("export_video", e, { tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });

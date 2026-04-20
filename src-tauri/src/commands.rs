@@ -2,7 +2,6 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
-use crate::process_utils::CommandNoWindow;
 use crate::render;
 use crate::secure_store;
 use crate::{
@@ -635,7 +634,12 @@ pub async fn generate_narration(
         .unwrap_or_else(|| project_store::default_styles()[1].clone());
 
     let video_metadata = video_engine::probe_video(Path::new(&params.video_path)).await?;
-    let system_prompt = ai_client::build_system_prompt(&style, &docs, &params.custom_prompt);
+    let system_prompt = ai_client::build_system_prompt(
+        &style,
+        &docs,
+        &params.custom_prompt,
+        &params.primary_language,
+    );
     // build_user_message reads frame files from disk and base64-encodes them (CPU+IO bound)
     let frames_clone = frames.clone();
     let title = params.title.clone();
@@ -1380,137 +1384,52 @@ pub async fn generate_tts(
         // This preserves full volume for each segment (no amix normalization)
         if !segment_files.is_empty() {
             let final_path = out.join("narration_full.mp3");
-            let ffmpeg = video_engine::detect_ffmpeg().unwrap_or_else(|_| PathBuf::from("ffmpeg"));
             let video_dur = segments.last().map(|s| s.end_seconds).unwrap_or(60.0);
-
-            tracing::info!(
-                "Concat-merging {} segments into {:.0}s audio",
-                segment_files.len(),
-                video_dur
-            );
-
-            // Build ordered list of files: silence gaps interleaved with segments.
-            // Track the running audio position to compute gaps accurately,
-            // since TTS audio duration often differs from the segment time window.
-            let mut concat_parts: Vec<PathBuf> = Vec::new();
-            let mut silence_idx = 0;
-            let mut audio_pos: f64 = 0.0; // current position in the output audio
-                                          // Record where each rendered segment actually landed so the burn
-                                          // subtitles pass can track the real audio instead of the scripted
-                                          // plan (which drifts whenever a TTS clip overruns its window).
-            let mut actual_timings: Vec<export_engine::ActualTiming> =
-                Vec::with_capacity(segment_files.len());
-
-            for (seg_idx, seg_path, start, end) in segment_files.iter() {
-                // Gap = desired start position minus where we currently are
-                let gap = start - audio_pos;
-
-                if gap > 0.05 {
-                    let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
-                    let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
-                    let _ = tokio::process::Command::new(ffmpeg.as_os_str())
-                        .no_window()
-                        .args(["-y", "-f", "lavfi", "-i"])
-                        .arg(&anullsrc)
-                        .args([
-                            "-t",
-                            &format!("{:.3}", gap),
-                            "-codec:a",
-                            "libmp3lame",
-                            "-q:a",
-                            "2",
-                        ])
-                        .arg(sil_path.as_os_str())
-                        .output()
-                        .await;
-                    concat_parts.push(sil_path);
-                    audio_pos += gap;
-                    silence_idx += 1;
-                }
-
-                // Probe actual TTS audio duration
-                let seg_dur = video_engine::probe_duration(seg_path.as_path())
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Could not probe TTS segment duration: {e}, estimating from time window");
-                        (end - start).max(0.5)
-                    });
-
-                let seg_start = audio_pos;
-                let seg_end = audio_pos + seg_dur;
-                actual_timings.push(export_engine::ActualTiming {
-                    segment_index: *seg_idx,
-                    start_seconds: seg_start,
-                    end_seconds: seg_end,
-                });
-
-                concat_parts.push(seg_path.clone());
-                audio_pos += seg_dur;
-            }
-
-            // Sidecar for the burn-subtitles pass. Best-effort: a failure here
-            // just means burn falls back to scripted timings.
-            let timings_path = out.join("narration_timings.json");
-            if let Ok(json) = serde_json::to_string(&actual_timings) {
-                if let Err(e) = tokio::fs::write(&timings_path, json).await {
-                    tracing::warn!("Could not write narration_timings.json sidecar: {e}");
-                }
-            }
-
-            // Trailing silence to reach full video duration
-            let last_end = segment_files.last().map(|s| s.3).unwrap_or(0.0);
-            if video_dur > last_end + 0.1 {
-                let trail = video_dur - last_end;
-                let sil_path = out.join(format!("_tmp_sil_{}.mp3", silence_idx));
-                let anullsrc = format!("anullsrc=r={}:cl=stereo", silence_sample_rate);
-                let _ = tokio::process::Command::new(ffmpeg.as_os_str())
-                    .no_window()
-                    .args(["-y", "-f", "lavfi", "-i"])
-                    .arg(&anullsrc)
-                    .args([
-                        "-t",
-                        &format!("{:.3}", trail),
-                        "-codec:a",
-                        "libmp3lame",
-                        "-q:a",
-                        "2",
-                    ])
-                    .arg(sil_path.as_os_str())
-                    .output()
-                    .await;
-                concat_parts.push(sil_path);
-            }
-
-            // Write concat list file
-            let concat_list_path = out.join("_concat_list.txt");
-            let concat_content: String = concat_parts
-                .iter()
-                .map(|p| {
-                    let escaped = p
-                        .to_string_lossy()
-                        .replace('\\', "\\\\")
-                        .replace(['\n', '\r'], "")
-                        .replace('\'', "'\\''");
-                    format!("file '{}'", escaped)
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            tokio::fs::write(&concat_list_path, &concat_content).await?;
 
             channel.send(ProgressEvent::progress(92.0)).ok();
 
-            // Run concat
-            let concat_output = tokio::process::Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-                .arg(concat_list_path.as_os_str())
-                .args(["-codec:a", "libmp3lame", "-q:a", "2"])
-                .arg(final_path.as_os_str())
-                .output()
-                .await;
+            let pack_segments: Vec<crate::tts_pack::SegmentFile> = segment_files
+                .iter()
+                .map(|(idx, path, start, end)| crate::tts_pack::SegmentFile {
+                    index: *idx,
+                    path: path.clone(),
+                    start_seconds: *start,
+                    end_seconds: *end,
+                })
+                .collect();
+
+            let concat_output = crate::tts_pack::concat_narration_segments(
+                &pack_segments,
+                video_dur,
+                &final_path,
+                &out,
+                silence_sample_rate,
+            )
+            .await;
 
             match concat_output {
-                Ok(o) if o.status.success() => {
+                Ok(stats) => {
+                    // Write the narration_timings.json sidecar alongside the
+                    // final mp3 so the burn-subtitles pass can align SRT
+                    // cues to where the narration actually landed (vs. the
+                    // scripted window, which drifts once atempo kicks in or
+                    // a segment overruns past the cap). Best-effort — a
+                    // failure here just means burn falls back to scripted
+                    // timings.
+                    let timings_path = out.join("narration_timings.json");
+                    match serde_json::to_string(&stats.actual_timings) {
+                        Ok(json) => {
+                            if let Err(e) = tokio::fs::write(&timings_path, json).await {
+                                tracing::warn!(
+                                    "Could not write narration_timings.json sidecar: {e}"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "Could not serialize narration_timings.json sidecar: {e}"
+                        ),
+                    }
+
                     results.push(elevenlabs_client::TtsResult {
                         segment_index: 0,
                         file_path: final_path.to_string_lossy().to_string(),
@@ -1518,20 +1437,8 @@ pub async fn generate_tts(
                         error: None,
                     });
                 }
-                Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    tracing::error!("ffmpeg concat failed: {}", &stderr[..stderr.len().min(500)]);
-                    for (idx, path, _, _) in &segment_files {
-                        results.push(elevenlabs_client::TtsResult {
-                            segment_index: *idx,
-                            file_path: path.to_string_lossy().to_string(),
-                            success: true,
-                            error: Some("Concat failed — kept individual file".into()),
-                        });
-                    }
-                }
                 Err(e) => {
-                    tracing::error!("ffmpeg exec failed: {e}");
+                    tracing::error!("ffmpeg concat failed: {e}");
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
                             segment_index: *idx,
@@ -1543,15 +1450,18 @@ pub async fn generate_tts(
                 }
             }
 
-            // Clean up temp files
-            let _ = tokio::fs::remove_file(&concat_list_path).await;
-            for part in &concat_parts {
-                if part.to_string_lossy().contains("_tmp_sil_") {
-                    let _ = tokio::fs::remove_file(part).await;
+            // Clean up temp files. The concat helper wrote these alongside
+            // the final mp3 — names are predictable so a directory sweep is
+            // safe and doesn't require tracking them through the callee.
+            let _ = tokio::fs::remove_file(out.join("_concat_list.txt")).await;
+            if let Ok(mut entries) = tokio::fs::read_dir(&out).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("_tmp_sil_") || name.starts_with("_tmp_seg_") {
+                        let _ = tokio::fs::remove_file(entry.path()).await;
+                    }
                 }
-            }
-            for (_, path, _, _) in &segment_files {
-                let _ = tokio::fs::remove_file(path).await;
             }
         }
     } else {

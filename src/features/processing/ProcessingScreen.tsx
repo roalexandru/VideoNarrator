@@ -214,6 +214,30 @@ export function ProcessingScreen() {
         has_edits: editSnapshot.clips.length > 1 || editSnapshot.clips.some((c) => c.speed !== 1.0),
         frame_density: config.frameDensity,
       });
+
+      // Speech-rate validation breakdown. Tells us how often the WORD BUDGET
+      // prompt guidance actually lands a clean script, so we can measure
+      // whether the upstream fix is pulling its weight or whether most scripts
+      // still need compression/padding at export.
+      const report = script.speech_rate_report;
+      if (report && report.length > 0) {
+        let fit = 0, tight = 0, compress = 0, overflow = 0;
+        for (const o of report) {
+          if (o.severity === "fit") fit++;
+          else if (o.severity === "tight") tight++;
+          else if (o.severity === "compress") compress++;
+          else if (o.severity === "overflow") overflow++;
+        }
+        trackEvent("export_script_validation", {
+          segments_total: report.length,
+          segments_fit: fit,
+          segments_tight: tight,
+          segments_compress: compress,
+          segments_overflow: overflow,
+          language: config.primaryLanguage,
+          style: config.style,
+        });
+      }
     } catch (err: unknown) {
       trackError("generate_narration", err, { provider: config.aiProvider, model: config.model, style: config.style });
       const errMsg = toUserMessage(err);

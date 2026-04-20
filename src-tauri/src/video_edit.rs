@@ -514,16 +514,37 @@ pub async fn merge_audio_video(
 ) -> Result<MergeOutcome, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
+    // If narration audio runs longer than the source video (e.g. a segment
+    // whose TTS couldn't be compressed enough at export-time), extend the
+    // video with a held final frame so the container duration matches audio.
+    // Without this, ffmpeg's default mux behavior produces a container as
+    // long as the longer stream — which, with `-c:v copy`, means the output
+    // plays the last frame frozen until the audio ends, but the container
+    // metadata reports the longer audio duration. That's the "video is twice
+    // as long" bug users observed.
+    let (effective_video_path, _pad_cleanup) =
+        pad_video_to_audio_length(&ffmpeg, video_path, audio_path).await?;
+    let effective_video = effective_video_path.to_string_lossy();
+
     if replace_audio {
         // Replace original audio entirely with narration.
         // Uses -c:v copy so it's fast — no re-encoding needed.
+        //
+        // Deliberately NO -shortest: when narration is shorter than the source
+        // video (the common case when the script fits the timeline), the
+        // trailing silence produced by `tts_pack::concat_narration_segments`
+        // extends the audio up to the script's total duration, but that can
+        // still be ~0.5s below the source-video length. -shortest would cut
+        // the video to match, producing a shorter output than the user
+        // expects. Padding (above) already aligns things when narration is
+        // LONGER than video; we don't need a second guardrail.
         on_progress(0.0, Some("Replacing audio track".to_string()));
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args([
                 "-y",
                 "-i",
-                video_path,
+                effective_video.as_ref(),
                 "-i",
                 audio_path,
                 "-c:v",
@@ -574,7 +595,7 @@ pub async fn merge_audio_video(
                 "-loglevel",
                 "error",
                 "-i",
-                video_path,
+                effective_video.as_ref(),
                 "-i",
                 audio_path,
                 "-c:v",
@@ -685,7 +706,7 @@ pub async fn merge_audio_video(
             "-loglevel",
             "error",
             "-i",
-            video_path,
+            effective_video.as_ref(),
             "-i",
         ])
         .arg(&mixed_wav)
@@ -730,6 +751,94 @@ impl Drop for TempCleanup {
             let _ = std::fs::remove_file(p);
         }
     }
+}
+
+/// If the narration audio is longer than the source video, produce a padded
+/// video whose final frame is held for the overrun duration (ffmpeg's
+/// `tpad=stop_mode=clone`). Returns `(effective_video_path, cleanup_guard)`:
+/// the cleanup guard must stay alive until the mux finishes so the padded
+/// file isn't deleted out from under ffmpeg.
+///
+/// If either duration can't be probed, or if the delta is ≤0.25s, falls back
+/// to the original video path with no cleanup. Sub-second drift in that
+/// direction (audio ~= video) is absorbed naturally by the container: the
+/// shorter stream just has a tiny silent/frozen tail that viewers don't
+/// notice.
+///
+/// Rationale: without padding, ffmpeg `-c:v copy` + longer audio produces a
+/// container whose metadata reports the audio duration, causing playback to
+/// show "video is twice as long". Padding keeps the visible duration equal
+/// to the actual content and makes the ending feel natural (audio finishing
+/// over a held final frame) rather than hacked.
+async fn pad_video_to_audio_length(
+    ffmpeg: &Path,
+    video_path: &str,
+    audio_path: &str,
+) -> Result<(PathBuf, Option<TempCleanup>), NarratorError> {
+    let video_dur = match video_engine::probe_duration(Path::new(video_path)).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Could not probe video duration ({e}), skipping pad check");
+            return Ok((PathBuf::from(video_path), None));
+        }
+    };
+    let audio_dur = match video_engine::probe_duration(Path::new(audio_path)).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("Could not probe audio duration ({e}), skipping pad check");
+            return Ok((PathBuf::from(video_path), None));
+        }
+    };
+    let delta = audio_dur - video_dur;
+    if delta <= 0.25 {
+        return Ok((PathBuf::from(video_path), None));
+    }
+
+    let padded_path =
+        std::env::temp_dir().join(format!("_narrator_padded_{}.mp4", uuid::Uuid::new_v4()));
+    let filter = format!("tpad=stop_mode=clone:stop_duration={delta:.3}");
+    let output = Command::new(ffmpeg)
+        .no_window()
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            video_path,
+            "-vf",
+            &filter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-an",
+        ])
+        .arg(&padded_path)
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(format!("tpad: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "Video padding (tpad) failed, using original video: {}",
+            &stderr[stderr.len().saturating_sub(300)..]
+        );
+        let _ = std::fs::remove_file(&padded_path);
+        return Ok((PathBuf::from(video_path), None));
+    }
+
+    tracing::info!(
+        "Padded video by {:.2}s to fit {:.2}s narration into {:.2}s source",
+        delta,
+        audio_dur,
+        video_dur
+    );
+    let cleanup = TempCleanup(vec![padded_path.clone()]);
+    Ok((padded_path, Some(cleanup)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

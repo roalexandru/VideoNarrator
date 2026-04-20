@@ -29,6 +29,7 @@ use crate::render::{self, ProgressReporter};
 
 mod probe_cmd;
 mod render_cmd;
+mod tts_cmd;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,6 +55,9 @@ pub enum TopCommand {
     /// Probe a media file for metadata.
     #[command(subcommand)]
     Probe(probe_cmd::ProbeCmd),
+    /// Text-to-speech operations using the builtin (free) TTS engine.
+    #[command(subcommand)]
+    Tts(tts_cmd::TtsCmd),
 }
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
@@ -143,6 +147,7 @@ pub async fn dispatch(cli: Cli) -> i32 {
     let result = match cli.command {
         TopCommand::Render(cmd) => render_cmd::run(cmd, cli.progress).await,
         TopCommand::Probe(cmd) => probe_cmd::run(cmd).await,
+        TopCommand::Tts(cmd) => tts_cmd::run(cmd).await,
     };
     match result {
         Ok(value) => {
