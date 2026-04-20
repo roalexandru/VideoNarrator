@@ -404,7 +404,7 @@ mod tests {
         // Should always return at least the default voice
         assert!(!voices.is_empty());
         // The default fallback voice should be present if no system voices found
-        let has_default = voices.iter().any(|v| v.id == "default") || voices.len() > 0;
+        let has_default = voices.iter().any(|v| v.id == "default") || !voices.is_empty();
         assert!(has_default);
     }
 }

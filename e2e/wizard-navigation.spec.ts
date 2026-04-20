@@ -26,7 +26,7 @@ test.describe("Wizard Navigation", () => {
     await expect(page.getByRole("heading", { name: "Project Setup" })).toBeVisible({ timeout: 5000 });
 
     // All step labels in the sidebar nav
-    const stepLabels = ["Project Setup", "Edit Video", "Configuration", "Processing", "Review & Edit", "Export"];
+    const stepLabels = ["Project Setup", "Edit Video", "Configuration", "Processing", "Review", "Export"];
     for (const label of stepLabels) {
       // Use sidebar nav buttons with aria-current attribute (only step buttons have it)
       await expect(page.locator("aside button", { hasText: label }).first()).toBeVisible();

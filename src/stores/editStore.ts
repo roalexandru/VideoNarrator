@@ -33,7 +33,7 @@ export interface TimelineEffect {
   zoomPan?: ZoomPanEffect;
   spotlight?: { x: number; y: number; radius: number; dimOpacity: number };
   blur?: { x: number; y: number; width: number; height: number; radius: number; invert?: boolean };
-  text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: 'left' | 'center' | 'right' };
+  text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: 'left' | 'center' | 'right'; opacity?: number };
   fade?: { color: string; opacity: number };
 }
 
@@ -83,6 +83,9 @@ interface EditStore {
   selectedClipIndex: number | null;
   selectedEffectId: string | null;
   editedVideoPath: string | null;
+  /** Hash of the edit plan (clips + effects) as it was when editedVideoPath
+   *  was produced. Used by Export to detect a stale cache and regenerate. */
+  editedVideoPlanHash: string | null;
   sourceDuration: number;
 
   // Undo/Redo
@@ -108,6 +111,7 @@ interface EditStore {
   addClip: (sourceFile: string, sourceStart: number, sourceEnd: number) => void;
   selectClip: (index: number | null) => void;
   setEditedVideoPath: (path: string | null) => void;
+  setEditedVideoPlanHash: (hash: string | null) => void;
   getOutputDuration: () => number;
   getClipOutputStart: (index: number) => number;
   outputTimeToSource: (outputTime: number) => number;
@@ -161,6 +165,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
   selectedClipIndex: null,
   selectedEffectId: null,
   editedVideoPath: null,
+  editedVideoPlanHash: null,
   sourceDuration: 0,
   undoStack: [],
   redoStack: [],
@@ -196,6 +201,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
       selectedClipIndex: 0,
       selectedEffectId: null,
       editedVideoPath: null,
+      editedVideoPlanHash: null,
       sourceDuration: duration,
       undoStack: [],
       redoStack: [],
@@ -301,6 +307,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
   selectClip: (index) => set({ selectedClipIndex: index, selectedEffectId: null }),
   setEditedVideoPath: (path) => set({ editedVideoPath: path }),
+  setEditedVideoPlanHash: (hash) => set({ editedVideoPlanHash: hash }),
 
   getOutputDuration: () => get().clips.reduce((sum, c) => sum + clipOutputDuration(c), 0),
 
@@ -470,7 +477,23 @@ export const useEditStore = create<EditStore>((set, get) => ({
   updateEffectLive: (id, partial) =>
     set((state) => {
       const snapshot = state._preEffectSnapshot || snapshotState(state);
-      const effects = state.effects.map((e) => e.id === id ? { ...e, ...partial } : e);
+      const effects = state.effects.map((e) => {
+        if (e.id !== id) return e;
+        const merged = { ...e, ...partial };
+        // Prevent the preview from rendering an inverted-range effect during
+        // live drag. If the user drags one edge past the other, clamp to a
+        // minimum 0.1s window — matching the shape commit() would produce.
+        if (merged.startTime >= merged.endTime) {
+          if (partial.startTime !== undefined) {
+            merged.startTime = Math.max(0, merged.endTime - 0.1);
+          } else if (partial.endTime !== undefined) {
+            merged.endTime = merged.startTime + 0.1;
+          } else {
+            return e; // neither bound changed — ignore this partial
+          }
+        }
+        return merged;
+      });
       return { effects, _preEffectSnapshot: snapshot };
     }),
 
@@ -487,5 +510,5 @@ export const useEditStore = create<EditStore>((set, get) => ({
   // Half-open interval [start, end) — avoids double-triggering at seams between adjacent effects
   getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime < e.endTime),
 
-  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
+  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, editedVideoPlanHash: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
 }));

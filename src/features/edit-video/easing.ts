@@ -89,17 +89,38 @@ function interpolateZoom(
 ): { scale: number; tx: number; ty: number } {
   const { startRegion, endRegion } = zoomPan;
 
+  // Defensive: malformed region data (NaN, Infinity) would produce a broken
+  // CSS transform and blank the video preview. Fall back to identity.
+  const fields = [
+    startRegion.x, startRegion.y, startRegion.width, startRegion.height,
+    endRegion.x, endRegion.y, endRegion.width, endRegion.height,
+  ];
+  if (!fields.every((v) => Number.isFinite(v))) {
+    return { scale: 1, tx: 0, ty: 0 };
+  }
+
   const x = startRegion.x + (endRegion.x - startRegion.x) * progress;
   const y = startRegion.y + (endRegion.y - startRegion.y) * progress;
   const w = startRegion.width + (endRegion.width - startRegion.width) * progress;
   const h = startRegion.height + (endRegion.height - startRegion.height) * progress;
 
-  const scaleX = 1 / Math.max(w, 0.01);
-  const scaleY = 1 / Math.max(h, 0.01);
-  const scale = Math.min(scaleX, scaleY);
+  // Clamp region to avoid extreme zoom that makes the preview unusable
+  // (min 5% = 20x zoom max). Also enforce scale >= 1 so we never shrink.
+  const safeW = Math.max(w, 0.05);
+  const safeH = Math.max(h, 0.05);
+  const scale = Math.max(1, Math.min(1 / safeW, 1 / safeH, 20));
 
-  const tx = -x * videoWidth * scale;
-  const ty = -y * videoHeight * scale;
+  // Clamp translate so the visible window always shows part of the image.
+  // Valid range: tx in [-W*(scale-1), 0]. Anything outside pushes the image
+  // entirely off-screen and the preview goes black.
+  const rawTx = -x * videoWidth * scale;
+  const rawTy = -y * videoHeight * scale;
+  const tx = Math.max(-videoWidth * (scale - 1), Math.min(0, rawTx));
+  const ty = Math.max(-videoHeight * (scale - 1), Math.min(0, rawTy));
+
+  if (!Number.isFinite(scale) || !Number.isFinite(tx) || !Number.isFinite(ty)) {
+    return { scale: 1, tx: 0, ty: 0 };
+  }
 
   return { scale, tx, ty };
 }

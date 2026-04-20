@@ -2,7 +2,12 @@ import { useRef, useEffect, useState, useCallback } from "react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
-import { extractEditThumbnails } from "../../lib/tauri/commands";
+import { extractEditThumbnails, applyVideoEdits, openFolder } from "../../lib/tauri/commands";
+import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { computeEditPlanHash } from "../../lib/editPlanHash";
+import { Channel } from "@tauri-apps/api/core";
+import { save as saveDialog, message as showMessage } from "@tauri-apps/plugin-dialog";
+import type { ProgressEvent } from "../../types/processing";
 import { Button } from "../../components/ui/Button";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -23,6 +28,7 @@ const DEFAULT_ZOOM_PAN: ZoomPanEffect = {
 
 export function EditVideoScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
+  const videoAccessError = useProjectStore((s) => s.videoAccessError);
   const projectId = useProjectStore((s) => s.projectId);
   const store = useEditStore();
   const { clips, effects, selectedClipIndex, selectedEffectId, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSpeedLive, commitSpeedChange, setClipSkipFrames, moveClip, selectClip, undo, redo, canUndo, canRedo, insertFreezeFrame, setFreezeDuration, setClipZoomPanLive, commitZoomPanChange, addEffect, removeEffect, updateEffect, updateEffectLive, commitEffectChange, selectEffect } = store;
@@ -64,6 +70,44 @@ export function EditVideoScreen() {
   const src = videoFile?.path ? convertFileSrc(videoFile.path) : undefined;
   const selClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
   const outputDuration = store.getOutputDuration();
+
+  // Debug state — visible in dev builds only, toggled via the "D" key.
+  // Surfaces <video> element diagnostics since WebView devtools is clunky.
+  const [debugPanel, setDebugPanel] = useState(() => {
+    try { return localStorage.getItem("narrator_debug_panel") === "1"; } catch { return false; }
+  });
+  const [videoDiag, setVideoDiag] = useState<{ readyState: number; networkState: number; videoWidth: number; videoHeight: number; currentSrc: string; error: string | null; paused: boolean } | null>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === "d" && (e.ctrlKey || e.metaKey) && e.shiftKey) {
+        e.preventDefault();
+        setDebugPanel((d) => {
+          const next = !d;
+          try { localStorage.setItem("narrator_debug_panel", next ? "1" : "0"); } catch { /* empty */ }
+          return next;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (!debugPanel) return;
+    const id = setInterval(() => {
+      const v = videoRef.current;
+      if (!v) return;
+      setVideoDiag({
+        readyState: v.readyState,
+        networkState: v.networkState,
+        videoWidth: v.videoWidth,
+        videoHeight: v.videoHeight,
+        currentSrc: v.currentSrc || "",
+        error: v.error ? `code=${v.error.code} ${v.error.message}` : null,
+        paused: v.paused,
+      });
+    }, 250);
+    return () => clearInterval(id);
+  }, [debugPanel]);
 
   // Init clips only when no edits exist — preserves edits on navigation
   useEffect(() => {
@@ -111,6 +155,49 @@ export function EditVideoScreen() {
   }, [dragging, clips]);
 
   const [thumbsLoading, setThumbsLoading] = useState(false);
+
+  // Render-edited-video action (secondary "Export video only" button).
+  // This lets the user save the cut+effects video standalone, without going
+  // through narration generation.
+  const [renderProgress, setRenderProgress] = useState<number | null>(null);
+  const handleRenderVideo = useCallback(async () => {
+    if (!videoFile?.path) return;
+    const defaultName = (videoFile.name || "edited").replace(/\.[^.]+$/, "") + "_edited.mp4";
+    const outPath = await saveDialog({
+      defaultPath: defaultName,
+      filters: [{ name: "MP4 Video", extensions: ["mp4"] }],
+    });
+    if (!outPath) return;
+
+    const es = useEditStore.getState();
+    const plan = buildEditPlan(es.clips, es.effects);
+    const ch = new Channel<ProgressEvent>();
+    ch.onmessage = (e: ProgressEvent) => {
+      if (e.kind === "progress") setRenderProgress(e.percent);
+    };
+
+    setRenderProgress(0);
+    try {
+      const result = await applyVideoEdits(videoFile.path, outPath as string, plan, ch);
+      // Also populate the cache so a subsequent Export skips the render.
+      es.setEditedVideoPath(result);
+      es.setEditedVideoPlanHash(computeEditPlanHash(es.clips, es.effects));
+      setRenderProgress(null);
+      // Offer to reveal the file — on macOS this opens Finder to the folder.
+      try {
+        const parent = (outPath as string).split("/").slice(0, -1).join("/");
+        await openFolder(parent);
+      } catch {/* non-critical */}
+      await showMessage(`Rendered: ${outPath}`, { title: "Edited video saved", kind: "info" });
+    } catch (err) {
+      console.error("render video failed:", err);
+      trackError("render_edited_video", err);
+      setRenderProgress(null);
+      await showMessage(String(err).replace(/^(Error: )?/, ""), { title: "Render failed", kind: "error" });
+    }
+  }, [videoFile?.path, videoFile?.name]);
+  const canRender = !!videoFile?.path && (planRequiresRender(clips, effects) ||
+    (clips[0] && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) > 0.5));
 
   // Extract thumbnails
   useEffect(() => {
@@ -469,6 +556,25 @@ export function EditVideoScreen() {
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      {videoAccessError && (
+        <div style={{
+          margin: "0 0 8px 0", padding: "10px 14px",
+          background: "rgba(239,68,68,0.12)",
+          border: "1px solid rgba(239,68,68,0.4)",
+          borderRadius: 8, color: "#fca5a5",
+          fontSize: 12, lineHeight: 1.5,
+        }}>
+          <div style={{ fontWeight: 700, color: "#fecaca", marginBottom: 4 }}>
+            Can't read the video file — preview is blank
+          </div>
+          <div style={{ color: "#fca5a5" }}>
+            {videoAccessError}
+          </div>
+          <div style={{ color: "#f87171", fontSize: 11, marginTop: 6 }}>
+            Path: <code style={{ color: "#fecaca" }}>{videoFile?.path}</code>
+          </div>
+        </div>
+      )}
       {/* VIDEO PLAYER */}
       <div ref={videoContainerRef} onClick={(e) => { if (selectedEffectId && e.target === e.currentTarget) selectEffect(null); }} style={{ borderRadius: 8, overflow: "hidden", background: "#000", flex: 1, minHeight: 100, position: "relative" }}>
         <div style={{
@@ -485,6 +591,37 @@ export function EditVideoScreen() {
         }}>
           <video ref={videoRef} playsInline style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
         </div>
+        {debugPanel && (
+          <div style={{
+            position: "absolute", top: 8, left: 8, zIndex: 20,
+            background: "rgba(0,0,0,0.85)", color: "#0f0",
+            fontFamily: "ui-monospace, SFMono-Regular, monospace",
+            fontSize: 11, padding: "8px 10px", borderRadius: 6,
+            maxWidth: 520, lineHeight: 1.5, pointerEvents: "none",
+            border: "1px solid #0f0",
+          }}>
+            <div style={{ color: "#ff0", fontWeight: 700, marginBottom: 4 }}>
+              VIDEO DEBUG (⌘⇧D to toggle)
+            </div>
+            <div>src: <span style={{ color: "#9ff" }}>{src?.slice(0, 80) || "(none)"}</span></div>
+            <div>videoFile.path: <span style={{ color: "#9ff" }}>{videoFile?.path?.slice(0, 80) || "(none)"}</span></div>
+            {videoDiag && (
+              <>
+                <div>readyState: <span style={{ color: videoDiag.readyState >= 2 ? "#0f0" : "#f55" }}>{videoDiag.readyState}</span> (want ≥2)</div>
+                <div>networkState: {videoDiag.networkState}</div>
+                <div>videoWidth × videoHeight: <span style={{ color: videoDiag.videoWidth > 0 ? "#0f0" : "#f55" }}>{videoDiag.videoWidth} × {videoDiag.videoHeight}</span></div>
+                <div>paused: {String(videoDiag.paused)}</div>
+                <div>currentSrc: <span style={{ color: "#9ff" }}>{videoDiag.currentSrc.slice(0, 80) || "(none)"}</span></div>
+                {videoDiag.error && <div style={{ color: "#f55" }}>ERROR: {videoDiag.error}</div>}
+              </>
+            )}
+            <div style={{ marginTop: 6, borderTop: "1px dashed #0f0", paddingTop: 6 }}>
+              transform.scale: {zoomTransform.scale.toFixed(3)}
+            </div>
+            <div>transform.tx: {zoomTransform.tx.toFixed(1)}  ty: {zoomTransform.ty.toFixed(1)}</div>
+            <div>effects: {effects.length} (clip-level zoomPan: {selClip?.zoomPan ? "yes" : "no"})</div>
+          </div>
+        )}
         {!src && (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.muted, gap: 8 }}>
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5, marginBottom: 4 }}>
@@ -577,6 +714,19 @@ export function EditVideoScreen() {
         <Button variant="secondary" size="sm"
           disabled={clips.length === 1 && clips[0].speed === 1.0 && !clips[0].skipFrames && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) < 0.5}
           onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Revert to Original</Button>
+        {/* Secondary: render the edited video on its own (without narration).
+            Useful for users who just want the cut+effects version. */}
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={!canRender || renderProgress !== null}
+          onClick={handleRenderVideo}
+          title="Render the edited video (cuts + effects) without narration"
+        >
+          {renderProgress !== null
+            ? `Rendering… ${Math.round(renderProgress)}%`
+            : "Render Video"}
+        </Button>
       </div>
 
       {/* RESIZE HANDLE */}

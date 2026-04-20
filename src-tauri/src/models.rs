@@ -211,7 +211,7 @@ pub struct ZoomRegion {
     pub height: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EasingPreset {
     Linear,
@@ -269,6 +269,20 @@ pub struct ProjectConfig {
     pub timeline_effects: Option<serde_json::Value>,
     #[serde(default)]
     pub video_metadata: Option<VideoMetadata>,
+    /// Persisted context documents (PDF/MD/TXT paths + metadata) so the AI
+    /// narration prompt can be regenerated with the same inputs after load.
+    #[serde(default)]
+    pub context_documents: Option<serde_json::Value>,
+    /// Absolute path to the cached edited video (produced by apply_video_edits).
+    /// Exporting uses this file so the final render includes all clip + effect
+    /// edits. Invalidated by a hash mismatch against edit_clips + timeline_effects.
+    #[serde(default)]
+    pub edited_video_path: Option<String>,
+    /// Hash of the edit_clips + timeline_effects used to produce
+    /// `edited_video_path`. If the current edits hash differently, the cached
+    /// video is stale and Export will regenerate it.
+    #[serde(default)]
+    pub edited_video_plan_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

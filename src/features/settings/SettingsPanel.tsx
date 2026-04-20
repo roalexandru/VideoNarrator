@@ -31,6 +31,7 @@ import { useConfigStore } from "../../stores/configStore";
 import { Button } from "../../components/ui/Button";
 import { setTelemetryEnabled as setAnalyticsEnabled, trackEvent, trackError } from "../telemetry/analytics";
 import type { AiProvider, ProviderKeyStatus } from "../../types/config";
+import { DISPLAY_VERSION } from "../../lib/version";
 
 /* ------------------------------------------------------------------ */
 /*  Design tokens                                                      */
@@ -838,7 +839,7 @@ export function SettingsPanel({
             color: C.muted,
           }}
         >
-          Narrator v{__APP_VERSION__}
+          Narrator v{DISPLAY_VERSION}
         </span>
       </div>
     </div>
@@ -996,47 +997,84 @@ export function SettingsPanel({
         {/* Temperature section -- no card border */}
         <div style={{ ...sectionLabel, marginTop: 4 }}>Default Temperature</div>
         <div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 6,
-            }}
-          >
-            <span style={{ fontSize: 13, color: C.dim }}>Creativity</span>
-            <span
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                color: C.text,
-                fontVariantNumeric: "tabular-nums",
-              }}
-            >
-              {temperature.toFixed(1)}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.1}
-            value={temperature}
-            onChange={(e) => setTemperature(parseFloat(e.target.value))}
-            style={{ width: "100%", accentColor: C.accent }}
-          />
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              fontSize: 11,
-              color: C.muted,
-              marginTop: 4,
-            }}
-          >
-            <span>Precise</span>
-            <span>Creative</span>
-          </div>
+          {(() => {
+            // OpenAI reasoning models (o1/o3/o4, gpt-5) reject any user-set
+            // temperature — the API returns HTTP 400 invalid_request_error
+            // if we send one. Disable the slider + show a note so the user
+            // can't set an unusable combo. Matches `is_openai_reasoning_model`
+            // in src-tauri/src/ai_client.rs.
+            const isReasoning =
+              aiProvider === "openai" &&
+              (model.startsWith("o1") ||
+                model.startsWith("o3") ||
+                model.startsWith("o4") ||
+                model.startsWith("gpt-5"));
+            const displayTemp = isReasoning ? 1.0 : temperature;
+            return (
+              <>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 6,
+                  }}
+                >
+                  <span style={{ fontSize: 13, color: C.dim }}>Creativity</span>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: isReasoning ? C.muted : C.text,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {displayTemp.toFixed(1)}
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.1}
+                  value={displayTemp}
+                  disabled={isReasoning}
+                  onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                  style={{
+                    width: "100%",
+                    accentColor: C.accent,
+                    opacity: isReasoning ? 0.4 : 1,
+                    cursor: isReasoning ? "not-allowed" : "pointer",
+                  }}
+                />
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: 11,
+                    color: C.muted,
+                    marginTop: 4,
+                  }}
+                >
+                  <span>Precise</span>
+                  <span>Creative</span>
+                </div>
+                {isReasoning && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: C.muted,
+                      marginTop: 8,
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    Reasoning models (o1/o3/o4, GPT-5) don't support
+                    custom temperature — they always run at the default.
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       </div>
     );

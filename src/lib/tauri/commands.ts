@@ -28,6 +28,18 @@ export const validateApiKey = (provider: AiProvider, key: string) =>
 export const probeVideo = (path: string) =>
   invoke<VideoMetadata>("probe_video", { path });
 
+/**
+ * Verify the app can actually read the file (surfaces macOS TCC denials
+ * which otherwise manifest as a silent black preview).
+ */
+export const checkFileReadable = (path: string) =>
+  invoke<boolean>("check_file_readable", { path });
+
+/** Cheap existence check. Used by Export to decide whether the cached
+ *  edited video needs regenerating. */
+export const fileExists = (path: string) =>
+  invoke<boolean>("file_exists", { path });
+
 // Documents
 export const processDocuments = (paths: string[]) =>
   invoke<{ name: string; content: string; token_estimate: number }[]>(
@@ -65,6 +77,23 @@ export const refineSegment = (
     instruction,
     context,
     aiConfig,
+  });
+
+/** Rewrite the entire narration script with a user instruction.
+ *  Preserves timestamps + style; stays grounded in visual descriptions. */
+export const refineScript = (
+  script: NarrationScript,
+  instruction: string,
+  aiConfig: AiConfig,
+  styleHint?: string,
+  customPrompt?: string,
+) =>
+  invoke<NarrationScript>("refine_script", {
+    script,
+    instruction,
+    aiConfig,
+    styleHint,
+    customPrompt,
   });
 
 // Projects
@@ -135,6 +164,14 @@ export interface LoadedProject {
     }[];
     timeline_effects?: unknown[];
     video_metadata?: VideoMetadata;
+    context_documents?: { id: string; path: string; name: string; size: number; type: string; tokenCount?: number }[];
+    /**
+     * Path to the cached edited video produced by the last applyVideoEdits call.
+     * Export uses this as the source; if missing or the hash doesn't match
+     * the current edit plan, Export regenerates it.
+     */
+    edited_video_path?: string;
+    edited_video_plan_hash?: string;
   };
   scripts: Record<string, import("../../types/script").NarrationScript>;
 }
@@ -163,6 +200,21 @@ export interface VideoEditPlan {
     clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
     zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
   }[];
+  // Rust overlay effect structs use #[serde(rename_all = "camelCase")] so
+  // these keys MUST be camelCase. Keep in sync with OverlayEffect in video_edit.rs.
+  effects?: {
+    type: string;
+    startTime: number;
+    endTime: number;
+    transitionIn?: number;
+    transitionOut?: number;
+    reverse?: boolean;
+    spotlight?: { x: number; y: number; radius: number; dimOpacity: number };
+    blur?: { x: number; y: number; width: number; height: number; radius: number; invert?: boolean };
+    text?: { content: string; x: number; y: number; fontSize: number; color: string; fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string; opacity?: number };
+    fade?: { color: string; opacity: number };
+    zoomPan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string };
+  }[];
 }
 export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel });
@@ -172,6 +224,9 @@ export const extractEditThumbnails = (videoPath: string, outputDir: string, coun
 
 export const extractSingleFrame = (videoPath: string, timestamp: number, outputPath: string) =>
   invoke<string>("extract_single_frame", { videoPath, timestamp, outputPath });
+
+export const saveScript = (projectId: string, language: string, script: import("../../types/script").NarrationScript) =>
+  invoke<string>("save_script", { projectId, language, script });
 
 export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel });

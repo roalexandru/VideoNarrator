@@ -106,7 +106,8 @@ pub fn export_ssml(script: &NarrationScript) -> String {
     };
 
     let mut output = format!(
-        "<speak version=\"1.1\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"{lang}\">\n"
+        "<speak version=\"1.1\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"{}\">\n",
+        xml_escape(lang)
     );
 
     for segment in &script.segments {
@@ -118,13 +119,16 @@ pub fn export_ssml(script: &NarrationScript) -> String {
 
         output.push_str(&format!("  <prosody rate=\"{rate}\">\n"));
 
-        // Apply emphasis to marked words
-        let mut text = segment.text.clone();
+        // Escape XML special chars first, then wrap emphasized words.
+        // Emphasis uses word boundaries to avoid matching substrings inside other words.
+        let escaped = xml_escape(&segment.text);
+        let mut text = escaped.into_owned();
         for word in &segment.emphasis {
-            text = text.replace(
-                word,
-                &format!("<emphasis level=\"moderate\">{word}</emphasis>"),
-            );
+            if word.trim().is_empty() {
+                continue;
+            }
+            let escaped_word = xml_escape(word);
+            text = wrap_emphasis(&text, &escaped_word);
         }
 
         output.push_str(&format!("    {text}\n"));
@@ -140,6 +144,59 @@ pub fn export_ssml(script: &NarrationScript) -> String {
 
     output.push_str("</speak>\n");
     output
+}
+
+/// XML-escape the five reserved characters. Returns a borrowed slice when no
+/// escape is needed to avoid unnecessary allocations.
+fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(|c| matches!(c, '<' | '>' | '&' | '"' | '\'')) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            other => out.push(other),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Wrap `word` in the emphasis tag, matching whole words only.
+/// Avoids the substring-match pitfall (e.g. "the" inside "bathed").
+fn wrap_emphasis(text: &str, word: &str) -> String {
+    if word.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0usize;
+    let bytes = text.as_bytes();
+    let word_bytes = word.as_bytes();
+    let word_len = word_bytes.len();
+    let mut i = 0;
+    let is_word_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+    while i + word_len <= bytes.len() {
+        if &bytes[i..i + word_len] == word_bytes {
+            let prev_ok = i == 0 || !is_word_char(bytes[i - 1]);
+            let next_ok = i + word_len == bytes.len() || !is_word_char(bytes[i + word_len]);
+            if prev_ok && next_ok {
+                out.push_str(&text[last..i]);
+                out.push_str("<emphasis level=\"moderate\">");
+                out.push_str(word);
+                out.push_str("</emphasis>");
+                i += word_len;
+                last = i;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 // ── Time formatting helpers ──
@@ -464,5 +521,140 @@ mod tests {
         assert!(ssml.contains("<speak"));
         assert!(ssml.contains("</speak>"));
         assert!(!ssml.contains("<prosody"));
+    }
+
+    // ── Unicode + special char edge cases ──────────────────────────────
+
+    fn make_script(segments: Vec<(&str, Vec<&str>)>) -> NarrationScript {
+        NarrationScript {
+            title: "T".into(),
+            total_duration_seconds: 30.0,
+            segments: segments
+                .into_iter()
+                .enumerate()
+                .map(|(i, (text, emph))| Segment {
+                    index: i,
+                    start_seconds: i as f64 * 3.0,
+                    end_seconds: (i + 1) as f64 * 3.0,
+                    text: text.into(),
+                    visual_description: String::new(),
+                    emphasis: emph.into_iter().map(String::from).collect(),
+                    pace: Pace::Medium,
+                    pause_after_ms: 0,
+                    frame_refs: vec![],
+                    voice_override: None,
+                })
+                .collect(),
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "mock-v1".into(),
+                generated_at: "2026-01-01T00:00:00Z".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_ssml_escapes_xml_special_chars() {
+        let script = make_script(vec![("Save <file> & test", vec![])]);
+        let ssml = export_ssml(&script);
+        assert!(ssml.contains("Save &lt;file&gt; &amp; test"));
+        // Must produce valid XML — no raw < inside prosody content
+        assert!(!ssml.contains("Save <file>"));
+    }
+
+    #[test]
+    fn test_ssml_emphasis_matches_whole_words_only() {
+        // Emphasis "the" should NOT match inside "bathed" or "theory"
+        let script = make_script(vec![("bathed theory of the system", vec!["the"])]);
+        let ssml = export_ssml(&script);
+        assert!(
+            ssml.contains("of <emphasis level=\"moderate\">the</emphasis> system"),
+            "standalone 'the' should be wrapped: {ssml}"
+        );
+        assert!(
+            !ssml.contains("ba<emphasis"),
+            "substring inside 'bathed' should NOT be wrapped: {ssml}"
+        );
+    }
+
+    #[test]
+    fn test_ssml_emphasis_empty_word_ignored() {
+        let script = make_script(vec![("some text", vec!["", "   "])]);
+        let ssml = export_ssml(&script);
+        assert!(!ssml.contains("<emphasis"));
+    }
+
+    #[test]
+    fn test_ssml_unicode_text_preserved() {
+        let script = make_script(vec![("こんにちは 🎬 world", vec!["world"])]);
+        let ssml = export_ssml(&script);
+        assert!(ssml.contains("こんにちは"));
+        assert!(ssml.contains("🎬"));
+        assert!(ssml.contains("<emphasis level=\"moderate\">world</emphasis>"));
+    }
+
+    #[test]
+    fn test_srt_format_handles_long_durations() {
+        let t = format_srt_time(3661.500); // 1h 1m 1.5s
+        assert_eq!(t, "01:01:01,500");
+    }
+
+    #[test]
+    fn test_srt_format_zero_and_sub_second() {
+        assert_eq!(format_srt_time(0.0), "00:00:00,000");
+        assert_eq!(format_srt_time(0.5), "00:00:00,500");
+    }
+
+    #[test]
+    fn test_vtt_format_uses_dot_separator() {
+        assert_eq!(format_vtt_time(65.250), "00:01:05.250");
+    }
+
+    #[test]
+    fn test_markdown_escapes_pipes() {
+        let script = make_script(vec![("text with | pipe", vec![])]);
+        let md = export_markdown(&script);
+        assert!(md.contains("text with \\| pipe"));
+    }
+
+    #[test]
+    fn test_srt_preserves_unicode_segment_text() {
+        let script = make_script(vec![("日本語 セグメント", vec![])]);
+        let srt = export_srt(&script);
+        assert!(srt.contains("日本語 セグメント"));
+    }
+
+    #[test]
+    fn test_xml_escape_borrowed_when_clean() {
+        let input = "clean text";
+        let output = xml_escape(input);
+        // No escape needed → borrowed (no allocation)
+        assert!(matches!(output, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(output, "clean text");
+    }
+
+    #[test]
+    fn test_xml_escape_all_reserved() {
+        let input = "<>&\"'";
+        let output = xml_escape(input);
+        assert_eq!(output, "&lt;&gt;&amp;&quot;&apos;");
+    }
+
+    #[test]
+    fn test_wrap_emphasis_preserves_punctuation() {
+        // Emphasis word next to punctuation should still match
+        let out = wrap_emphasis("hello, world!", "world");
+        assert_eq!(out, "hello, <emphasis level=\"moderate\">world</emphasis>!");
+    }
+
+    #[test]
+    fn test_wrap_emphasis_multiple_occurrences() {
+        let out = wrap_emphasis("the cat and the dog", "the");
+        assert_eq!(
+            out,
+            "<emphasis level=\"moderate\">the</emphasis> cat and <emphasis level=\"moderate\">the</emphasis> dog"
+        );
     }
 }

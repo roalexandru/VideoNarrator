@@ -2,6 +2,11 @@ import { vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import { mockIPC } from "@tauri-apps/api/mocks";
 
+// Force production-mode env so tests exercise prod code paths (auto-update check,
+// plain version string). Individual tests can `vi.stubEnv("DEV", true)` to cover dev.
+vi.stubEnv("DEV", false);
+vi.stubEnv("PROD", true);
+
 // Polyfill scrollIntoView for jsdom (not implemented)
 if (typeof Element.prototype.scrollIntoView !== "function") {
   Element.prototype.scrollIntoView = vi.fn();
@@ -251,6 +256,9 @@ export function setupDefaultMocks() {
       case "extract_single_frame":
         return "/tmp/frame.jpg";
 
+      case "save_script":
+        return "/tmp/script.json";
+
       case "apply_video_edits":
         return "/tmp/edited.mp4";
 
@@ -306,6 +314,17 @@ export function setupDefaultMocks() {
 
       case "refine_segment":
         return "This is the refined segment text.";
+
+      case "refine_script":
+        return {
+          title: "Refined Narration",
+          total_duration_seconds: 30,
+          segments: [
+            { index: 0, start_seconds: 0, end_seconds: 15, text: "Refined opener.", visual_description: "Title screen", emphasis: [], pace: "medium", pause_after_ms: 500, frame_refs: [0, 1] },
+            { index: 1, start_seconds: 15, end_seconds: 30, text: "Refined close.", visual_description: "Feature overview", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [2, 3] },
+          ],
+          metadata: { style: "product_demo", language: "en", provider: "claude", model: "claude-sonnet-4-20250514", generated_at: "2026-04-03T14:00:00Z" },
+        };
 
       case "export_project":
         return null;

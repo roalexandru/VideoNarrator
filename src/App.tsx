@@ -204,6 +204,10 @@ export default function App() {
     const cs = useConfigStore.getState();
     const es = useEditStore.getState();
     const now = new Date().toISOString();
+    if (ps.contextDocuments.length > 0) {
+      console.log("[save] context_documents count:", ps.contextDocuments.length,
+        "names:", ps.contextDocuments.map((d) => d.name));
+    }
     const editClips = es.clips.length > 0 ? es.clips.map((c) => ({
       source_start: c.sourceStart,
       source_end: c.sourceEnd,
@@ -251,6 +255,13 @@ export default function App() {
         fps: ps.videoFile.fps,
         file_size: ps.videoFile.size,
       } : null,
+      // Persist context documents so they survive reload and stay wired to
+      // the next AI generation.
+      context_documents: ps.contextDocuments.length > 0 ? ps.contextDocuments : null,
+      // Persist the path to the cached edited video + its edit-plan hash so
+      // Export can detect stale cache and regenerate before muxing audio.
+      edited_video_path: es.editedVideoPath,
+      edited_video_plan_hash: es.editedVideoPlanHash,
     };
   }, []);
 
@@ -300,6 +311,29 @@ export default function App() {
       if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
     };
   }, [view, projectId, videoFile, title, description, contextDocuments, configStyle, configLanguages, configProvider, configModel, editClips, editEffects, buildSavePayload]);
+
+  // ── Auto-save scripts (narration edits) whenever they change ──
+  const scripts = useScriptStore((s) => s.scripts);
+  const scriptsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (view !== "editor" || !projectId) return;
+    if (Object.keys(scripts).length === 0) return;
+    if (scriptsSaveTimer.current) clearTimeout(scriptsSaveTimer.current);
+    scriptsSaveTimer.current = setTimeout(async () => {
+      try {
+        const { saveScript } = await import("./lib/tauri/commands");
+        for (const [lang, script] of Object.entries(scripts)) {
+          await saveScript(projectId, lang, script);
+        }
+      } catch (err: unknown) {
+        console.error("Script auto-save failed:", err);
+        trackError("script_auto_save", err);
+      }
+    }, 2000);
+    return () => {
+      if (scriptsSaveTimer.current) clearTimeout(scriptsSaveTimer.current);
+    };
+  }, [view, projectId, scripts]);
 
   // ── Listen for native menu events from the Rust backend ──
   useEffect(() => {
@@ -363,6 +397,25 @@ export default function App() {
       ps.setDescription(cfg.description);
       ps.setCreatedAt(cfg.created_at);
 
+      // Restore context documents so the Setup panel shows them and AI
+      // generation continues to use the same sources.
+      console.log("[load] cfg.context_documents:", cfg.context_documents);
+      if (cfg.context_documents && cfg.context_documents.length > 0) {
+        const docs = cfg.context_documents
+          .filter((d) => d && d.path)
+          .map((d) => ({
+            id: d.id || crypto.randomUUID(),
+            path: d.path,
+            name: d.name || d.path.split("/").pop() || "document",
+            size: d.size || 0,
+            type: (["md", "txt", "pdf"].includes(d.type) ? d.type : "txt") as "md" | "txt" | "pdf",
+            tokenCount: d.tokenCount,
+          }));
+        ps.setDocuments(docs);
+      } else {
+        ps.setDocuments([]);
+      }
+
       // Use cached video metadata if available; only probe as a fallback
       const cachedMeta = cfg.video_metadata;
       if (cachedMeta) {
@@ -374,6 +427,20 @@ export default function App() {
           resolution: { width: cachedMeta.width, height: cachedMeta.height },
           codec: cachedMeta.codec, fps: cachedMeta.fps,
         });
+        // Verify the OS actually lets the app read this file. When cached
+        // metadata is used we skip `probeVideo` (which would have surfaced
+        // the error via ffmpeg), so we need an explicit read-check here.
+        // This converts a silent black preview into a visible banner
+        // telling the user what's wrong.
+        try {
+          const { checkFileReadable } = await import("./lib/tauri/commands");
+          await checkFileReadable(cleanedPath);
+          ps.setVideoAccessError(null);
+        } catch (err) {
+          const msg = String(err).replace(/^(Error: )?/, "");
+          console.warn("[load] video file read check failed:", msg);
+          ps.setVideoAccessError(msg);
+        }
       } else {
         try {
           const meta = await probeVideo(cfg.video_path);
@@ -454,6 +521,26 @@ export default function App() {
           return true;
         });
         useEditStore.setState({ effects: validated });
+      }
+
+      // Restore cached edited video path + plan hash so Export can reuse the
+      // rendered file. We only restore the path if the file still exists on
+      // disk; otherwise Export will detect the miss and regenerate.
+      if (cfg.edited_video_path) {
+        try {
+          const { fileExists } = await import("./lib/tauri/commands");
+          const stillOnDisk = await fileExists(cfg.edited_video_path);
+          if (stillOnDisk) {
+            useEditStore.setState({
+              editedVideoPath: cfg.edited_video_path,
+              editedVideoPlanHash: cfg.edited_video_plan_hash ?? null,
+            });
+          } else {
+            console.log("[load] cached edited video missing on disk, will regenerate on export");
+          }
+        } catch (err) {
+          console.warn("[load] failed to check edited video:", err);
+        }
       }
 
       const ss = useScriptStore.getState();

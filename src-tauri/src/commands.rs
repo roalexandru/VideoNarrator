@@ -3,6 +3,7 @@
 use crate::error::NarratorError;
 use crate::models::*;
 use crate::process_utils::CommandNoWindow;
+use crate::render;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
@@ -84,22 +85,48 @@ fn load_config() -> PersistentConfig {
 fn save_config(config: &PersistentConfig) -> Result<(), NarratorError> {
     let path = config_path();
     let json = serde_json::to_string_pretty(config)?;
-    // Write atomically with restrictive permissions from the start
+    // Write atomically via temp file + rename. Set 0o600 on the temp file
+    // BEFORE the rename so the final file is never briefly world-readable.
     #[cfg(unix)]
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)?;
-        file.write_all(json.as_bytes())?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| NarratorError::ProjectError("config path has no parent".into()))?;
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("config.json");
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let tmp = parent.join(format!(".{file_name}.tmp.{nonce}"));
+        let write_result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&tmp, &path)
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        write_result?;
     }
     #[cfg(not(unix))]
     {
-        std::fs::write(&path, json)?;
+        crate::project_store::atomic_write(&path, json.as_bytes())?;
     }
     Ok(())
 }
@@ -357,6 +384,60 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     // Strip \\?\ extended-length path prefix that Windows canonicalize adds
     let resolved = strip_extended_path_prefix(&resolved);
     video_engine::probe_video(&resolved).await
+}
+
+/// Return whether a file exists at the given path. Used by Export to detect
+/// a missing cached edited video and trigger regeneration.
+#[tauri::command]
+pub fn file_exists(path: String) -> bool {
+    std::path::Path::new(&path).is_file()
+}
+
+/// Check whether the app can actually read the given file path. On macOS,
+/// this surfaces TCC denials (Documents/Desktop/Downloads folder permissions)
+/// as a clear error instead of a silent black video preview.
+#[tauri::command]
+pub async fn check_file_readable(path: String) -> Result<bool, NarratorError> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(NarratorError::VideoProbeError(format!(
+            "File not found: {path}"
+        )));
+    }
+    // Attempt an actual read of the first byte. Just checking metadata is
+    // insufficient because macOS TCC allows stat() but blocks read().
+    match tokio::fs::File::open(p).await {
+        Ok(mut f) => {
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 1];
+            match f.read(&mut buf).await {
+                Ok(_) => Ok(true),
+                Err(e) if e.raw_os_error() == Some(1) => {
+                    // errno 1 = EPERM on macOS → TCC denial
+                    Err(NarratorError::VideoProbeError(
+                        "macOS has denied access to this file. Go to System Settings → \
+                         Privacy & Security → Files and Folders, and enable access for Narrator \
+                         (Documents / Desktop / Downloads as applicable). Or move the file to \
+                         ~/Downloads or ~/Videos which don't need special permission."
+                            .into(),
+                    ))
+                }
+                Err(e) => Err(NarratorError::VideoProbeError(format!(
+                    "Cannot read file: {e}"
+                ))),
+            }
+        }
+        Err(e) if e.raw_os_error() == Some(1) => Err(NarratorError::VideoProbeError(
+            "macOS has denied access to this file. Go to System Settings → \
+             Privacy & Security → Files and Folders, and enable access for Narrator \
+             (Documents / Desktop / Downloads as applicable). Or move the file to \
+             ~/Downloads or ~/Videos which don't need special permission."
+                .into(),
+        )),
+        Err(e) => Err(NarratorError::VideoProbeError(format!(
+            "Cannot open file: {e}"
+        ))),
+    }
 }
 
 // ── Document commands ──
@@ -631,6 +712,17 @@ pub async fn generate_narration(
         video_metadata: existing_config
             .as_ref()
             .and_then(|c| c.video_metadata.clone()),
+        // Preserve context documents across regenerations
+        context_documents: existing_config
+            .as_ref()
+            .and_then(|c| c.context_documents.clone()),
+        // Preserve the cached-edited-video path + its hash
+        edited_video_path: existing_config
+            .as_ref()
+            .and_then(|c| c.edited_video_path.clone()),
+        edited_video_plan_hash: existing_config
+            .as_ref()
+            .and_then(|c| c.edited_video_plan_hash.clone()),
     };
     if let Err(e) = project_store::create_project(&project_config) {
         tracing::warn!("Failed to auto-save project: {e}");
@@ -675,6 +767,35 @@ pub async fn refine_segment(
     drop(keys);
     let provider = ai_client::create_provider(&ai_config, api_key);
     ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await
+}
+
+/// Whole-script AI refinement. Rewrites the entire narration to satisfy a
+/// user instruction while preserving timeline structure and style.
+#[tauri::command]
+pub async fn refine_script(
+    state: tauri::State<'_, AppState>,
+    script: NarrationScript,
+    instruction: String,
+    ai_config: AiConfig,
+    style_hint: Option<String>,
+    custom_prompt: Option<String>,
+) -> Result<NarrationScript, NarratorError> {
+    let keys = state.api_keys.lock().await;
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
+    drop(keys);
+    let provider = ai_client::create_provider(&ai_config, api_key);
+    let style = style_hint.as_deref().unwrap_or("professional narration");
+    ai_client::refine_script(
+        provider.as_ref(),
+        &script,
+        &instruction,
+        style,
+        custom_prompt.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1570,6 +1691,14 @@ pub fn get_recordings_directory() -> Result<String, NarratorError> {
 
 // ── Video edit commands ──
 
+/// Wrap a Tauri progress channel as a `ProgressReporter` so render functions
+/// don't need to know about Tauri.
+fn channel_reporter(channel: Channel<ProgressEvent>) -> Arc<dyn render::ProgressReporter> {
+    Arc::new(render::FnReporter(move |event| {
+        channel.send(event).ok();
+    }))
+}
+
 #[tauri::command]
 pub async fn apply_video_edits(
     input_path: String,
@@ -1577,10 +1706,7 @@ pub async fn apply_video_edits(
     edits: video_edit::VideoEditPlan,
     channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::apply_edits(&input_path, &output_path, &edits, |pct| {
-        channel.send(ProgressEvent::Progress { percent: pct }).ok();
-    })
-    .await
+    render::apply_edits(&input_path, &output_path, &edits, channel_reporter(channel)).await
 }
 
 #[tauri::command]
@@ -1589,7 +1715,7 @@ pub async fn extract_edit_thumbnails(
     output_dir: String,
     count: usize,
 ) -> Result<Vec<String>, NarratorError> {
-    video_edit::extract_edit_thumbnails(&video_path, &output_dir, count).await
+    render::extract_edit_thumbnails(&video_path, &output_dir, count).await
 }
 
 #[tauri::command]
@@ -1598,7 +1724,16 @@ pub async fn extract_single_frame(
     timestamp: f64,
     output_path: String,
 ) -> Result<String, NarratorError> {
-    video_edit::extract_single_frame(&video_path, timestamp, &output_path).await
+    render::extract_single_frame(&video_path, timestamp, &output_path).await
+}
+
+#[tauri::command]
+pub fn save_script(
+    project_id: String,
+    language: String,
+    script: crate::models::NarrationScript,
+) -> Result<String, NarratorError> {
+    project_store::save_script(&project_id, &language, &script)
 }
 
 #[tauri::command]
@@ -1609,14 +1744,12 @@ pub async fn merge_audio_video(
     replace_audio: bool,
     channel: Channel<ProgressEvent>,
 ) -> Result<String, NarratorError> {
-    video_edit::merge_audio_video(
+    render::merge_audio_video(
         &video_path,
         &audio_path,
         &output_path,
         replace_audio,
-        |pct| {
-            channel.send(ProgressEvent::Progress { percent: pct }).ok();
-        },
+        channel_reporter(channel),
     )
     .await
 }
@@ -1751,14 +1884,12 @@ pub async fn burn_subtitles(
     let srt_path = out_dir.join("_temp_subtitles.srt");
     tokio::fs::write(&srt_path, &srt_content).await?;
 
-    let result = video_edit::burn_subtitles(
+    let result = render::burn_subtitles(
         &video_path,
         &srt_path.to_string_lossy(),
         &output_path,
         &style,
-        |pct| {
-            channel.send(ProgressEvent::Progress { percent: pct }).ok();
-        },
+        channel_reporter(channel),
     )
     .await;
 

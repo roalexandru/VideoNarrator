@@ -3,8 +3,9 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore } from "../../stores/editStore";
 import { useConfigStore } from "../../stores/configStore";
+import { useWizardStore } from "../../hooks/useWizardNavigation";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, refineScript, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { showToast } from "../../components/ui/Toast";
@@ -33,6 +34,7 @@ const REFINE_PRESETS = [
 
 export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
+  const currentStep = useWizardStore((s) => s.currentStep);
   const editedVideoPath = useEditStore((s) => s.editedVideoPath);
   const projectId = useProjectStore((s) => s.projectId);
   const configLanguages = useConfigStore((s) => s.languages);
@@ -73,6 +75,53 @@ export function ReviewScreen() {
   const aiProvider = useConfigStore((s) => s.aiProvider);
   const aiModel = useConfigStore((s) => s.model);
   const aiTemperature = useConfigStore((s) => s.temperature);
+  const configStyle = useConfigStore((s) => s.style);
+  const customPrompt = useConfigStore((s) => s.customPrompt);
+
+  // Whole-script AI refinement — user-driven rewrite over the entire script.
+  const [showRefineAll, setShowRefineAll] = useState(false);
+  const [refineAllInstruction, setRefineAllInstruction] = useState("");
+  const [refineAllLoading, setRefineAllLoading] = useState(false);
+
+  const REFINE_ALL_PRESETS: { label: string; instruction: string }[] = [
+    { label: "More concise", instruction: "Tighten the whole script — remove redundant words and filler. Keep the same information but make each segment more punchy and economical." },
+    { label: "More technical", instruction: "Rewrite the narration to be more technically precise. Use the correct terminology shown on screen (API names, commands, concepts). Assume a developer audience." },
+    { label: "Simpler language", instruction: "Rewrite for a non-technical audience. Simpler vocabulary, shorter sentences, and explain jargon when it first appears." },
+    { label: "More conversational", instruction: "Make the tone more conversational and human. Use contractions, direct address (\"you\"), and natural transitions." },
+    { label: "Cut 30%", instruction: "Reduce the overall word count by roughly 30% while preserving the full narrative. Merge or tighten segments where possible without changing timestamps." },
+    { label: "Fix inconsistencies", instruction: "Review the script for duplicate information, contradictions, or awkward transitions. Consolidate repeated content and smooth transitions between segments." },
+  ];
+
+  const handleRefineAll = useCallback(async () => {
+    const instr = refineAllInstruction.trim();
+    if (!instr || !script || refineAllLoading) return;
+    setRefineAllLoading(true);
+    try {
+      const result = await refineScript(
+        script,
+        instr,
+        { provider: aiProvider, model: aiModel, temperature: aiTemperature },
+        configStyle,
+        customPrompt || undefined,
+      );
+      setScript(activeLanguage, result);
+      setShowRefineAll(false);
+      setRefineAllInstruction("");
+      showToast("Script refined", "success");
+      trackEvent("script_refined_whole", {
+        provider: aiProvider,
+        model: aiModel,
+        instruction_length: instr.length,
+        before_segments: script.segments.length,
+        after_segments: result.segments.length,
+      });
+    } catch (err) {
+      console.error("Whole-script refinement failed:", err);
+      showToast(`Refinement failed: ${String(err).replace(/^(Error: )?/, "")}`, "error");
+    } finally {
+      setRefineAllLoading(false);
+    }
+  }, [refineAllInstruction, refineAllLoading, script, aiProvider, aiModel, aiTemperature, configStyle, customPrompt, activeLanguage, setScript]);
 
   const handleTranslate = useCallback(async () => {
     if (!translateLang || !script || translating) return;
@@ -268,7 +317,8 @@ export function ReviewScreen() {
     return () => window.removeEventListener("keydown", handler);
   }, [canUndo, canRedo, undo, redo]);
 
-  // Use edited video for review — narration timestamps match the edited timeline
+  // Review plays the edited video so the user sees the same output that will
+  // be exported (speed changes, zooms, effects baked in).
   const videoPath = editedVideoPath || videoFile?.path;
   const src = videoPath ? convertFileSrc(videoPath) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
@@ -297,7 +347,11 @@ export function ReviewScreen() {
   }, [segments, setActiveSegment]);
 
   const handlePreview = useCallback(async (segmentIndex: number) => {
-    // Stop any currently playing preview
+    // Stop the full preview if it's running — prevents parallel audio playback
+    if (previewMode) {
+      stopFullPreview();
+    }
+    // Stop any currently playing individual preview
     if (previewAudioRef.current) {
       previewAudioRef.current.pause();
       previewAudioRef.current = null;
@@ -356,17 +410,42 @@ export function ReviewScreen() {
       console.error("Preview failed:", err);
       setPreviewingIdx(null);
     }
-  }, [segments, previewingIdx, previewVoice]);
+  }, [segments, previewingIdx, previewVoice, previewMode, stopFullPreview]);
 
-  // Cleanup preview audio on unmount
+  // Cleanup all preview audio on unmount
   useEffect(() => {
     return () => {
       if (previewAudioRef.current) {
         previewAudioRef.current.pause();
         previewAudioRef.current = null;
       }
+      // Stop full preview loop
+      previewAbortRef.current = true;
+      if (fullPreviewAudioRef.current) {
+        fullPreviewAudioRef.current.pause();
+        fullPreviewAudioRef.current = null;
+      }
     };
   }, []);
+
+  // Stop all audio when user navigates to a different wizard step
+  // (Review is step 4; any other step should stop playback since the component may stay mounted)
+  useEffect(() => {
+    if (currentStep !== 4) {
+      previewAbortRef.current = true;
+      if (fullPreviewAudioRef.current) {
+        fullPreviewAudioRef.current.pause();
+        fullPreviewAudioRef.current = null;
+      }
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+      setPreviewMode(false);
+      setPreviewSegIdx(-1);
+      setPreviewingIdx(null);
+    }
+  }, [currentStep]);
 
   // Load video
   useEffect(() => {
@@ -417,7 +496,7 @@ export function ReviewScreen() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review & Edit</h2>
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: C.text, margin: 0 }}>Review</h2>
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", borderRadius: 7, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}` }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={C.muted} strokeWidth="2" strokeLinecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/></svg>
             <select
@@ -458,37 +537,112 @@ export function ReviewScreen() {
             </div>
           )}
           {script && (
-            <div style={{ position: "relative" }}>
-              <button onClick={() => setShowTranslate(!showTranslate)} style={{
-                padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`, fontFamily: "inherit",
-                background: showTranslate ? "rgba(99,102,241,0.1)" : "transparent",
-                color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer",
-              }}>+ Translate</button>
-              {showTranslate && (
-                <div style={{
-                  position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
-                  background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
-                  padding: 12, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-                }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Translate to:</div>
-                  <select value={translateLang} onChange={(e) => setTranslateLang(e.target.value)} style={{
-                    width: "100%", padding: "6px 8px", borderRadius: 6, fontSize: 12, fontFamily: "inherit",
-                    background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`, color: C.text, outline: "none", marginBottom: 8,
+            <>
+              <div style={{ position: "relative" }}>
+                <button onClick={() => { setShowRefineAll(!showRefineAll); setShowTranslate(false); }} style={{
+                  padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`, fontFamily: "inherit",
+                  background: showRefineAll ? "rgba(99,102,241,0.1)" : "transparent",
+                  color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                }} title="Rewrite the entire script with a single instruction">✨ Refine with AI</button>
+                {showRefineAll && (
+                  <div style={{
+                    position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
+                    background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
+                    padding: 14, width: 380, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
                   }}>
-                    <option value="">Select language...</option>
-                    {AVAILABLE_LANGUAGES.filter((l) => !scripts[l.code]).map((l) => (
-                      <option key={l.code} value={l.code}>{l.label}</option>
-                    ))}
-                  </select>
-                  <button onClick={handleTranslate} disabled={!translateLang || translating} style={{
-                    width: "100%", padding: "6px 0", borderRadius: 6, border: "none", fontFamily: "inherit",
-                    background: translateLang ? "linear-gradient(135deg,#6366f1,#8b5cf6)" : "rgba(255,255,255,0.05)",
-                    color: translateLang ? "#fff" : C.muted, fontSize: 12, fontWeight: 600,
-                    cursor: translateLang && !translating ? "pointer" : "default", opacity: translating ? 0.6 : 1,
-                  }}>{translating ? "Translating..." : "Translate"}</button>
-                </div>
-              )}
-            </div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>
+                      Refine whole script
+                    </div>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 10, lineHeight: 1.4 }}>
+                      Describe how the AI should rewrite the entire script. The rewrite respects timestamps, style, and what's actually on screen.
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+                      {REFINE_ALL_PRESETS.map((p) => (
+                        <button key={p.label}
+                          onClick={() => setRefineAllInstruction(p.instruction)}
+                          style={{
+                            padding: "3px 8px", borderRadius: 10, border: `1px solid ${C.border}`,
+                            background: "transparent", color: C.dim, fontSize: 10, fontWeight: 500,
+                            fontFamily: "inherit", cursor: "pointer",
+                          }}>
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                    <textarea
+                      value={refineAllInstruction}
+                      onChange={(e) => setRefineAllInstruction(e.target.value)}
+                      placeholder="e.g. Rewrite the whole script in second person, cut 30%, and highlight the three main features…"
+                      rows={4}
+                      disabled={refineAllLoading}
+                      style={{
+                        width: "100%", padding: "8px 10px", borderRadius: 6,
+                        background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`,
+                        color: C.text, fontSize: 12, fontFamily: "inherit", outline: "none",
+                        resize: "vertical", marginBottom: 8, boxSizing: "border-box", lineHeight: 1.4,
+                      }}
+                    />
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <div style={{ flex: 1, fontSize: 10, color: C.muted }}>
+                        {script.segments.length} segments · {aiProvider}/{aiModel}
+                      </div>
+                      <button
+                        onClick={() => { setShowRefineAll(false); setRefineAllInstruction(""); }}
+                        disabled={refineAllLoading}
+                        style={{
+                          padding: "6px 12px", borderRadius: 6, border: `1px solid ${C.border}`,
+                          background: "transparent", color: C.dim, fontSize: 11, fontWeight: 600,
+                          fontFamily: "inherit", cursor: refineAllLoading ? "default" : "pointer",
+                        }}>Cancel</button>
+                      <button
+                        onClick={handleRefineAll}
+                        disabled={!refineAllInstruction.trim() || refineAllLoading}
+                        style={{
+                          padding: "6px 14px", borderRadius: 6, border: "none", fontFamily: "inherit",
+                          background: refineAllInstruction.trim() && !refineAllLoading
+                            ? "linear-gradient(135deg,#6366f1,#8b5cf6)"
+                            : "rgba(255,255,255,0.05)",
+                          color: refineAllInstruction.trim() && !refineAllLoading ? "#fff" : C.muted,
+                          fontSize: 12, fontWeight: 600,
+                          cursor: refineAllInstruction.trim() && !refineAllLoading ? "pointer" : "default",
+                          opacity: refineAllLoading ? 0.6 : 1,
+                        }}>{refineAllLoading ? "Refining…" : "Refine"}</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div style={{ position: "relative" }}>
+                <button onClick={() => { setShowTranslate(!showTranslate); setShowRefineAll(false); }} style={{
+                  padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`, fontFamily: "inherit",
+                  background: showTranslate ? "rgba(99,102,241,0.1)" : "transparent",
+                  color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer",
+                }}>+ Translate</button>
+                {showTranslate && (
+                  <div style={{
+                    position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
+                    background: "#16161e", border: `1px solid ${C.border}`, borderRadius: 10,
+                    padding: 12, minWidth: 200, boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                  }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Translate to:</div>
+                    <select value={translateLang} onChange={(e) => setTranslateLang(e.target.value)} style={{
+                      width: "100%", padding: "6px 8px", borderRadius: 6, fontSize: 12, fontFamily: "inherit",
+                      background: "rgba(255,255,255,0.06)", border: `1px solid ${C.border}`, color: C.text, outline: "none", marginBottom: 8,
+                    }}>
+                      <option value="">Select language...</option>
+                      {AVAILABLE_LANGUAGES.filter((l) => !scripts[l.code]).map((l) => (
+                        <option key={l.code} value={l.code}>{l.label}</option>
+                      ))}
+                    </select>
+                    <button onClick={handleTranslate} disabled={!translateLang || translating} style={{
+                      width: "100%", padding: "6px 0", borderRadius: 6, border: "none", fontFamily: "inherit",
+                      background: translateLang ? "linear-gradient(135deg,#6366f1,#8b5cf6)" : "rgba(255,255,255,0.05)",
+                      color: translateLang ? "#fff" : C.muted, fontSize: 12, fontWeight: 600,
+                      cursor: translateLang && !translating ? "pointer" : "default", opacity: translating ? 0.6 : 1,
+                    }}>{translating ? "Translating..." : "Translate"}</button>
+                  </div>
+                )}
+              </div>
+            </>
           )}
         </div>
       </div>

@@ -3,7 +3,9 @@
 mod ai_client;
 mod azure_tts_client;
 mod builtin_tts;
+pub mod cli;
 mod commands;
+mod compositor;
 mod doc_processor;
 mod elevenlabs_client;
 mod error;
@@ -13,6 +15,7 @@ mod menu;
 mod models;
 mod process_utils;
 mod project_store;
+mod render;
 mod screen_recorder;
 mod secure_store;
 mod telemetry;
@@ -104,10 +107,13 @@ pub fn run() {
             commands::set_api_key,
             commands::validate_api_key_cmd,
             commands::probe_video,
+            commands::check_file_readable,
+            commands::file_exists,
             commands::process_documents,
             commands::generate_narration,
             commands::translate_script,
             commands::refine_segment,
+            commands::refine_script,
             commands::cancel_generation,
             commands::save_project,
             commands::load_project,
@@ -140,6 +146,7 @@ pub fn run() {
             commands::apply_video_edits,
             commands::extract_edit_thumbnails,
             commands::extract_single_frame,
+            commands::save_script,
             commands::merge_audio_video,
             commands::open_folder,
             commands::list_project_frames,

@@ -1,7 +1,15 @@
-//! Video editing operations: trim, speed, frame dropping, zoom/pan, freeze frame, and concatenation.
+//! Video editing operations: validation + the public render API
+//! (`apply_edits`, `merge_audio_video`, `burn_subtitles`,
+//! `extract_single_frame`, `extract_edit_thumbnails`).
+//!
+//! After the Phase 3+4 rewrite, the heavy lifting (decode → composite →
+//! encode for clips and overlay effects) lives in `crate::compositor`.
+//! This module is now mostly the public surface + a few ffmpeg fast paths
+//! that don't need the compositor (single-clip stream-copy trim,
+//! subtitle-burn pass-through, etc.).
 
 use crate::error::NarratorError;
-use crate::models::{EasingPreset, ZoomPanEffect};
+use crate::models::ZoomPanEffect;
 use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
@@ -49,6 +57,10 @@ fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
 /// Validate clip parameters (S2: DoS, F4: bounds).
 fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), NarratorError> {
     let err = |msg: &str| NarratorError::ExportError(format!("Clip {index}: {msg}"));
+    // Reject NaN / Infinity — they produce invalid ffmpeg args and cause hangs or crashes.
+    if !clip.speed.is_finite() || !clip.start_seconds.is_finite() || !clip.end_seconds.is_finite() {
+        return Err(err("speed/start/end must be finite"));
+    }
     if clip.speed <= 0.0 || clip.speed > 100.0 {
         return Err(err(&format!("speed {} out of range (0, 100]", clip.speed)));
     }
@@ -58,17 +70,39 @@ fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), Nar
     if clip.end_seconds < clip.start_seconds {
         return Err(err("end_seconds < start_seconds"));
     }
+    // Reject zero/near-zero duration clips except freeze (which sets its own duration).
+    let source_dur = clip.end_seconds - clip.start_seconds;
+    let is_freeze = clip.clip_type.as_deref() == Some("freeze");
+    if !is_freeze && source_dur < 0.05 {
+        return Err(err(&format!(
+            "clip duration {:.3}s too short (min 0.05s)",
+            source_dur
+        )));
+    }
     if clip.end_seconds > duration + 5.0 {
         return Err(err(&format!(
             "end_seconds {:.1} exceeds video duration {:.1}",
             clip.end_seconds, duration
         )));
     }
+    if let Some(fps) = clip.fps_override {
+        if !fps.is_finite() || fps <= 0.0 || fps > 240.0 {
+            return Err(err(&format!("fps_override {} out of range (0, 240]", fps)));
+        }
+    }
     if let Some(fd) = clip.freeze_duration {
-        if fd <= 0.0 || fd > 600.0 {
+        if !fd.is_finite() || fd <= 0.0 || fd > 600.0 {
             return Err(err(&format!(
                 "freeze_duration {} out of range (0, 600]",
                 fd
+            )));
+        }
+    }
+    if let Some(fst) = clip.freeze_source_time {
+        if !fst.is_finite() || fst < 0.0 || fst > duration + 1.0 {
+            return Err(err(&format!(
+                "freeze_source_time {} out of video range",
+                fst
             )));
         }
     }
@@ -88,34 +122,6 @@ fn validate_zoom(zp: &ZoomPanEffect) -> Result<(), NarratorError> {
     }
     Ok(())
 }
-
-/// Escape text for ffmpeg drawtext filter (S3: injection prevention).
-/// Will be used when text overlay rendering is implemented.
-#[allow(dead_code)]
-pub fn escape_ffmpeg_text(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "'\\''")
-        .replace(':', "\\:")
-        .replace('%', "%%")
-        .replace(['\n', '\r'], "")
-}
-
-/// Validate a hex color string (S3: injection prevention).
-/// Will be used when overlay effect rendering is implemented.
-#[allow(dead_code)]
-pub fn validate_hex_color(s: &str) -> Result<String, NarratorError> {
-    let trimmed = s.trim().trim_start_matches('#');
-    if (trimmed.len() == 6 || trimmed.len() == 8) && trimmed.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        Ok(format!("#{trimmed}"))
-    } else {
-        Err(NarratorError::ExportError(format!(
-            "Invalid hex color: {s}"
-        )))
-    }
-}
-
-const MAX_OUTPUT_FPS: f64 = 60.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoEditPlan {
@@ -145,6 +151,11 @@ pub struct OverlayEffect {
     pub text: Option<TextData>,
     #[serde(default)]
     pub fade: Option<FadeData>,
+    /// Present when effect_type == "zoom-pan". Carries the start/end regions
+    /// and easing. Unlike the legacy per-clip zoom_pan on EditClip, this one
+    /// is animated over its own [start_time, end_time] window.
+    #[serde(default)]
+    pub zoom_pan: Option<ZoomPanEffect>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,7 +194,13 @@ pub struct TextData {
     #[serde(default)]
     pub italic: Option<bool>,
     #[serde(default)]
+    pub underline: Option<bool>,
+    #[serde(default)]
     pub background: Option<String>,
+    #[serde(default)]
+    pub align: Option<String>,
+    #[serde(default)]
+    pub opacity: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +210,9 @@ pub struct FadeData {
     pub opacity: f64,
 }
 
+/// One contiguous segment of source video on the output timeline.
+/// Field names use snake_case (no `serde(rename_all)`) — the frontend
+/// `VideoEditPlan.clips` shape relies on it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditClip {
     pub start_seconds: f64,
@@ -219,9 +239,17 @@ async fn run_ffmpeg_with_progress(
     total_duration: f64,
     on_progress: &impl Fn(f64),
 ) -> Result<(), NarratorError> {
+    // `-progress pipe:2` emits structured, newline-terminated progress events
+    // (`out_time=HH:MM:SS.xxx`) to stderr so our line reader can parse them.
+    // Default `frame=... time=...` stats use `\r` between updates, which
+    // tokio's `lines()` doesn't split on — progress would never stream.
+    // `-nostats` suppresses the default `\r`-terminated line. Both are global
+    // options and must precede any output URL, so we prepend them.
+    let mut full_args: Vec<&str> = vec!["-progress", "pipe:2", "-nostats"];
+    full_args.extend_from_slice(args);
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window()
-        .args(args)
+        .args(&full_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
@@ -229,7 +257,13 @@ async fn run_ffmpeg_with_progress(
         .spawn()
         .map_err(|e| NarratorError::FfmpegFailed(format!("Failed to start ffmpeg: {e}")))?;
 
-    // Read stderr line by line for progress
+    // Ring buffer of recent stderr lines so failures can include meaningful
+    // context instead of just "exited with status 1". ffmpeg banners are
+    // chatty; 40 lines is enough to catch the actual error tail.
+    const STDERR_TAIL: usize = 40;
+    let mut recent_stderr: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(STDERR_TAIL + 1);
+
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
@@ -241,6 +275,10 @@ async fn run_ffmpeg_with_progress(
                     on_progress(pct);
                 }
             }
+            if recent_stderr.len() >= STDERR_TAIL {
+                recent_stderr.pop_front();
+            }
+            recent_stderr.push_back(line);
         }
     }
 
@@ -250,9 +288,37 @@ async fn run_ffmpeg_with_progress(
         .map_err(|e| NarratorError::FfmpegFailed(format!("ffmpeg process error: {e}")))?;
 
     if !status.success() {
+        // Surface the most relevant stderr lines (those that look like errors)
+        // falling back to the tail if nothing obvious stands out.
+        let tail: Vec<&String> = recent_stderr.iter().collect();
+        let meaningful: String = tail
+            .iter()
+            .filter(|l| {
+                let ll = l.to_lowercase();
+                ll.contains("error")
+                    || ll.contains("invalid")
+                    || ll.contains("no such")
+                    || ll.contains("failed")
+                    || ll.contains("unknown")
+                    || ll.contains("unrecognized")
+                    || ll.contains("does not")
+            })
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let detail = if meaningful.is_empty() {
+            tail.iter()
+                .rev()
+                .take(5)
+                .rev()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        } else {
+            meaningful
+        };
         return Err(NarratorError::FfmpegFailed(format!(
-            "ffmpeg exited with status {}",
-            status
+            "ffmpeg exited with status {status}: {detail}"
         )));
     }
 
@@ -261,8 +327,25 @@ async fn run_ffmpeg_with_progress(
 }
 
 /// Extract the time= value from an ffmpeg stderr line.
+///
+/// Handles both formats:
+/// - Structured `-progress pipe:2` output: `out_time=00:00:01.666000\n`
+///   (and `out_time_us=...`, `out_time_ms=...` — we prefer `out_time=`).
+/// - Legacy `-stats` output: `frame=100 ... time=00:00:01.66 bitrate=...\r`.
 fn extract_time_from_ffmpeg_line(line: &str) -> Option<String> {
-    // ffmpeg progress lines contain "time=HH:MM:SS.mm" or "time=N/A"
+    // Prefer the structured `-progress` format; it's \n-terminated so lines()
+    // can actually see it.
+    if let Some(i) = line.find("out_time=") {
+        let rest = &line[i + 9..];
+        let end = rest.find([' ', '\n', '\r']).unwrap_or(rest.len());
+        let time_str = rest[..end].trim();
+        if time_str.is_empty() || time_str == "N/A" {
+            return None;
+        }
+        return Some(time_str.to_string());
+    }
+    // Fallback: legacy stats line. This only fires in contexts where we didn't
+    // pass -nostats (we always do now, but keep the fallback for safety).
     let time_idx = line.find("time=")?;
     let rest = &line[time_idx + 5..];
     let end = rest.find(' ').unwrap_or(rest.len());
@@ -329,227 +412,33 @@ pub async fn extract_single_frame(
 
     Ok(output_path.to_string())
 }
-
-/// Process a freeze frame clip: extract a single frame, then create a video of it held for the specified duration.
-async fn process_freeze_clip(
-    ffmpeg: &Path,
-    input_path: &str,
-    clip: &EditClip,
-    clip_index: usize,
-    out_dir: &Path,
-    meta: &crate::models::VideoMetadata,
-) -> Result<PathBuf, NarratorError> {
-    let width = meta.width;
-    let height = meta.height;
-    let fps = meta.fps;
-    let timestamp = clip.freeze_source_time.unwrap_or(clip.start_seconds);
-    let duration = clip.freeze_duration.unwrap_or(3.0);
-    let frame_path = out_dir.join(format!("_freeze_frame_{:03}.jpg", clip_index));
-    let clip_path = out_dir.join(format!("_edit_clip_{:03}.mp4", clip_index));
-
-    // Step 1: Extract the single frame
-    let output = Command::new(ffmpeg.as_os_str())
-        .no_window()
-        .args([
-            "-y",
-            "-ss",
-            &format!("{:.3}", timestamp),
-            "-i",
-            input_path,
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-        ])
-        .arg(frame_path.as_os_str())
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::FfmpegFailed(format!(
-            "Freeze frame extraction failed: {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        )));
-    }
-
-    // Step 2: Create a video from the still frame
-    let mut args: Vec<String> = vec![
-        "-y".into(),
-        "-loop".into(),
-        "1".into(),
-        "-i".into(),
-        frame_path.to_string_lossy().to_string(),
-        "-t".into(),
-        format!("{:.3}", duration),
-    ];
-
-    // If zoom/pan is specified, apply zoompan filter to the still image
-    if let Some(ref zp) = clip.zoom_pan {
-        let zp_filter = build_zoompan_filter(zp, width, height, fps, duration);
-        args.extend([
-            "-vf".into(),
-            format!("{},scale={}:{}", zp_filter, width, height),
-        ]);
-    } else {
-        args.extend(["-vf".into(), format!("scale={}:{}", width, height)]);
-    }
-
-    args.extend([
-        "-c:v".into(),
-        "libx264".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        "-r".into(),
-        format!("{:.0}", fps.min(MAX_OUTPUT_FPS)),
-        "-an".into(), // no audio for freeze frames
-    ]);
-    args.push(clip_path.to_string_lossy().to_string());
-
-    let output = Command::new(ffmpeg.as_os_str())
-        .no_window()
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::FfmpegFailed(format!(
-            "Freeze clip creation failed: {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        )));
-    }
-
-    // Clean up extracted frame
-    let _ = tokio::fs::remove_file(&frame_path).await;
-
-    Ok(clip_path)
-}
-
-/// Build an ffmpeg zoompan filter expression from a ZoomPanEffect.
-///
-/// The zoompan filter uses per-frame expressions for z (zoom), x (pan-x), y (pan-y).
-/// `on` = current frame number, `d` = total frames (set as the duration parameter).
-fn build_zoompan_filter(
-    effect: &ZoomPanEffect,
-    width: u32,
-    height: u32,
-    fps: f64,
-    duration_seconds: f64,
-) -> String {
-    let total_frames = (duration_seconds * fps.min(MAX_OUTPUT_FPS))
-        .round()
-        .max(1.0) as u32;
-
-    // Zoom: 1/region_width gives the zoom factor (region covering 50% width = 2x zoom)
-    let z_start = 1.0 / effect.start_region.width.max(0.01);
-    let z_end = 1.0 / effect.end_region.width.max(0.01);
-
-    // Pan centers (normalized 0-1)
-    let sx = effect.start_region.x + effect.start_region.width / 2.0;
-    let sy = effect.start_region.y + effect.start_region.height / 2.0;
-    let ex = effect.end_region.x + effect.end_region.width / 2.0;
-    let ey = effect.end_region.y + effect.end_region.height / 2.0;
-
-    // Easing expression for progress (on/d mapped through easing function)
-    let progress = match effect.easing {
-        EasingPreset::Linear => "on/d".to_string(),
-        EasingPreset::EaseIn => "(on/d)*(on/d)".to_string(),
-        EasingPreset::EaseOut => "(on/d)*(2-on/d)".to_string(),
-        EasingPreset::EaseInOut => {
-            "if(lt(on/d,0.5),2*(on/d)*(on/d),-1+(4-2*(on/d))*(on/d))".to_string()
-        }
-    };
-
-    format!(
-        "zoompan=z='{z_s}+({z_e}-{z_s})*({p})':x='iw*({sx}+({ex}-{sx})*({p}))-iw/zoom/2':y='ih*({sy}+({ey}-{sy})*({p}))-ih/zoom/2':d={d}:s={w}x{h}:fps={fps}",
-        z_s = z_start,
-        z_e = z_end,
-        p = progress,
-        sx = sx,
-        ex = ex,
-        sy = sy,
-        ey = ey,
-        d = total_frames,
-        w = width,
-        h = height,
-        fps = fps.min(MAX_OUTPUT_FPS).round() as u32,
-    )
-}
-
-/// Build a crop+scale filter for zoom/pan on VIDEO clips (not stills).
-/// Uses ffmpeg's `crop` filter with expression-based animated parameters
-/// and `n` (frame number) for interpolation. This avoids the zoompan filter
-/// issues with video input (zoompan is designed for still images).
-/// Build a crop+scale filter for zoom/pan on VIDEO clips.
-/// Uses ffmpeg's `crop` filter with expression-based animated parameters.
-/// All values are clamped to valid ranges using min/max to prevent ffmpeg errors.
-fn build_zoompan_filter_for_video(
-    effect: &ZoomPanEffect,
-    width: u32,
-    height: u32,
-    total_frames: f64,
-) -> String {
-    let w = width as f64;
-    let h = height as f64;
-
-    let sx = effect.start_region.x.clamp(0.0, 0.99);
-    let sy = effect.start_region.y.clamp(0.0, 0.99);
-    let sw = effect.start_region.width.clamp(0.05, 1.0);
-    let sh = effect.start_region.height.clamp(0.05, 1.0);
-    let ex = effect.end_region.x.clamp(0.0, 0.99);
-    let ey = effect.end_region.y.clamp(0.0, 0.99);
-    let ew = effect.end_region.width.clamp(0.05, 1.0);
-    let eh = effect.end_region.height.clamp(0.05, 1.0);
-
-    let tf = total_frames.max(1.0);
-
-    let progress = match effect.easing {
-        EasingPreset::Linear => format!("min(n/{tf},1)"),
-        EasingPreset::EaseIn => format!("min(n/{tf},1)*min(n/{tf},1)"),
-        EasingPreset::EaseOut => format!("min(n/{tf},1)*(2-min(n/{tf},1))"),
-        EasingPreset::EaseInOut => format!(
-            "if(lt(n/{tf},0.5),2*min(n/{tf},1)*min(n/{tf},1),-1+(4-2*min(n/{tf},1))*min(n/{tf},1))"
-        ),
-    };
-
-    // Crop dimensions — clamped to at least 2px and at most iw/ih
-    let crop_w = format!("max(2,min(iw,({sw}+({ew}-{sw})*({progress}))*{w}))");
-    let crop_h = format!("max(2,min(ih,({sh}+({eh}-{sh})*({progress}))*{h}))");
-    // Crop position — clamped so crop doesn't extend past frame edge
-    let crop_x = format!("max(0,min(iw-out_w,({sx}+({ex}-{sx})*({progress}))*{w}))");
-    let crop_y = format!("max(0,min(ih-out_h,({sy}+({ey}-{sy})*({progress}))*{h}))");
-
-    // Ensure even dimensions for h264 compatibility
-    format!(
-        "crop='{crop_w}':'{crop_h}':'{crop_x}':'{crop_y}',scale={width}:{height}:flags=lanczos,setsar=1"
-    )
-}
-
+/// Render an edit plan (clips + overlay effects) to a single MP4 at
+/// `output_path`. Validation + a couple of single-clip ffmpeg fast paths
+/// live here; everything else hands off to the in-process compositor.
 pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
-    on_progress: impl Fn(f64),
+    on_progress: impl Fn(f64) + Send + Sync,
 ) -> Result<String, NarratorError> {
-    // S1: Validate paths
     validate_path(input_path)?;
     validate_path(output_path)?;
 
-    let ffmpeg = video_engine::detect_ffmpeg()?;
-    let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
     let total = plan.clips.len();
-
     if total == 0 {
         return Err(NarratorError::ExportError("No clips to process".into()));
     }
 
-    // Probe video metadata (needed for freeze frame and zoom/pan)
-    let meta = video_engine::probe_video(std::path::Path::new(input_path)).await?;
+    let meta = video_engine::probe_video(Path::new(input_path)).await?;
 
-    // S2/F4: Validate all clips
+    let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
+    tokio::fs::create_dir_all(out_dir).await.map_err(|e| {
+        NarratorError::ExportError(format!(
+            "Failed to create output directory {}: {e}",
+            out_dir.display()
+        ))
+    })?;
+
     for (i, clip) in plan.clips.iter().enumerate() {
         validate_clip(clip, meta.duration_seconds, i)?;
         if let Some(ref zp) = clip.zoom_pan {
@@ -557,22 +446,34 @@ pub async fn apply_edits(
         }
     }
 
-    // If single clip with no modifications, check if it covers the full source
-    let has_effects =
-        plan.clips[0].clip_type.as_deref() == Some("freeze") || plan.clips[0].zoom_pan.is_some();
-    if total == 1
-        && plan.clips[0].speed == 1.0
-        && plan.clips[0].fps_override.is_none()
-        && !has_effects
-    {
-        let clip = &plan.clips[0];
+    // Two ffmpeg fast paths for the trivial single-clip cases — these
+    // skip the compositor entirely (no decode/encode round-trip) and just
+    // copy or stream-trim the source. They cover the common "preview /
+    // review" case where the user has not edited anything yet.
+    let first = &plan.clips[0];
+    let has_clip_fx = first.clip_type.as_deref() == Some("freeze") || first.zoom_pan.is_some();
+    let has_overlay_fx = plan
+        .effects
+        .as_ref()
+        .map(|v| {
+            v.iter().any(|e| {
+                matches!(
+                    e.effect_type.as_str(),
+                    "spotlight" | "blur" | "text" | "fade" | "zoom-pan"
+                )
+            })
+        })
+        .unwrap_or(false);
+    let trivial_single = total == 1
+        && first.speed == 1.0
+        && first.fps_override.is_none()
+        && !has_clip_fx
+        && !has_overlay_fx;
 
-        // Check if the clip covers the full video (using already-probed metadata)
+    if trivial_single {
         let covers_full =
-            clip.start_seconds < 0.5 && (clip.end_seconds - meta.duration_seconds).abs() < 0.5;
-
+            first.start_seconds < 0.5 && (first.end_seconds - meta.duration_seconds).abs() < 0.5;
         if covers_full {
-            // No edits — just use the original file directly (symlink or copy)
             if input_path != output_path {
                 tokio::fs::copy(input_path, output_path).await?;
             }
@@ -580,14 +481,15 @@ pub async fn apply_edits(
             return Ok(output_path.to_string());
         }
 
-        // Trimmed single clip — use accurate seek (input seeking + output duration)
-        let duration = clip.end_seconds - clip.start_seconds;
+        // Single trimmed clip with no effects → ffmpeg stream-copy trim.
+        let ffmpeg = video_engine::detect_ffmpeg()?;
+        let duration = first.end_seconds - first.start_seconds;
         let output = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args([
                 "-y",
                 "-ss",
-                &format!("{:.3}", clip.start_seconds),
+                &format!("{:.3}", first.start_seconds),
                 "-i",
                 input_path,
                 "-t",
@@ -601,278 +503,22 @@ pub async fn apply_edits(
             .output()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NarratorError::FfmpegFailed(stderr.to_string()));
         }
+        on_progress(100.0);
         return Ok(output_path.to_string());
     }
 
-    // Process each clip
-    let mut clip_files: Vec<PathBuf> = Vec::new();
-
-    for (i, clip) in plan.clips.iter().enumerate() {
-        on_progress((i as f64 / total as f64) * 80.0);
-
-        // Handle freeze frame clips separately
-        if clip.clip_type.as_deref() == Some("freeze") {
-            let clip_path =
-                process_freeze_clip(&ffmpeg, input_path, clip, i, out_dir, &meta).await?;
-            clip_files.push(clip_path);
-            continue;
-        }
-
-        let clip_path = out_dir.join(format!("_edit_clip_{:03}.mp4", i));
-        let clip_duration = clip.end_seconds - clip.start_seconds;
-        let expected_output_dur = if (clip.speed - 1.0).abs() > 0.01 {
-            clip_duration / clip.speed
-        } else {
-            clip_duration
-        };
-
-        // Belt-and-suspenders: input -t limits reading, output -t limits writing.
-        // Input seeking (-ss before -i) resets PTS to 0 at the seek point.
-        let mut args: Vec<String> = vec![
-            "-y".into(),
-            "-ss".into(),
-            format!("{:.3}", clip.start_seconds),
-            "-t".into(),
-            format!("{:.3}", clip_duration), // INPUT -t: read exactly this many seconds
-            "-i".into(),
-            input_path.into(),
-        ];
-
-        // Build video filter chain
-        let mut vfilters = Vec::new();
-        let mut afilters = Vec::new();
-        let needs_speed = (clip.speed - 1.0).abs() > 0.01;
-        let has_zoom = clip.zoom_pan.is_some();
-
-        // Zoom/Pan effect — animated crop+scale for video clips
-        if let Some(ref zp) = clip.zoom_pan {
-            let total_frames = (clip_duration * meta.fps.min(MAX_OUTPUT_FPS))
-                .round()
-                .max(1.0);
-            let zp_filter =
-                build_zoompan_filter_for_video(zp, meta.width, meta.height, total_frames);
-            vfilters.push(zp_filter);
-        }
-
-        if let Some(fps) = clip.fps_override {
-            vfilters.push(format!("fps={:.3}", fps));
-        }
-
-        if needs_speed {
-            if clip.skip_frames {
-                let n = clip.speed.round().max(2.0) as u32;
-                vfilters.push(format!("select='not(mod(n\\,{}))'", n));
-                vfilters.push("setpts=N/FRAME_RATE/TB".to_string());
-            } else {
-                vfilters.push(format!("setpts={:.4}*PTS", 1.0 / clip.speed));
-            }
-        }
-
-        // Audio filter handling — atempo must be chained for values outside 0.5-2.0 range
-        let drop_audio = needs_speed && clip.skip_frames;
-        if needs_speed && !clip.skip_frames {
-            let mut atempo_chain = Vec::new();
-            let mut remaining = clip.speed;
-            // Chain atempo=2.0 for speeds above 2.0
-            while remaining > 2.0 {
-                atempo_chain.push("atempo=2.0".to_string());
-                remaining /= 2.0;
-            }
-            // Chain atempo=0.5 for speeds below 0.5
-            while remaining < 0.5 {
-                atempo_chain.push("atempo=0.5".to_string());
-                remaining /= 0.5;
-            }
-            atempo_chain.push(format!("atempo={:.4}", remaining));
-            afilters = atempo_chain;
-        }
-
-        // Always re-encode every clip with identical settings for reliable concat.
-        vfilters.push("format=yuv420p".to_string());
-        args.extend(["-vf".into(), vfilters.join(",")]);
-        args.extend([
-            "-c:v".into(),
-            "libx264".into(),
-            "-preset".into(),
-            "medium".into(),
-            "-crf".into(),
-            "15".into(),
-            "-avoid_negative_ts".into(),
-            "make_zero".into(),
-        ]);
-
-        // Limit output duration — critical for speed-changed clips where setpts
-        // changes output timing but ffmpeg may read more input than needed.
-        args.extend(["-t".into(), format!("{:.3}", expected_output_dur)]);
-        if !afilters.is_empty() {
-            args.extend(["-af".into(), afilters.join(",")]);
-        }
-        if !drop_audio {
-            args.extend(["-c:a".into(), "aac".into(), "-b:a".into(), "256k".into()]);
-        } else {
-            args.extend(["-an".into()]);
-        }
-        args.extend(["-movflags".into(), "+faststart".into()]);
-        args.push(clip_path.to_string_lossy().to_string());
-
-        tracing::info!(
-            "Clip {i}: src={:.3}-{:.3} ({:.3}s) speed={} expected_out={:.3}s zoom={has_zoom}",
-            clip.start_seconds,
-            clip.end_seconds,
-            clip_duration,
-            clip.speed,
-            expected_output_dur
-        );
-
-        let output = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
-            tracing::error!("Clip {i} stderr: {stderr}");
-            tracing::error!("Clip {i} stdout: {stdout}");
-            // Get the last meaningful part of stderr (skip the banner)
-            let err_tail = stderr[stderr.len().saturating_sub(800)..].trim();
-            // Find lines with actual errors (not the banner)
-            let meaningful: String = err_tail
-                .lines()
-                .filter(|l| {
-                    let ll = l.to_lowercase();
-                    ll.contains("error")
-                        || ll.contains("invalid")
-                        || ll.contains("no such")
-                        || ll.contains("not found")
-                        || ll.contains("failed")
-                        || ll.contains("unknown")
-                        || ll.contains("unrecognized")
-                        || ll.contains("does not")
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            let detail = if meaningful.is_empty() {
-                err_tail.to_string()
-            } else {
-                meaningful
-            };
-            return Err(NarratorError::FfmpegFailed(format!(
-                "Clip {i} failed: {detail}"
-            )));
-        }
-
-        // Verify clip file was actually created and has content
-        let clip_size = tokio::fs::metadata(&clip_path)
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        // Log actual duration for debugging
-        if let Ok(probe) = video_engine::probe_video(&clip_path).await {
-            let drift = probe.duration_seconds - expected_output_dur;
-            tracing::info!(
-                "Clip {i}: actual_out={:.3}s (expected {:.3}s, drift={:.3}s)",
-                probe.duration_seconds,
-                expected_output_dur,
-                drift
-            );
-        }
-        if clip_size == 0 {
-            tracing::error!("Clip {i} produced empty file: {}", clip_path.display());
-            tracing::error!("Clip {i} ffmpeg args: {:?}", &args);
-            return Err(NarratorError::FfmpegFailed(format!(
-                "Clip {i} produced empty output. Try removing zoom/pan effects or simplifying edits on this clip."
-            )));
-        }
-        tracing::info!("Clip {i} OK: {} bytes", clip_size);
-        clip_files.push(clip_path);
-    }
-
-    on_progress(85.0);
-
-    // Concat all clips — all clips are re-encoded with identical h264 settings
-    if clip_files.len() == 1 {
-        tokio::fs::rename(&clip_files[0], output_path).await?;
-    } else {
-        let concat_list = out_dir.join("_edit_concat.txt");
-        let list_content: String = clip_files
-            .iter()
-            .map(|p| {
-                let escaped = p
-                    .to_string_lossy()
-                    .replace('\\', "\\\\")
-                    .replace(['\n', '\r'], "")
-                    .replace('\'', "'\\''");
-                format!("file '{}'", escaped)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        tokio::fs::write(&concat_list, &list_content).await?;
-
-        tracing::info!("Concat: {} clips", clip_files.len());
-
-        // All clips are identically encoded (h264/aac), so stream-copy concat should work
-        let output = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-            .arg(concat_list.as_os_str())
-            .args(["-c", "copy", "-movflags", "+faststart", output_path])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            tracing::warn!("Stream-copy concat failed, falling back to re-encode");
-            let output2 = Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args(["-y", "-f", "concat", "-safe", "0", "-i"])
-                .arg(concat_list.as_os_str())
-                .args([
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "15",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "256k",
-                    "-movflags",
-                    "+faststart",
-                    output_path,
-                ])
-                .output()
-                .await
-                .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-            if !output2.status.success() {
-                let stderr = String::from_utf8_lossy(&output2.stderr);
-                return Err(NarratorError::FfmpegFailed(format!(
-                    "Concat failed: {}",
-                    &stderr[stderr.len().saturating_sub(500)..]
-                )));
-            }
-        }
-
-        let _ = tokio::fs::remove_file(&concat_list).await;
-    }
-
-    // Cleanup temp clips
-    for p in &clip_files {
-        let _ = tokio::fs::remove_file(p).await;
-    }
-
+    // Anything else → the in-process compositor handles the whole render.
+    crate::compositor::run_pipeline(
+        Path::new(input_path),
+        Path::new(output_path),
+        plan,
+        &on_progress,
+    )
+    .await?;
     on_progress(100.0);
     Ok(output_path.to_string())
 }
@@ -923,43 +569,38 @@ pub async fn merge_audio_video(
         return Ok(output_path.to_string());
     }
 
-    // Mix original + narration audio (amix) — re-encodes audio, so use progress reporting.
-    let meta = video_engine::probe_video(Path::new(video_path)).await?;
-    let total_duration = meta.duration_seconds;
+    // Mix original + narration audio. Phase 5: this happens in Rust via the
+    // compositor::audio mixer (sample-level math + optional ducking) instead
+    // of ffmpeg amix. ffmpeg only does the final mux.
+    on_progress(5.0);
 
-    let filter = "[0:a][1:a]amix=inputs=2:duration=first:normalize=1[a]";
-    let result = run_ffmpeg_with_progress(
-        &ffmpeg,
-        &[
-            "-y",
-            "-i",
-            video_path,
-            "-i",
-            audio_path,
-            "-filter_complex",
-            filter,
-            "-map",
-            "0:v",
-            "-map",
-            "[a]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            output_path,
-        ],
-        total_duration,
-        &on_progress,
+    let tmp_dir = std::env::temp_dir();
+    let mixed_wav = tmp_dir.join(format!("_narrator_mix_{}.wav", uuid::Uuid::new_v4()));
+    let _cleanup = TempCleanup(vec![mixed_wav.clone()]);
+
+    // Default ducking: -8dB whenever narration has signal. Keeps narration
+    // intelligible without making the original disappear.
+    let mix_result = crate::compositor::audio::mix_narration(
+        Path::new(video_path),
+        Path::new(audio_path),
+        &mixed_wav,
+        1.0,
+        1.0,
+        -8.0,
     )
     .await;
 
-    if let Err(_e) = result {
-        // Fallback: video might not have audio stream, use narration audio only
-        tracing::warn!("amix failed, trying narration-only fallback");
+    if let Err(e) = mix_result {
+        // Fallback: video might not have an audio stream — use narration only
+        // via straight mux.
+        tracing::warn!("Rust mix failed ({e}), falling back to narration-only mux");
         let fallback = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args([
                 "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
                 "-i",
                 video_path,
                 "-i",
@@ -977,18 +618,70 @@ pub async fn merge_audio_video(
             .output()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
         if !fallback.status.success() {
             let stderr = String::from_utf8_lossy(&fallback.stderr);
             return Err(NarratorError::FfmpegFailed(format!(
-                "Audio merge failed: {}",
+                "Audio merge fallback failed: {}",
                 &stderr[stderr.len().saturating_sub(500)..]
             )));
         }
+        on_progress(100.0);
+        return Ok(output_path.to_string());
+    }
+
+    on_progress(70.0);
+
+    // Mux: video stream copied through, audio = the mixed WAV → AAC.
+    let mux = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            video_path,
+            "-i",
+        ])
+        .arg(&mixed_wav)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "256k",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(format!("mux: {e}")))?;
+    if !mux.status.success() {
+        let stderr = String::from_utf8_lossy(&mux.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Audio mux failed: {}",
+            &stderr[stderr.len().saturating_sub(500)..]
+        )));
     }
 
     on_progress(100.0);
     Ok(output_path.to_string())
+}
+
+/// RAII helper for cleaning up temp files inside merge_audio_video.
+struct TempCleanup(Vec<PathBuf>);
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1092,9 +785,9 @@ pub async fn burn_subtitles(
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "ultrafast",
             "-crf",
-            "23",
+            "0",
             output_path,
         ],
         total_duration,
@@ -1116,9 +809,9 @@ pub async fn burn_subtitles(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "medium",
+                "ultrafast",
                 "-crf",
-                "23",
+                "0",
                 "-c:a",
                 "copy",
                 "-c:s",
@@ -1152,6 +845,50 @@ pub async fn extract_edit_thumbnails(
     output_dir: &str,
     count: usize,
 ) -> Result<Vec<String>, NarratorError> {
+    // Cache hit: if the output dir already has ≥ count JPGs AND the source
+    // video hasn't been modified since they were produced, return them
+    // without re-running ffmpeg. Checked BEFORE probing so repeat calls
+    // (e.g. navigating back to Edit Video) are near-instant.
+    {
+        let dir = output_dir.to_string();
+        let video = video_path.to_string();
+        let cached = tokio::task::spawn_blocking(move || -> Option<Vec<String>> {
+            let video_mtime = std::fs::metadata(&video).ok()?.modified().ok()?;
+            let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&dir)
+                .ok()?
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+                .collect();
+            if entries.len() < count {
+                return None;
+            }
+            for entry in &entries {
+                let t_meta = entry.metadata().ok()?;
+                let t_mtime = t_meta.modified().ok()?;
+                if t_mtime < video_mtime {
+                    return None;
+                }
+            }
+            let mut paths: Vec<String> = entries
+                .into_iter()
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect();
+            paths.sort();
+            Some(paths)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(paths) = cached {
+            tracing::info!(
+                "extract_edit_thumbnails: cache hit ({} thumbs in {})",
+                paths.len(),
+                output_dir
+            );
+            return Ok(paths);
+        }
+    }
+
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let meta = video_engine::probe_video(Path::new(video_path)).await?;
     let interval = meta.duration_seconds / count as f64;
@@ -1200,6 +937,7 @@ pub async fn extract_edit_thumbnails(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::EasingPreset;
 
     #[test]
     fn test_extract_time_from_ffmpeg_line() {
@@ -1311,5 +1049,1320 @@ mod tests {
             ..clip.clone()
         };
         assert!(validate_clip(&bad_range, 60.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_nan_infinity() {
+        let base = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 10.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            zoom_pan: None,
+        };
+        assert!(validate_clip(
+            &EditClip {
+                speed: f64::NAN,
+                ..base.clone()
+            },
+            60.0,
+            0
+        )
+        .is_err());
+        assert!(validate_clip(
+            &EditClip {
+                speed: f64::INFINITY,
+                ..base.clone()
+            },
+            60.0,
+            0
+        )
+        .is_err());
+        assert!(validate_clip(
+            &EditClip {
+                start_seconds: f64::NAN,
+                ..base.clone()
+            },
+            60.0,
+            0
+        )
+        .is_err());
+        assert!(validate_clip(
+            &EditClip {
+                end_seconds: f64::NAN,
+                ..base
+            },
+            60.0,
+            0
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_zero_duration() {
+        let clip = EditClip {
+            start_seconds: 5.0,
+            end_seconds: 5.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&clip, 60.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_allows_freeze_zero_source() {
+        // Freeze clip source span can be zero — duration comes from freeze_duration
+        let clip = EditClip {
+            start_seconds: 5.0,
+            end_seconds: 5.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("freeze".into()),
+            freeze_source_time: Some(5.0),
+            freeze_duration: Some(3.0),
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&clip, 60.0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_bad_fps_override() {
+        let base = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 10.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: Some(1000.0),
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&base, 60.0, 0).is_err());
+
+        let nan = EditClip {
+            fps_override: Some(f64::NAN),
+            ..base.clone()
+        };
+        assert!(validate_clip(&nan, 60.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_bad_freeze_source_time() {
+        let clip = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 2.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("freeze".into()),
+            freeze_source_time: Some(999.0),
+            freeze_duration: Some(3.0),
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&clip, 60.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_zoom_rejects_nan() {
+        let bad = ZoomPanEffect {
+            start_region: crate::models::ZoomRegion {
+                x: f64::NAN,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            easing: EasingPreset::Linear,
+        };
+        assert!(validate_zoom(&bad).is_err());
+    }
+
+    #[test]
+    fn test_validate_zoom_rejects_zero_size() {
+        let bad = ZoomPanEffect {
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            },
+            easing: EasingPreset::Linear,
+        };
+        assert!(validate_zoom(&bad).is_err());
+    }
+
+    // ── Integration tests (run real ffmpeg) ────────────────────────
+    //
+    // These tests create a short test video with `lavfi testsrc` and an audio
+    // sine tone, then run the real editing pipeline. They take a few seconds
+    // each and require ffmpeg on PATH. If ffmpeg isn't available the test is
+    // reported as skipped (early return).
+
+    fn ffmpeg_ok() -> bool {
+        video_engine::detect_ffmpeg().is_ok()
+    }
+
+    /// Some ffmpeg builds (notably Homebrew's default) ship without libfreetype,
+    /// so the `drawtext` filter isn't registered. Tests that exercise text
+    /// overlays skip themselves when this is the case.
+    fn drawtext_available() -> bool {
+        let Ok(ffmpeg) = video_engine::detect_ffmpeg() else {
+            return false;
+        };
+        let Ok(output) = std::process::Command::new(ffmpeg).arg("-filters").output() else {
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.contains("drawtext")
+    }
+
+    async fn make_test_video(path: &Path, duration_s: f64) -> Result<(), String> {
+        let ffmpeg = video_engine::detect_ffmpeg().map_err(|e| e.to_string())?;
+        let output = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("testsrc=duration={duration_s}:size=320x240:rate=30"),
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency=1000:duration={duration_s}"),
+                "-c:v",
+                "libx264",
+                // Force keyframe every 15 frames (0.5s) so trims are accurate when
+                // the fast-path stream-copy seeks to the nearest keyframe.
+                "-g",
+                "15",
+                "-keyint_min",
+                "15",
+                "-c:a",
+                "aac",
+                "-pix_fmt",
+                "yuv420p",
+                "-shortest",
+            ])
+            .arg(path)
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("make_test_video failed: {err}"));
+        }
+        Ok(())
+    }
+
+    fn simple_clip(start: f64, end: f64, speed: f64) -> EditClip {
+        EditClip {
+            start_seconds: start,
+            end_seconds: end,
+            speed,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            zoom_pan: None,
+        }
+    }
+
+    fn base_effect(kind: &str, start: f64, end: f64) -> OverlayEffect {
+        OverlayEffect {
+            effect_type: kind.to_string(),
+            start_time: start,
+            end_time: end,
+            transition_in: None,
+            transition_out: None,
+            reverse: None,
+            spotlight: None,
+            blur: None,
+            text: None,
+            fade: None,
+            zoom_pan: None,
+        }
+    }
+
+    async fn apply_and_probe(
+        plan: VideoEditPlan,
+        input_duration: f64,
+    ) -> Result<(f64, u32, u32), String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let input = dir.path().join("input.mp4");
+        let output = dir.path().join("output.mp4");
+        make_test_video(&input, input_duration).await?;
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let meta = video_engine::probe_video(&output)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((meta.duration_seconds, meta.width, meta.height))
+    }
+
+    #[tokio::test]
+    async fn integration_trim_preserves_duration() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(2.0, 6.0, 1.0)],
+            effects: None,
+        };
+        let (dur, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!((dur - 4.0).abs() < 0.3, "expected ~4s, got {dur}s");
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_speed_2x_halves_duration() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        // 6s of source at 2x should produce a 3s output
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 6.0, 2.0)],
+            effects: None,
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(
+            (dur - 3.0).abs() < 0.3,
+            "expected ~3s at 2x speed, got {dur}s"
+        );
+    }
+
+    /// Speed change must cover the FULL source range, not just the first
+    /// fraction of it. A previous impl inverted `decode_fps` (fps*speed
+    /// instead of fps/speed) so at 2x the video showed only the first 25%
+    /// of the source while audio (via atempo) correctly spanned all of it
+    /// — the two tracks would desync.
+    ///
+    /// Build a red-then-green 10s source (red first 5s, green last 5s),
+    /// render at 2x (output = 5s; source [5..10] maps to output [2.5..5]),
+    /// and check that a frame at output t=4s is GREEN, not RED.
+    #[tokio::test]
+    async fn integration_speed_2x_covers_full_source_range() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("red_then_green.mp4");
+        let output = dir.path().join("sped.mp4");
+        let late_frame = dir.path().join("late.png");
+
+        let ffmpeg = video_engine::detect_ffmpeg().unwrap();
+        let status = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:duration=5:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=green:duration=5:size=320x240:rate=30",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=1000:duration=10",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+                "-map",
+                "[v]",
+                "-map",
+                "2:a",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-g",
+                "15",
+                "-keyint_min",
+                "15",
+            ])
+            .arg(&input)
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success());
+
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 10.0, 2.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        extract_single_frame(output.to_str().unwrap(), 4.0, late_frame.to_str().unwrap())
+            .await
+            .unwrap();
+
+        let img = image::open(&late_frame).unwrap().to_rgb8();
+        let cx = img.width() / 2;
+        let cy = img.height() / 2;
+        let p = img.get_pixel(cx, cy);
+        // Widen to i32 before subtracting so a red pixel ([255, 0, 0])
+        // doesn't u8-overflow the assertion message in debug builds.
+        let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        assert!(
+            g - r > 30 && g - b > 30,
+            "frame at output t=4s must be GREEN (source t≈8s); got r={r} g={g} b={b}"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_concat_multiple_clips() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 2.0, 1.0), simple_clip(4.0, 6.0, 1.0)],
+            effects: None,
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!((dur - 4.0).abs() < 0.5, "expected ~4s concat, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_zoom_pan() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut clip = simple_clip(0.0, 4.0, 1.0);
+        clip.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            easing: EasingPreset::EaseInOut,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![clip],
+            effects: None,
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(dur > 3.5 && dur < 4.5, "expected ~4s with zoom, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_blur_effect() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut fx = base_effect("blur", 0.5, 2.5);
+        fx.blur = Some(BlurData {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+            radius: 15.0,
+            invert: None,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![fx]),
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with blur, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_spotlight_effect() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut fx = base_effect("spotlight", 0.0, 2.0);
+        fx.spotlight = Some(SpotlightData {
+            x: 0.5,
+            y: 0.5,
+            radius: 0.25,
+            dim_opacity: 0.6,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![fx]),
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(
+            dur > 2.7 && dur < 3.3,
+            "expected ~3s with spotlight, got {dur}s"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_text_effect() {
+        if !ffmpeg_ok() || !drawtext_available() {
+            return;
+        }
+        let mut fx = base_effect("text", 0.5, 2.5);
+        fx.text = Some(TextData {
+            content: "Test Overlay".into(),
+            x: 0.5,
+            y: 0.1,
+            font_size: 5.0,
+            color: "#ffffff".into(),
+            font_family: None,
+            bold: Some(true),
+            italic: None,
+            underline: None,
+            background: Some("#000000".into()),
+            align: None,
+            opacity: Some(0.9),
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![fx]),
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with text, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_fade_effect() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut fx = base_effect("fade", 1.0, 2.0);
+        fx.fade = Some(FadeData {
+            color: "#000000".into(),
+            opacity: 0.7,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![fx]),
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(dur > 2.7 && dur < 3.3, "expected ~3s with fade, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_multiple_effects_chained() {
+        if !ffmpeg_ok() || !drawtext_available() {
+            return;
+        }
+        let mut blur = base_effect("blur", 0.0, 3.0);
+        blur.blur = Some(BlurData {
+            x: 0.0,
+            y: 0.0,
+            width: 0.3,
+            height: 0.3,
+            radius: 10.0,
+            invert: None,
+        });
+        let mut text = base_effect("text", 0.0, 3.0);
+        text.text = Some(TextData {
+            content: "Chained".into(),
+            x: 0.5,
+            y: 0.5,
+            font_size: 8.0,
+            color: "#ffffff".into(),
+            font_family: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            background: None,
+            align: None,
+            opacity: None,
+        });
+        let mut fade = base_effect("fade", 0.0, 3.0);
+        fade.fade = Some(FadeData {
+            color: "#ffffff".into(),
+            opacity: 0.2,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![blur, text, fade]),
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert!(
+            dur > 2.7 && dur < 3.3,
+            "expected ~3s with chained effects, got {dur}s"
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_freeze_clip() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        // Freeze clip at 2.0s for 2.0s duration
+        let mut freeze = simple_clip(0.0, 2.0, 1.0);
+        freeze.clip_type = Some("freeze".into());
+        freeze.freeze_source_time = Some(2.0);
+        freeze.freeze_duration = Some(2.0);
+
+        // Concat with a normal clip so output has both
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 2.0, 1.0), freeze],
+            effects: None,
+        };
+        let (dur, _, _) = apply_and_probe(plan, 10.0).await.unwrap();
+        // 2s normal + 2s freeze = 4s (freeze has no audio so audio may be shorter)
+        assert!(dur > 3.5 && dur < 4.5, "expected ~4s, got {dur}s");
+    }
+
+    #[tokio::test]
+    async fn integration_merge_replace_audio() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        let audio = dir.path().join("a.mp4");
+        let output = dir.path().join("o.mp4");
+
+        make_test_video(&video, 5.0).await.unwrap();
+        make_test_video(&audio, 5.0).await.unwrap();
+
+        let res = merge_audio_video(
+            video.to_str().unwrap(),
+            audio.to_str().unwrap(),
+            output.to_str().unwrap(),
+            true, // replace
+            |_| {},
+        )
+        .await;
+        assert!(res.is_ok(), "merge failed: {:?}", res.err());
+        let meta = video_engine::probe_video(&output).await.unwrap();
+        assert!(
+            (meta.duration_seconds - 5.0).abs() < 0.5,
+            "expected ~5s, got {}s",
+            meta.duration_seconds
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_merge_mix_audio() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        let audio = dir.path().join("a.mp4");
+        let output = dir.path().join("o.mp4");
+
+        make_test_video(&video, 5.0).await.unwrap();
+        make_test_video(&audio, 5.0).await.unwrap();
+
+        let res = merge_audio_video(
+            video.to_str().unwrap(),
+            audio.to_str().unwrap(),
+            output.to_str().unwrap(),
+            false, // mix
+            |_| {},
+        )
+        .await;
+        assert!(res.is_ok(), "merge mix failed: {:?}", res.err());
+    }
+
+    #[tokio::test]
+    async fn integration_full_recomposition() {
+        // End-to-end: apply_edits → merge_audio_video. Confirms the final
+        // output reflects the edits and is muxed with the provided audio.
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.mp4");
+        let edited = dir.path().join("edited.mp4");
+        let audio = dir.path().join("narration.mp4");
+        let final_out = dir.path().join("final.mp4");
+
+        make_test_video(&input, 10.0).await.unwrap();
+        make_test_video(&audio, 4.0).await.unwrap();
+
+        // Edit: concat two trimmed segments + one spotlight effect
+        let mut fx = base_effect("spotlight", 0.5, 2.0);
+        fx.spotlight = Some(SpotlightData {
+            x: 0.5,
+            y: 0.5,
+            radius: 0.2,
+            dim_opacity: 0.5,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 2.0, 1.0), simple_clip(3.0, 5.0, 1.0)],
+            effects: Some(vec![fx]),
+        };
+
+        apply_edits(
+            input.to_str().unwrap(),
+            edited.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let edited_meta = video_engine::probe_video(&edited).await.unwrap();
+        assert!(
+            (edited_meta.duration_seconds - 4.0).abs() < 0.5,
+            "edited should be ~4s, got {}s",
+            edited_meta.duration_seconds
+        );
+
+        // Replace audio with narration track
+        merge_audio_video(
+            edited.to_str().unwrap(),
+            audio.to_str().unwrap(),
+            final_out.to_str().unwrap(),
+            true,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let final_meta = video_engine::probe_video(&final_out).await.unwrap();
+        assert!(
+            (final_meta.duration_seconds - 4.0).abs() < 0.5,
+            "final should be ~4s, got {}s",
+            final_meta.duration_seconds
+        );
+    }
+
+    // ── Resolution + codec preservation ───────────────────────────────
+
+    #[tokio::test]
+    async fn integration_resolution_preserved_simple_trim() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(2.0, 6.0, 1.0)],
+            effects: None,
+        };
+        let (_, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_resolution_preserved_with_speed() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 4.0, 2.0)],
+            effects: None,
+        };
+        let (_, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_resolution_preserved_with_concat() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let plan = VideoEditPlan {
+            clips: vec![
+                simple_clip(0.0, 2.0, 1.0),
+                simple_clip(3.0, 5.0, 2.0),
+                simple_clip(6.0, 8.0, 1.0),
+            ],
+            effects: None,
+        };
+        let (_, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_resolution_preserved_with_effects() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut blur = base_effect("blur", 0.0, 3.0);
+        blur.blur = Some(BlurData {
+            x: 0.1,
+            y: 0.1,
+            width: 0.3,
+            height: 0.3,
+            radius: 10.0,
+            invert: None,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 1.0)],
+            effects: Some(vec![blur]),
+        };
+        let (_, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_resolution_preserved_with_zoom_pan() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let mut clip = simple_clip(0.0, 4.0, 1.0);
+        clip.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+            easing: EasingPreset::Linear,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![clip],
+            effects: None,
+        };
+        let (_, w, h) = apply_and_probe(plan, 10.0).await.unwrap();
+        // Zoom filter scales back to original dimensions
+        assert_eq!((w, h), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_output_codec_is_h264() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.mp4");
+        let output = dir.path().join("output.mp4");
+        make_test_video(&input, 5.0).await.unwrap();
+
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 2.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let meta = video_engine::probe_video(&output).await.unwrap();
+        assert_eq!(meta.codec, "h264", "expected h264, got {}", meta.codec);
+    }
+
+    #[tokio::test]
+    async fn integration_quality_file_size_reasonable() {
+        // Sanity check: CRF 12 on a simple trimmed video should produce a file
+        // larger than stream-copy but still sensible (not wildly inflated).
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input.mp4");
+        let output = dir.path().join("output.mp4");
+        make_test_video(&input, 5.0).await.unwrap();
+
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 3.0, 2.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let size = tokio::fs::metadata(&output).await.unwrap().len();
+        // A 1.5s 320x240 h264 clip should be at least a few hundred bytes
+        // (valid container with headers) and less than 10MB (not wildly inflated)
+        assert!(size > 500, "output suspiciously small: {size} bytes");
+        assert!(size < 10_000_000, "output suspiciously large: {size} bytes");
+    }
+
+    // ── burn_subtitles ────────────────────────────────────────────────
+
+    async fn write_test_srt(path: &Path, content: &str) {
+        tokio::fs::write(path, content).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn integration_burn_subtitles_basic() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let srt_path = dir.path().join("sub.srt");
+        let output = dir.path().join("out.mp4");
+        make_test_video(&input, 5.0).await.unwrap();
+        write_test_srt(
+            &srt_path,
+            "1\n00:00:00,000 --> 00:00:02,000\nFirst line\n\n\
+             2\n00:00:02,000 --> 00:00:04,000\nSecond line\n\n",
+        )
+        .await;
+
+        let style = SubtitleStyle::default();
+        let res = burn_subtitles(
+            input.to_str().unwrap(),
+            srt_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &style,
+            |_| {},
+        )
+        .await;
+        assert!(res.is_ok(), "burn_subtitles failed: {:?}", res.err());
+        let meta = video_engine::probe_video(&output).await.unwrap();
+        assert!(
+            (meta.duration_seconds - 5.0).abs() < 0.3,
+            "expected ~5s, got {}",
+            meta.duration_seconds
+        );
+        assert_eq!((meta.width, meta.height), (320, 240));
+    }
+
+    #[tokio::test]
+    async fn integration_burn_subtitles_with_custom_style() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let srt_path = dir.path().join("sub.srt");
+        let output = dir.path().join("out.mp4");
+        make_test_video(&input, 3.0).await.unwrap();
+        write_test_srt(
+            &srt_path,
+            "1\n00:00:00,000 --> 00:00:02,000\nStyled subtitle\n\n",
+        )
+        .await;
+
+        let style = SubtitleStyle {
+            font_size: 28,
+            color: "#ffff00".into(),
+            outline_color: "#000000".into(),
+            outline: 3,
+            position: "top".into(),
+        };
+        let res = burn_subtitles(
+            input.to_str().unwrap(),
+            srt_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &style,
+            |_| {},
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "burn_subtitles with style failed: {:?}",
+            res.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_burn_subtitles_with_unicode() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let srt_path = dir.path().join("sub.srt");
+        let output = dir.path().join("out.mp4");
+        make_test_video(&input, 3.0).await.unwrap();
+        write_test_srt(
+            &srt_path,
+            "1\n00:00:00,000 --> 00:00:02,000\n日本語字幕\n\n",
+        )
+        .await;
+
+        let style = SubtitleStyle::default();
+        let res = burn_subtitles(
+            input.to_str().unwrap(),
+            srt_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &style,
+            |_| {},
+        )
+        .await;
+        assert!(res.is_ok(), "unicode SRT should work: {:?}", res.err());
+    }
+
+    // ── extract_edit_thumbnails ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn integration_extract_edit_thumbnails_count() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let out_dir = dir.path().join("thumbs");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        make_test_video(&input, 10.0).await.unwrap();
+
+        let thumbs = extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            thumbs.len(),
+            5,
+            "expected 5 thumbnails, got {}",
+            thumbs.len()
+        );
+        // Each thumbnail should exist and be non-empty
+        for t in &thumbs {
+            let size = tokio::fs::metadata(t).await.unwrap().len();
+            assert!(size > 100, "thumbnail {t} too small: {size} bytes");
+        }
+    }
+
+    #[tokio::test]
+    async fn integration_extract_edit_thumbnails_cache_hit() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let out_dir = dir.path().join("thumbs_cache");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        make_test_video(&input, 5.0).await.unwrap();
+
+        // First call populates the cache
+        let first_start = std::time::Instant::now();
+        let thumbs1 =
+            extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+                .await
+                .unwrap();
+        let first_elapsed = first_start.elapsed();
+        assert_eq!(thumbs1.len(), 5);
+
+        // Second call with same inputs should hit cache and be substantially faster
+        let second_start = std::time::Instant::now();
+        let thumbs2 =
+            extract_edit_thumbnails(input.to_str().unwrap(), out_dir.to_str().unwrap(), 5)
+                .await
+                .unwrap();
+        let second_elapsed = second_start.elapsed();
+        assert_eq!(thumbs2.len(), 5);
+        // Cache hit should be at least 5x faster than the ffmpeg run
+        assert!(
+            second_elapsed * 5 < first_elapsed,
+            "expected cache hit (2nd={:?}) to be much faster than cold (1st={:?})",
+            second_elapsed,
+            first_elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn integration_extract_single_frame() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let out = dir.path().join("frame.jpg");
+        make_test_video(&input, 10.0).await.unwrap();
+
+        let result =
+            extract_single_frame(input.to_str().unwrap(), 5.0, out.to_str().unwrap()).await;
+        assert!(
+            result.is_ok(),
+            "extract_single_frame failed: {:?}",
+            result.err()
+        );
+        let size = tokio::fs::metadata(&out).await.unwrap().len();
+        assert!(size > 100, "frame file too small: {size} bytes");
+    }
+
+    // ── End-to-end lossless pipeline ─────────────────────────────────
+
+    /// Walk the full export pipeline: apply_edits → merge_audio_video →
+    /// burn_subtitles. Confirm every edit propagates through and the final
+    /// output's resolution matches the source.
+    #[tokio::test]
+    async fn integration_e2e_edits_propagate_to_export() {
+        if !ffmpeg_ok() || !drawtext_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let edited = dir.path().join("edited.mp4");
+        let audio = dir.path().join("narration.mp4");
+        let merged = dir.path().join("merged.mp4");
+        let srt = dir.path().join("subs.srt");
+        let final_out = dir.path().join("final.mp4");
+
+        make_test_video(&input, 10.0).await.unwrap();
+        make_test_video(&audio, 6.0).await.unwrap();
+        tokio::fs::write(
+            &srt,
+            "1\n00:00:00,000 --> 00:00:02,000\nOpening line\n\n\
+             2\n00:00:03,000 --> 00:00:05,000\n日本語字幕\n\n",
+        )
+        .await
+        .unwrap();
+
+        // Step 1: edit with trim + speed + zoom-pan + spotlight + text
+        let mut clip1 = simple_clip(0.0, 3.0, 1.0);
+        clip1.zoom_pan = Some(ZoomPanEffect {
+            start_region: crate::models::ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: crate::models::ZoomRegion {
+                x: 0.3,
+                y: 0.3,
+                width: 0.4,
+                height: 0.4,
+            },
+            easing: EasingPreset::EaseInOut,
+        });
+        let clip2 = simple_clip(4.0, 7.0, 2.0); // 3s source → 1.5s output
+                                                // Output timeline: clip1 = 3s, clip2 = 1.5s → total 4.5s
+        let mut spotlight = base_effect("spotlight", 0.5, 2.0);
+        spotlight.spotlight = Some(SpotlightData {
+            x: 0.5,
+            y: 0.5,
+            radius: 0.2,
+            dim_opacity: 0.6,
+        });
+        let mut text = base_effect("text", 3.0, 4.5);
+        text.text = Some(TextData {
+            content: "End of clip".into(),
+            x: 0.5,
+            y: 0.9,
+            font_size: 5.0,
+            color: "#ffffff".into(),
+            font_family: None,
+            bold: Some(true),
+            italic: None,
+            underline: None,
+            background: None,
+            align: None,
+            opacity: Some(1.0),
+        });
+
+        let plan = VideoEditPlan {
+            clips: vec![clip1, clip2],
+            effects: Some(vec![spotlight, text]),
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            edited.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let edited_meta = video_engine::probe_video(&edited).await.unwrap();
+        // Expected: 3s + 1.5s = 4.5s (±0.5 for encode jitter)
+        assert!(
+            (edited_meta.duration_seconds - 4.5).abs() < 0.6,
+            "edited duration drift: expected ~4.5s, got {}",
+            edited_meta.duration_seconds
+        );
+        assert_eq!(
+            (edited_meta.width, edited_meta.height),
+            (320, 240),
+            "resolution must be preserved through apply_edits"
+        );
+
+        // Step 2: merge with narration audio (replace original)
+        merge_audio_video(
+            edited.to_str().unwrap(),
+            audio.to_str().unwrap(),
+            merged.to_str().unwrap(),
+            true,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let merged_meta = video_engine::probe_video(&merged).await.unwrap();
+        // Merge preserves video via -c:v copy → duration & resolution unchanged
+        assert!(
+            (merged_meta.duration_seconds - edited_meta.duration_seconds).abs() < 0.3,
+            "merge changed duration: was {}, now {}",
+            edited_meta.duration_seconds,
+            merged_meta.duration_seconds
+        );
+        assert_eq!(
+            (merged_meta.width, merged_meta.height),
+            (edited_meta.width, edited_meta.height),
+            "merge must preserve resolution"
+        );
+
+        // Step 3: burn subtitles
+        let style = SubtitleStyle::default();
+        burn_subtitles(
+            merged.to_str().unwrap(),
+            srt.to_str().unwrap(),
+            final_out.to_str().unwrap(),
+            &style,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let final_meta = video_engine::probe_video(&final_out).await.unwrap();
+        assert!(
+            (final_meta.duration_seconds - merged_meta.duration_seconds).abs() < 0.3,
+            "burn_subtitles changed duration: was {}, now {}",
+            merged_meta.duration_seconds,
+            final_meta.duration_seconds
+        );
+        assert_eq!(
+            (final_meta.width, final_meta.height),
+            (merged_meta.width, merged_meta.height),
+            "burn_subtitles must preserve resolution"
+        );
+        assert_eq!(final_meta.codec, "h264", "final output must be h264");
+    }
+
+    /// Regression guard: a single clip with speed=1 and an overlay effect
+    /// (blur/spotlight/fade) must still run the effects pass — the fast-path
+    /// code previously skipped effects, silently producing an unedited output.
+    #[tokio::test]
+    async fn integration_single_clip_with_overlay_effect_not_dropped() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let output = dir.path().join("out.mp4");
+        make_test_video(&input, 5.0).await.unwrap();
+
+        // Source size before any edit
+        let src_size = tokio::fs::metadata(&input).await.unwrap().len();
+
+        // Single clip, speed=1, no zoom/freeze, but WITH a fade effect.
+        // Before the fix, this went through the fast path and effects were
+        // silently dropped.
+        let mut fade = base_effect("fade", 0.0, 5.0);
+        fade.fade = Some(FadeData {
+            color: "#000000".into(),
+            opacity: 0.5,
+        });
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 5.0, 1.0)],
+            effects: Some(vec![fade]),
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        // If the fast path ran, it would be `-c copy` so size ≈ src.
+        // With CRF 0 + fade drawbox overlay, size should be different
+        // (either larger due to the CRF 0 re-encode, or same if encoder is
+        // very efficient). The key check: the output actually went through
+        // the effects pass. We can't easily detect the overlay visually in
+        // a unit test, but we can probe that the output exists and isn't a
+        // byte-for-byte copy of the input.
+        let out_size = tokio::fs::metadata(&output).await.unwrap().len();
+        assert!(out_size > 0);
+        // The CRF-0 lossless re-encode will be significantly larger than
+        // a CRF-36 testsrc input; if sizes are nearly identical something
+        // copied the source without processing.
+        let ratio = out_size as f64 / src_size as f64;
+        assert!(
+            ratio > 2.0,
+            "output/input size ratio = {ratio:.2} — suggests fast path ran and skipped effects"
+        );
+    }
+
+    /// Lossless verification: when a clip has `speed=1.0`, no zoom, no fps
+    /// override, no effects, the output's video bitrate should be at least
+    /// as high as the source (CRF 0 = bit-exact). This is a weak check (same
+    /// decode but ffprobe counts both bitrates, good enough as a regression
+    /// guard against accidentally re-introducing CRF > 0).
+    #[tokio::test]
+    async fn integration_lossless_encode_simple_trim() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let output = dir.path().join("out.mp4");
+        make_test_video(&input, 5.0).await.unwrap();
+
+        // Full-source single clip with speed=1 falls through the fast path
+        // (stream-copy). But for multi-clip we re-encode at CRF 0 — so use
+        // two clips to force the re-encode path.
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(0.0, 2.5, 1.0), simple_clip(2.5, 5.0, 1.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            &plan,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        let src_size = tokio::fs::metadata(&input).await.unwrap().len();
+        let out_size = tokio::fs::metadata(&output).await.unwrap().len();
+        // Lossless output from testsrc should be AT LEAST as large as the
+        // heavily-compressed source. A CRF-0 encode cannot produce a smaller
+        // file than the lossy input unless something is stripped.
+        assert!(
+            out_size >= src_size,
+            "lossless output ({out_size}) unexpectedly smaller than source ({src_size}) — \
+             likely indicates we're not actually encoding lossless"
+        );
     }
 }
