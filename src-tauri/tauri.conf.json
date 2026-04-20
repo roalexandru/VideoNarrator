@@ -25,19 +25,8 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": [
-            "$HOME/.narrator/**",
-            "$DOCUMENT/**",
-            "$DESKTOP/**",
-            "$DOWNLOAD/**",
-            "$VIDEO/**",
-            "$TEMP/**",
-            "/tmp/**",
-            "$HOME/demoVideo/**"
-          ],
-          "deny": [
-            "$HOME/.narrator/config.json"
-          ]
+          "allow": ["$HOME/.narrator/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**", "$VIDEO/**", "$TEMP/**", "/tmp/**", "$HOME/demoVideo/**"],
+          "deny": ["$HOME/.narrator/config.json"]
         }
       }
     }
