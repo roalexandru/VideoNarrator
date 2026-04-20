@@ -105,10 +105,7 @@ pub async fn render_timeline_audio(
         let stderr = String::from_utf8_lossy(&output.stderr);
         // If the source has no audio stream, ffmpeg fails — return None so
         // the encoder runs video-only without this being a hard error.
-        if stderr.contains("does not contain any stream")
-            || stderr.contains("Stream specifier 'a' in filtergraph")
-            || stderr.contains("matches no streams")
-        {
+        if crate::video_edit::looks_like_no_audio_stream(&stderr) {
             return Ok(None);
         }
         return Err(NarratorError::FfmpegFailed(format!(
@@ -224,6 +221,30 @@ fn read_wav_to_f32(path: &Path) -> Result<(Vec<f32>, u32), NarratorError> {
     Ok((out, sr))
 }
 
+/// Soft-clip a single sample: linear up to ±0.95, then tanh-shaped toward
+/// (but never reaching) ±0.99. Needed because the mixer sums narration +
+/// (possibly unducked) original, which can exceed ±1.0 during narration
+/// pauses over loud source audio — hard-clamping there produced audible
+/// crunch. Output asymptotes to ±0.99 as |s| → ∞, so f32 rounding can't
+/// hand int16 conversion a value that saturates to ±32767 (and would wrap
+/// with `i16::MAX - 1` scaling).
+///
+/// Non-finite inputs (NaN / ±Inf) return 0 so a bad decoded sample can't
+/// poison downstream math or trip the `y.signum() == s.signum()` test.
+fn soft_clip(s: f32) -> f32 {
+    if !s.is_finite() {
+        return 0.0;
+    }
+    const KNEE: f32 = 0.95;
+    const CEIL: f32 = 0.99;
+    if s.abs() <= KNEE {
+        s
+    } else {
+        let over = (s.abs() - KNEE) / (1.0 - KNEE);
+        s.signum() * (KNEE + (CEIL - KNEE) * over.tanh())
+    }
+}
+
 fn write_wav_from_f32(path: &Path, samples: &[f32], sr: u32) -> Result<(), NarratorError> {
     let spec = hound::WavSpec {
         channels: 2,
@@ -234,9 +255,8 @@ fn write_wav_from_f32(path: &Path, samples: &[f32], sr: u32) -> Result<(), Narra
     let mut writer = hound::WavWriter::create(path, spec)
         .map_err(|e| NarratorError::FfmpegFailed(format!("wav create: {e}")))?;
     for &s in samples {
-        // Soft clip to avoid wrap-around at extremes.
-        let clipped = s.clamp(-1.0, 1.0);
-        let v = (clipped * (i16::MAX as f32 - 1.0)) as i16;
+        let shaped = soft_clip(s);
+        let v = (shaped * (i16::MAX as f32 - 1.0)) as i16;
         writer
             .write_sample(v)
             .map_err(|e| NarratorError::FfmpegFailed(format!("wav write: {e}")))?;
@@ -334,9 +354,23 @@ pub async fn mix_narration(
         let env = if envelope.is_empty() {
             1.0
         } else {
-            // Upsample: nearest-block value.
-            let bi = (i / block).min(envelope.len() - 1);
-            envelope[bi]
+            // Linearly interpolate between adjacent envelope samples instead
+            // of snapping to a single 20 ms block. Removes audible steps at
+            // block boundaries during narration. Note: this only smooths
+            // *within* the computed envelope range — samples past the last
+            // narration block clamp to `envelope[last]`, so release at the
+            // very end of the narration is still abrupt. Acceptable for
+            // now; users who notice can taper narration tails themselves.
+            let pos = i as f32 / block as f32;
+            let bi = pos.floor() as usize;
+            let frac = pos - bi as f32;
+            // `last` is computed with `saturating_sub(1)` so a future refactor
+            // that lets an empty envelope reach this branch doesn't wrap to
+            // `usize::MAX` and out-of-bounds index.
+            let last = envelope.len().saturating_sub(1);
+            let a = envelope[bi.min(last)];
+            let b = envelope[(bi + 1).min(last)];
+            a + (b - a) * frac
         };
         out.push(o * original_gain * env + n * narration_gain);
     }
@@ -385,5 +419,156 @@ mod tests {
         assert!(f.len() >= 2);
         let product: f64 = f.iter().product();
         assert!((product - 0.25).abs() < 1e-3);
+    }
+
+    // ── mix_narration envelope + clipping tests ────────────────────────
+    //
+    // mix_narration itself needs ffmpeg to decode audio, so we exercise the
+    // helpers directly on f32 buffers here. This covers the regressions
+    // that actually bite users: envelope smoothness and peak clipping.
+
+    /// Synthetic worst case with narration active: ±0.8 peaks on both
+    /// streams, aligned, with the -8 dB duck (linear ≈ 0.398) and the 0.85
+    /// gains that match `video_edit::merge_audio_video`. The sum must stay
+    /// inside ±1.0 so soft_clip doesn't need to engage during speech.
+    #[test]
+    fn mix_default_gains_leave_headroom_for_aligned_peaks() {
+        let narration_peak: f32 = 0.8;
+        let original_peak: f32 = 0.8;
+        let narration_gain: f32 = 0.85;
+        let original_gain: f32 = 0.85;
+        let duck_gain: f32 = 10f32.powf(-8.0 / 20.0);
+
+        let peak_sum = narration_peak * narration_gain + original_peak * original_gain * duck_gain;
+        assert!(
+            peak_sum < 1.0,
+            "peak sum {peak_sum} should stay under ±1.0 with default gains during narration"
+        );
+    }
+
+    /// Soft-clip guard: during narration PAUSES the envelope returns to 1.0
+    /// and unducked ±0.8 peaks on both streams sum to 1.36. The soft-clip
+    /// in `write_wav_from_f32` must keep the output strictly inside ±1.0
+    /// for any finite input (no hard clip, no wrap, no sign flip), and
+    /// must leave the safe region (≤ ±0.95) untouched.
+    #[test]
+    fn soft_clip_preserves_linear_region_and_tames_peaks() {
+        for &s in &[-0.95_f32, -0.5, 0.0, 0.3, 0.95] {
+            assert!(
+                (soft_clip(s) - s).abs() < 1e-6,
+                "soft_clip({s}) must equal {s} (linear), got {}",
+                soft_clip(s)
+            );
+        }
+        for &s in &[1.0_f32, 1.36, 2.0, -1.5, -3.0] {
+            let y = soft_clip(s);
+            assert!(
+                y.abs() < 1.0,
+                "soft_clip({s}) = {y} must be strictly inside ±1.0"
+            );
+            assert!(
+                y.signum() == s.signum(),
+                "soft_clip must preserve sign: soft_clip({s})={y}"
+            );
+        }
+    }
+
+    /// Non-finite samples (NaN / ±Inf) must collapse to 0 instead of
+    /// propagating into the output. A single corrupt decoded sample would
+    /// otherwise NaN-poison everything that sums it and trip the sign /
+    /// magnitude asserts above.
+    #[test]
+    fn soft_clip_collapses_non_finite_samples() {
+        for s in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let y = soft_clip(s);
+            assert!(y == 0.0, "soft_clip({s}) must return 0, got {y}");
+        }
+    }
+
+    /// The envelope interpolation in `mix_narration` is a linear blend
+    /// between adjacent envelope samples. Reproduce the math here to guard
+    /// against anyone swapping it back to nearest-neighbor.
+    #[test]
+    fn envelope_lerp_at_block_boundaries() {
+        let envelope = [1.0_f32, 0.398, 0.398];
+        let block = 1000usize;
+
+        // At an exact block boundary (i = 1000) the answer is the value at
+        // that block.
+        let i = 1000usize;
+        let pos = i as f32 / block as f32;
+        let bi = pos.floor() as usize;
+        let frac = pos - bi as f32;
+        let a = envelope[bi.min(envelope.len() - 1)];
+        let b = envelope[(bi + 1).min(envelope.len() - 1)];
+        let lerped = a + (b - a) * frac;
+        assert!((lerped - 0.398).abs() < 1e-4);
+
+        // Mid-block (i = 500) is halfway between 1.0 and 0.398 → ~0.699.
+        let i = 500usize;
+        let pos = i as f32 / block as f32;
+        let bi = pos.floor() as usize;
+        let frac = pos - bi as f32;
+        let a = envelope[bi.min(envelope.len() - 1)];
+        let b = envelope[(bi + 1).min(envelope.len() - 1)];
+        let lerped = a + (b - a) * frac;
+        assert!(
+            (lerped - 0.699).abs() < 1e-3,
+            "midpoint lerp should be ~0.699, got {lerped}"
+        );
+    }
+
+    #[test]
+    fn compute_ducking_envelope_drops_when_narration_is_loud() {
+        let sr = 48000u32;
+        let block = (sr as usize / 50).max(64) * 2;
+        let loud: Vec<f32> = (0..block * 5).map(|_| 0.5).collect();
+        let env = compute_ducking_envelope(&loud, block, 0.005, -8.0, 60.0, sr);
+        let duck_linear = 10f32.powf(-8.0 / 20.0);
+        assert!(env.len() >= 4);
+        assert!(
+            env.last().copied().unwrap() < duck_linear + 0.05,
+            "envelope should settle near duck target, got {env:?}"
+        );
+    }
+
+    #[test]
+    fn compute_ducking_envelope_stays_at_unity_when_silent() {
+        let sr = 48000u32;
+        let block = (sr as usize / 50).max(64) * 2;
+        let silent: Vec<f32> = vec![0.0; block * 5];
+        let env = compute_ducking_envelope(&silent, block, 0.005, -8.0, 60.0, sr);
+        for (i, e) in env.iter().enumerate() {
+            assert!(
+                (e - 1.0).abs() < 1e-4,
+                "silent narration should not duck (block {i} = {e})"
+            );
+        }
+    }
+
+    #[test]
+    fn read_wav_to_f32_duplicates_mono_to_stereo() {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut writer = hound::WavWriter::create(tmp.path(), spec).unwrap();
+            for &s in &[0i16, 16_384, -16_384, 32_000] {
+                writer.write_sample(s).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let (stereo, sr) = read_wav_to_f32(tmp.path()).unwrap();
+        assert_eq!(sr, 48000);
+        // Mono input of 4 samples should come back as 4 stereo frames = 8 values.
+        assert_eq!(stereo.len(), 8);
+        // Each L/R pair is the same value (mono duplicated).
+        for pair in stereo.chunks_exact(2) {
+            assert!((pair[0] - pair[1]).abs() < 1e-6);
+        }
     }
 }

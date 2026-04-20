@@ -1341,6 +1341,13 @@ pub async fn generate_tts(
         // silence gaps matching the video timing so the audio duration matches.
         let total = segments.len();
 
+        // Delete any stale timings sidecar from a prior run. If we don't,
+        // and today's run fails (or the sidecar write below silently fails),
+        // burn_subtitles will happily align today's audio against yesterday's
+        // timings — segments appear off by whatever drift last run had.
+        let stale_sidecar = out.join("narration_timings.json");
+        let _ = tokio::fs::remove_file(&stale_sidecar).await;
+
         // Generate each segment individually
         let mut segment_files: Vec<(usize, PathBuf, f64, f64)> = Vec::new(); // (index, path, start, end)
         for (i, seg) in segments.iter().enumerate() {
@@ -1388,8 +1395,13 @@ pub async fn generate_tts(
             let mut concat_parts: Vec<PathBuf> = Vec::new();
             let mut silence_idx = 0;
             let mut audio_pos: f64 = 0.0; // current position in the output audio
+                                          // Record where each rendered segment actually landed so the burn
+                                          // subtitles pass can track the real audio instead of the scripted
+                                          // plan (which drifts whenever a TTS clip overruns its window).
+            let mut actual_timings: Vec<export_engine::ActualTiming> =
+                Vec::with_capacity(segment_files.len());
 
-            for (_seg_idx, seg_path, start, _end) in segment_files.iter() {
+            for (seg_idx, seg_path, start, end) in segment_files.iter() {
                 // Gap = desired start position minus where we currently are
                 let gap = start - audio_pos;
 
@@ -1421,11 +1433,28 @@ pub async fn generate_tts(
                     .await
                     .unwrap_or_else(|e| {
                         tracing::warn!("Could not probe TTS segment duration: {e}, estimating from time window");
-                        (_end - start).max(0.5)
+                        (end - start).max(0.5)
                     });
+
+                let seg_start = audio_pos;
+                let seg_end = audio_pos + seg_dur;
+                actual_timings.push(export_engine::ActualTiming {
+                    segment_index: *seg_idx,
+                    start_seconds: seg_start,
+                    end_seconds: seg_end,
+                });
 
                 concat_parts.push(seg_path.clone());
                 audio_pos += seg_dur;
+            }
+
+            // Sidecar for the burn-subtitles pass. Best-effort: a failure here
+            // just means burn falls back to scripted timings.
+            let timings_path = out.join("narration_timings.json");
+            if let Ok(json) = serde_json::to_string(&actual_timings) {
+                if let Err(e) = tokio::fs::write(&timings_path, json).await {
+                    tracing::warn!("Could not write narration_timings.json sidecar: {e}");
+                }
             }
 
             // Trailing silence to reach full video duration
@@ -1837,12 +1866,14 @@ pub async fn merge_audio_video(
     output_path: String,
     replace_audio: bool,
     channel: Channel<ProgressEvent>,
-) -> Result<String, NarratorError> {
+    duck_db: Option<f32>,
+) -> Result<render::MergeOutcome, NarratorError> {
     render::merge_audio_video(
         &video_path,
         &audio_path,
         &output_path,
         replace_audio,
+        duck_db.unwrap_or(-8.0),
         channel_reporter(channel),
     )
     .await
@@ -1960,22 +1991,54 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
 
 // ── Subtitle burn command ──
 
+/// Burn subtitles into `output_path`. When `audio_dir` is supplied and
+/// contains a `narration_timings.json` sidecar (written by `generate_tts`
+/// in compact mode), the SRT is generated from the **actual** TTS placements
+/// rather than the scripted plan, keeping subs aligned with the audio even
+/// when TTS overruns cause drift. If `cleanup_intermediate` is supplied,
+/// that file is removed on success (typically the `_merged.mp4` the UI
+/// produces on the way to the burnt final).
 #[tauri::command]
 pub async fn burn_subtitles(
     video_path: String,
-    srt_content: String,
+    script: NarrationScript,
     output_path: String,
     channel: Channel<ProgressEvent>,
     style: Option<video_edit::SubtitleStyle>,
+    audio_dir: Option<String>,
+    cleanup_intermediate: Option<String>,
 ) -> Result<String, NarratorError> {
     let style = style.unwrap_or_default();
 
-    // Write SRT to temp file, then burn
-    let out_dir = std::path::Path::new(&output_path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(std::env::temp_dir);
-    let srt_path = out_dir.join("_temp_subtitles.srt");
+    // Try to load the sidecar timings written by generate_tts (compact mode).
+    let actual_timings: Option<Vec<export_engine::ActualTiming>> = match audio_dir {
+        Some(dir) => {
+            let sidecar = std::path::PathBuf::from(&dir).join("narration_timings.json");
+            match tokio::fs::read_to_string(&sidecar).await {
+                Ok(s) => match serde_json::from_str::<Vec<export_engine::ActualTiming>>(&s) {
+                    Ok(ts) => Some(ts),
+                    Err(e) => {
+                        tracing::warn!(
+                            "narration_timings.json at {} was unparseable ({}), falling back to scripted timings",
+                            sidecar.display(),
+                            e
+                        );
+                        None
+                    }
+                },
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+
+    let srt_content = export_engine::build_burn_srt(&script, actual_timings.as_deref());
+
+    // Write SRT to a unique temp file. A shared path next to the output
+    // used to race between concurrent exports and could survive a failed
+    // burn as a stale file visible to the user.
+    let srt_path =
+        std::env::temp_dir().join(format!("_narrator_burn_srt_{}.srt", uuid::Uuid::new_v4()));
     tokio::fs::write(&srt_path, &srt_content).await?;
 
     let result = render::burn_subtitles(
@@ -1987,8 +2050,51 @@ pub async fn burn_subtitles(
     )
     .await;
 
+    // Clean up the SRT no matter the outcome, and only remove the
+    // caller-supplied intermediate if the burn actually succeeded — keep
+    // the intermediate around on error so the user has something to inspect.
     let _ = tokio::fs::remove_file(&srt_path).await;
+    if result.is_ok() {
+        if let Some(path) = cleanup_intermediate {
+            if is_safe_intermediate_path(&path, &output_path) {
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    tracing::warn!(
+                        "failed to remove intermediate {path}: {e} (burn succeeded, leaving file behind)"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "refusing to cleanup_intermediate {path:?}: must end with '_merged.mp4', live in the output directory, and differ from the output path"
+                );
+            }
+        }
+    }
     result
+}
+
+/// Guard the `cleanup_intermediate` IPC arg against deleting arbitrary
+/// files. The UI passes `<output_dir>/<base>_merged.mp4`; anything else
+/// (a different directory, a different filename, or the output path
+/// itself) is rejected without even attempting the delete.
+fn is_safe_intermediate_path(candidate: &str, output_path: &str) -> bool {
+    if candidate.is_empty() || candidate == output_path {
+        return false;
+    }
+    let cand = std::path::Path::new(candidate);
+    let out = std::path::Path::new(output_path);
+    let Some(cand_name) = cand.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    // We only ever produce `<base>_merged.mp4` as an intermediate. Insist
+    // on that suffix so a future UI bug can't ask us to delete something
+    // else.
+    if !cand_name.ends_with("_merged.mp4") {
+        return false;
+    }
+    match (cand.parent(), out.parent()) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 // ── Style commands ──
@@ -2001,6 +2107,49 @@ pub async fn list_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── is_safe_intermediate_path tests ──
+
+    #[test]
+    fn is_safe_intermediate_accepts_sibling_merged_mp4() {
+        assert!(is_safe_intermediate_path(
+            "/tmp/out/video_merged.mp4",
+            "/tmp/out/video_burned.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_output_path() {
+        let out = "/tmp/out/video.mp4";
+        assert!(!is_safe_intermediate_path(out, out));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_non_merged_suffix() {
+        assert!(!is_safe_intermediate_path(
+            "/tmp/out/important.mov",
+            "/tmp/out/video.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_different_directory() {
+        assert!(!is_safe_intermediate_path(
+            "/var/other/video_merged.mp4",
+            "/tmp/out/video.mp4"
+        ));
+    }
+
+    #[test]
+    fn is_safe_intermediate_rejects_empty_and_bare_filename() {
+        assert!(!is_safe_intermediate_path("", "/tmp/out/video.mp4"));
+        // A bare filename has no parent — reject rather than risk resolving
+        // against the process cwd.
+        assert!(!is_safe_intermediate_path(
+            "video_merged.mp4",
+            "/tmp/out/video.mp4"
+        ));
+    }
 
     // ── sanitize_tts_text tests ──
 

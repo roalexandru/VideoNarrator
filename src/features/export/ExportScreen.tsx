@@ -152,6 +152,7 @@ export function ExportScreen() {
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoError, setVideoError] = useState<string | null>(null);
   const [, setVideoOutputPath] = useState<string | null>(null);
+  const [videoNotice, setVideoNotice] = useState<string | null>(null);
 
   // Audio-only export
   const [audioPhase, setAudioPhase] = useState<"idle" | "generating" | "done" | "error">("idle");
@@ -220,6 +221,7 @@ export function ExportScreen() {
     setVideoProgress(0);
     setVideoError(null);
     setVideoOutputPath(null);
+    setVideoNotice(null);
     const exportStart = Date.now();
 
     try {
@@ -293,36 +295,50 @@ export function ExportScreen() {
       const finalPath = `${dir}/${base}.mp4`;
 
       if (exp.burnSubtitles) {
-        // Merge to temp file first, then burn subtitles to final
+        // Merge to temp file first, then burn subtitles to final.
+        // Burn is the slowest phase (full re-encode), so give it the larger
+        // slice of the progress bar: merge 65–75 %, burn 75–100 %.
         const mergedPath = `${dir}/${base}_merged.mp4`;
         const mergeChannel = new Channel<ProgressEvent>();
         mergeChannel.onmessage = (e: ProgressEvent) => {
-          if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.15); // 65-80%
+          if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.10); // 65-75%
         };
-        await mergeAudioVideo(sourceVideoPath, audioFile, mergedPath, exp.replaceAudio, mergeChannel);
-        setVideoProgress(80);
+        const mergeOutcome = await mergeAudioVideo(sourceVideoPath, audioFile, mergedPath, exp.replaceAudio, mergeChannel, exp.duckDb);
+        if (mergeOutcome.fell_back_to_narration_only && !exp.replaceAudio) {
+          setVideoNotice("Source video had no audio track — exported with narration only.");
+        }
+        setVideoProgress(75);
 
         setVideoPhase("subtitles");
-        setVideoProgress(85);
-        const srtContent = generateSrt(script);
         const burnChannel = new Channel<ProgressEvent>();
         burnChannel.onmessage = (e: ProgressEvent) => {
-          if (e.kind === "progress") setVideoProgress(85 + e.percent * 0.15); // 85-100%
+          if (e.kind === "progress") setVideoProgress(75 + e.percent * 0.25); // 75-100%
         };
-        await burnSubtitles(mergedPath, srtContent, finalPath, burnChannel, {
-          font_size: exp.subtitleFontSize,
-          color: exp.subtitleColor,
-          outline_color: exp.subtitleOutlineColor,
-          outline: exp.subtitleOutline,
-          position: exp.subtitlePosition,
-        });
+        await burnSubtitles(
+          mergedPath,
+          script,
+          finalPath,
+          burnChannel,
+          {
+            font_size: exp.subtitleFontSize,
+            color: exp.subtitleColor,
+            outline_color: exp.subtitleOutlineColor,
+            outline: exp.subtitleOutline,
+            position: exp.subtitlePosition,
+          },
+          audioDir,
+          mergedPath,
+        );
       } else {
         // Merge directly to final path
         const mergeChannel = new Channel<ProgressEvent>();
         mergeChannel.onmessage = (e: ProgressEvent) => {
           if (e.kind === "progress") setVideoProgress(65 + e.percent * 0.35); // 65-100%
         };
-        await mergeAudioVideo(sourceVideoPath, audioFile, finalPath, exp.replaceAudio, mergeChannel);
+        const mergeOutcome = await mergeAudioVideo(sourceVideoPath, audioFile, finalPath, exp.replaceAudio, mergeChannel, exp.duckDb);
+        if (mergeOutcome.fell_back_to_narration_only && !exp.replaceAudio) {
+          setVideoNotice("Source video had no audio track — exported with narration only.");
+        }
       }
 
       setVideoProgress(100);
@@ -499,6 +515,19 @@ export function ExportScreen() {
               <Radio checked={!exp.replaceAudio} onClick={() => exp.setReplaceAudio(false)} label="Mix with original" />
             </div>
 
+            {/* Ducking strength (only relevant when mixing with the original) */}
+            {!exp.replaceAudio && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, paddingLeft: 2 }}>
+                <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 92 }}>Duck original</span>
+                <input
+                  type="range" min={-20} max={0} step={1} value={exp.duckDb}
+                  onChange={(e) => exp.setDuckDb(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: C.accent }}
+                />
+                <span style={{ fontSize: 11, color: C.dim, minWidth: 42, textAlign: "right" }}>{exp.duckDb} dB</span>
+              </div>
+            )}
+
             {/* Subtitles */}
             <Toggle checked={exp.burnSubtitles} onChange={exp.setBurnSubtitles} label="Burn subtitles into video" />
 
@@ -642,6 +671,9 @@ export function ExportScreen() {
                 <button onClick={() => openFolder(exp.outputDirectory!)} style={{ background: "none", border: "none", color: C.success, fontSize: 11, cursor: "pointer", fontFamily: "inherit", textDecoration: "underline" }}>Open folder</button>
               </div>
             )}
+            {videoPhase === "done" && videoNotice && (
+              <div style={{ fontSize: 12, color: "#fbbf24", fontWeight: 500 }}>{videoNotice}</div>
+            )}
             {videoPhase === "error" && (
               <div style={{ fontSize: 12, color: C.error, fontWeight: 500 }}>{videoError}</div>
             )}
@@ -777,16 +809,3 @@ export function ExportScreen() {
   );
 }
 
-// ── Helper: generate SRT content from script (client-side for subtitle burn) ──
-function generateSrt(script: { segments: { index: number; start_seconds: number; end_seconds: number; text: string }[] }): string {
-  return script.segments.map((seg, i) => {
-    const fmtTime = (s: number) => {
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = Math.floor(s % 60);
-      const ms = Math.round((s % 1) * 1000);
-      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")},${String(ms).padStart(3, "0")}`;
-    };
-    return `${i + 1}\n${fmtTime(seg.start_seconds)} --> ${fmtTime(seg.end_seconds)}\n${seg.text}\n`;
-  }).join("\n");
-}

@@ -165,6 +165,46 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
     })
 }
 
+/// True when `path` has at least one audio stream. Used by the mix path
+/// to take the narration-only fallback proactively, instead of relying on
+/// English-only ffmpeg stderr string-matching after a failed mix.
+///
+/// Returns `Ok(false)` on any file that ffprobe parses but lists no audio
+/// stream. Returns `Err` only when ffprobe itself fails — in that case the
+/// caller should propagate rather than silently fall back.
+pub async fn probe_has_audio_stream(path: &Path) -> Result<bool, NarratorError> {
+    let ffprobe = detect_ffprobe()?;
+    let output = Command::new(ffprobe.as_os_str())
+        .no_window()
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "a",
+        ])
+        .arg(path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::VideoProbeError(stderr.to_string()));
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}"))
+    })?;
+
+    Ok(json["streams"]
+        .as_array()
+        .map(|streams| !streams.is_empty())
+        .unwrap_or(false))
+}
+
 /// Probe the duration of any media file (audio or video).
 pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
     let ffprobe = detect_ffprobe()?;

@@ -13,6 +13,9 @@ interface ExportStore {
   subtitleOutlineColor: string;
   subtitleOutline: number;
   subtitlePosition: "bottom" | "top";
+  /** Amount (dB) to duck the original audio whenever narration is audible.
+   *  Only used when replaceAudio is false. Range: -20..0. */
+  duckDb: number;
 
   toggleFormat: (format: ExportFormat) => void;
   toggleLanguageExport: (lang: string) => void;
@@ -25,6 +28,7 @@ interface ExportStore {
   setSubtitleOutlineColor: (color: string) => void;
   setSubtitleOutline: (outline: number) => void;
   setSubtitlePosition: (position: "bottom" | "top") => void;
+  setDuckDb: (db: number) => void;
   initLanguages: (languages: string[]) => void;
   initFromTitle: (title: string, homeDir: string) => void;
   reset: () => void;
@@ -53,6 +57,7 @@ export const useExportStore = create<ExportStore>((set) => ({
   subtitleOutlineColor: "#000000",
   subtitleOutline: 2,
   subtitlePosition: "bottom",
+  duckDb: -8,
 
   toggleFormat: (format) =>
     set((state) => {
@@ -81,6 +86,7 @@ export const useExportStore = create<ExportStore>((set) => ({
   setSubtitleOutlineColor: (color) => set({ subtitleOutlineColor: color }),
   setSubtitleOutline: (outline) => set({ subtitleOutline: outline }),
   setSubtitlePosition: (position) => set({ subtitlePosition: position }),
+  setDuckDb: (db) => set({ duckDb: Math.max(-20, Math.min(0, db)) }),
 
   initLanguages: (languages) =>
     set({
@@ -109,5 +115,6 @@ export const useExportStore = create<ExportStore>((set) => ({
       subtitleOutlineColor: "#000000",
       subtitleOutline: 2,
       subtitlePosition: "bottom",
+      duckDb: -8,
     }),
 }));

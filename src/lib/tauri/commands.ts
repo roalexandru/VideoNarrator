@@ -228,8 +228,20 @@ export const extractSingleFrame = (videoPath: string, timestamp: number, outputP
 export const saveScript = (projectId: string, language: string, script: import("../../types/script").NarrationScript) =>
   invoke<string>("save_script", { projectId, language, script });
 
-export const mergeAudioVideo = (videoPath: string, audioPath: string, outputPath: string, replaceAudio: boolean, channel: Channel<import("../../types/processing").ProgressEvent>) =>
-  invoke<string>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel });
+export interface MergeOutcome {
+  output_path: string;
+  fell_back_to_narration_only: boolean;
+}
+
+export const mergeAudioVideo = (
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+  replaceAudio: boolean,
+  channel: Channel<import("../../types/processing").ProgressEvent>,
+  duckDb?: number,
+) =>
+  invoke<MergeOutcome>("merge_audio_video", { videoPath, audioPath, outputPath, replaceAudio, channel, duckDb });
 
 export const openFolder = (path: string) => invoke<void>("open_folder", { path });
 
@@ -311,8 +323,16 @@ export interface SubtitleStyle {
   position: string;
 }
 
-export const burnSubtitles = (videoPath: string, srtContent: string, outputPath: string, channel: Channel<import("../../types/processing").ProgressEvent>, style?: SubtitleStyle) =>
-  invoke<string>("burn_subtitles", { videoPath, srtContent, outputPath, channel, style });
+export const burnSubtitles = (
+  videoPath: string,
+  script: import("../../types/script").NarrationScript,
+  outputPath: string,
+  channel: Channel<import("../../types/processing").ProgressEvent>,
+  style?: SubtitleStyle,
+  audioDir?: string,
+  cleanupIntermediate?: string,
+) =>
+  invoke<string>("burn_subtitles", { videoPath, script, outputPath, channel, style, audioDir, cleanupIntermediate });
 
 // Styles
 export const listStyles = () =>

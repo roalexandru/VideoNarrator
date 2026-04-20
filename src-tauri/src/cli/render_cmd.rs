@@ -94,9 +94,12 @@ pub async fn run(cmd: RenderCmd, progress: ProgressMode) -> Result<Value, Narrat
             output,
             replace,
         } => {
-            let path =
-                render::merge_audio_video(&video, &audio, &output, replace, reporter).await?;
-            Ok(json!({ "output_path": path }))
+            let outcome =
+                render::merge_audio_video(&video, &audio, &output, replace, -8.0, reporter).await?;
+            Ok(json!({
+                "output_path": outcome.output_path,
+                "fell_back_to_narration_only": outcome.fell_back_to_narration_only,
+            }))
         }
         RenderCmd::ExtractFrame { input, at, output } => {
             let path = render::extract_single_frame(&input, at, &output).await?;

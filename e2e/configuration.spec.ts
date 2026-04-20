@@ -58,15 +58,13 @@ test.describe("Configuration Screen", () => {
     await expect(page.getByText("Voice")).toBeVisible();
   });
 
-  test("project overrides toggle works", async ({ page }) => {
-    // Initially the overrides are hidden
-    await expect(page.getByText("+ Show Project Overrides")).toBeVisible();
-
-    // Click to show overrides
-    await page.getByText("+ Show Project Overrides").click();
-
-    // Now we should see override fields
-    await expect(page.getByText("- Hide Project Overrides")).toBeVisible();
+  test("project overrides render inline (no toggle after v0.7.3)", async ({ page }) => {
+    // v0.7.3 flattened the old "+ Show Project Overrides" accordion: Custom
+    // Prompt and Max Frames are now always visible, inline next to their
+    // related sections. The component test in Configuration.test.tsx asserts
+    // the same contract.
+    await expect(page.getByText(/\+ Show Project Overrides/)).toHaveCount(0);
+    await expect(page.getByText(/- Hide Project Overrides/)).toHaveCount(0);
     await expect(page.getByText("Custom Prompt")).toBeVisible();
     await expect(page.getByText("Max Frames")).toBeVisible();
   });
