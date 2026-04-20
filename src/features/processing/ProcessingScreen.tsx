@@ -41,15 +41,15 @@ export function ProcessingScreen() {
 
   const run = useCallback(async ({ resume = false }: { resume?: boolean } = {}) => {
     const generationStart = Date.now();
-    // Snapshot segments from any prior partial run BEFORE we clear state.
+    // Snapshot segments from any prior partial run BEFORE we reset state.
     // On resume we send them to the backend so completed chunks aren't re-billed.
+    // Reset clears everything (frames re-extract, progress from 0) — then we
+    // re-seed streamingSegments so the prior partial preview stays visible and
+    // goes back to the backend as resume_segments.
     const resumeSegments = resume ? useProcessingStore.getState().streamingSegments : [];
-    if (resume) {
-      // Preserve streamingSegments; clear only the phase/error/progress so the UI unblocks.
-      proc.setError(null);
-      proc.setProgress(0);
-    } else {
-      proc.reset();
+    proc.reset();
+    if (resume && resumeSegments.length > 0) {
+      proc.replaceStreamingSegments(resumeSegments);
     }
     proc.setPhase("extracting_frames");
     trackEvent("generation_started", {

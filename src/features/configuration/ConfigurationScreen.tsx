@@ -54,9 +54,10 @@ export function ConfigurationScreen() {
 
   // Auto-raise maxFrames to the recommendation when duration / density change.
   // Never lower — respect user choosing a higher manual cap.
+  const { maxFrames, setMaxFrames } = config;
   useEffect(() => {
-    if (config.maxFrames < recommended) config.setMaxFrames(recommended);
-  }, [recommended, config]);
+    if (maxFrames < recommended) setMaxFrames(recommended);
+  }, [recommended, maxFrames, setMaxFrames]);
 
   // Provider status (which AI providers have keys configured)
   const [providerStatuses, setProviderStatuses] = useState<ProviderKeyStatus[]>([]);
@@ -108,9 +109,10 @@ export function ConfigurationScreen() {
   // Reasoning models reject a user-set temperature. Pin to 1.0 so the effective
   // value the UI shows matches what the backend will send (it strips temperature
   // for these models but users shouldn't see 0.7 on a control they can't change).
+  const { temperature, setTemperature } = config;
   useEffect(() => {
-    if (reasoning && config.temperature !== 1.0) config.setTemperature(1.0);
-  }, [reasoning, config]);
+    if (reasoning && temperature !== 1.0) setTemperature(1.0);
+  }, [reasoning, temperature, setTemperature]);
 
   // Derived: current TTS provider info
   const currentTts = TTS_PROVIDERS.find((t) => t.id === config.ttsProvider);
