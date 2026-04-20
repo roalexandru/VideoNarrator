@@ -263,7 +263,7 @@ export function setupDefaultMocks() {
         return "/tmp/edited.mp4";
 
       case "merge_audio_video":
-        return "/tmp/final.mp4";
+        return { output_path: "/tmp/final.mp4", fell_back_to_narration_only: false };
 
       case "burn_subtitles":
         return "/tmp/subtitled.mp4";

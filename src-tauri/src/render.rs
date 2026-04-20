@@ -30,7 +30,7 @@ use crate::error::NarratorError;
 use crate::models::{ProgressEvent, VideoMetadata};
 use crate::{video_edit, video_engine};
 
-pub use video_edit::{SubtitleStyle, VideoEditPlan};
+pub use video_edit::{MergeOutcome, SubtitleStyle, VideoEditPlan};
 
 /// Bridges progress events from a render to a transport (Tauri channel,
 /// stderr NDJSON, in-memory buffer for tests, etc.).
@@ -104,20 +104,25 @@ pub async fn apply_edits(
 }
 
 /// Mux narration audio into an existing video. `replace_audio = true` swaps
-/// the audio track wholesale; `false` mixes via ffmpeg `amix`.
+/// the audio track wholesale; `false` mixes original + narration with
+/// auto-ducking (`duck_db` controls the dip, typical range -4..-15 dB).
+/// Returns a `MergeOutcome` so callers can detect the narration-only
+/// fallback (e.g. to warn the user the source had no audio).
 pub async fn merge_audio_video(
     video_path: &str,
     audio_path: &str,
     output_path: &str,
     replace_audio: bool,
+    duck_db: f32,
     reporter: Arc<dyn ProgressReporter>,
-) -> Result<String, NarratorError> {
+) -> Result<MergeOutcome, NarratorError> {
     let on_progress = forward_percent_msg(&reporter);
     video_edit::merge_audio_video(
         video_path,
         audio_path,
         output_path,
         replace_audio,
+        duck_db,
         on_progress,
     )
     .await

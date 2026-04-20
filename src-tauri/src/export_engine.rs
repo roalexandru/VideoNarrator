@@ -1,6 +1,45 @@
 //! Export formatters for narration scripts in JSON, SRT, VTT, TXT, MD, and SSML.
 
 use crate::models::{NarrationScript, Pace};
+use serde::{Deserialize, Serialize};
+
+/// Where a rendered narration segment actually landed on the output audio
+/// timeline. Emitted by `generate_tts` (compact mode) as a sidecar JSON so the
+/// burn-subtitles pass can draw subs against the real audio, not the scripted
+/// plan — which drifts whenever a TTS clip overruns its window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActualTiming {
+    pub segment_index: usize,
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+}
+
+/// Build the SRT that will be burnt into the output video. When
+/// `actual_timings` is `Some` and contains entries for a segment, those
+/// values override the scripted `start_seconds`/`end_seconds` — necessary
+/// because TTS durations drift from the plan and subtitles should track what
+/// the viewer hears, not what was scheduled.
+pub fn build_burn_srt(script: &NarrationScript, actual_timings: Option<&[ActualTiming]>) -> String {
+    let mut output = String::new();
+
+    for (i, segment) in script.segments.iter().enumerate() {
+        let (start, end) = actual_timings
+            .and_then(|ts| ts.iter().find(|t| t.segment_index == segment.index))
+            .map(|t| (t.start_seconds, t.end_seconds))
+            .unwrap_or((segment.start_seconds, segment.end_seconds));
+
+        output.push_str(&format!("{}\n", i + 1));
+        output.push_str(&format!(
+            "{} --> {}\n",
+            format_srt_time(start),
+            format_srt_time(end)
+        ));
+        output.push_str(&segment.text);
+        output.push_str("\n\n");
+    }
+
+    output
+}
 
 pub fn export_json(script: &NarrationScript) -> String {
     serde_json::to_string_pretty(script).unwrap_or_default()
@@ -647,6 +686,55 @@ mod tests {
         // Emphasis word next to punctuation should still match
         let out = wrap_emphasis("hello, world!", "world");
         assert_eq!(out, "hello, <emphasis level=\"moderate\">world</emphasis>!");
+    }
+
+    #[test]
+    fn build_burn_srt_uses_scripted_times_when_no_actuals() {
+        let script = test_script();
+        let srt = build_burn_srt(&script, None);
+        assert!(srt.contains("1\n00:00:00,000 --> 00:00:10,000"));
+        assert!(srt.contains("2\n00:00:12,000 --> 00:00:25,000"));
+    }
+
+    #[test]
+    fn build_burn_srt_prefers_actual_timings_when_provided() {
+        let script = test_script();
+        // Forge a 2s overrun on segment 0 → segment 1 shifts later.
+        let actuals = vec![
+            ActualTiming {
+                segment_index: 0,
+                start_seconds: 0.0,
+                end_seconds: 12.0,
+            },
+            ActualTiming {
+                segment_index: 1,
+                start_seconds: 12.0,
+                end_seconds: 27.0,
+            },
+        ];
+        let srt = build_burn_srt(&script, Some(&actuals));
+        assert!(srt.contains("1\n00:00:00,000 --> 00:00:12,000"));
+        assert!(srt.contains("2\n00:00:12,000 --> 00:00:27,000"));
+    }
+
+    #[test]
+    fn build_burn_srt_falls_back_per_segment_when_actuals_incomplete() {
+        let script = test_script();
+        // Only segment 1 has an actual timing; segment 0 falls back to scripted.
+        let actuals = vec![ActualTiming {
+            segment_index: 1,
+            start_seconds: 13.5,
+            end_seconds: 26.0,
+        }];
+        let srt = build_burn_srt(&script, Some(&actuals));
+        assert!(
+            srt.contains("1\n00:00:00,000 --> 00:00:10,000"),
+            "segment 0 should keep scripted times:\n{srt}"
+        );
+        assert!(
+            srt.contains("2\n00:00:13,500 --> 00:00:26,000"),
+            "segment 1 should use actual times:\n{srt}"
+        );
     }
 
     #[test]

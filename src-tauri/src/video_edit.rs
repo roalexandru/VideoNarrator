@@ -481,13 +481,37 @@ pub async fn apply_edits(
     Ok(output_path.to_string())
 }
 
+/// Result of a merge pass. `fell_back_to_narration_only` is true when the
+/// caller asked to mix with the original audio but the source video had no
+/// audio stream, so we produced a narration-only output instead — the UI
+/// should surface a non-blocking warning in that case.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MergeOutcome {
+    pub output_path: String,
+    pub fell_back_to_narration_only: bool,
+}
+
+/// True when the ffmpeg stderr indicates the input had no audio stream.
+/// Used to distinguish "source has no audio" (recoverable: play the
+/// narration alone) from other mix failures (propagate as an error).
+/// Shared with `compositor::audio::render_timeline_audio` so both paths
+/// classify the same stderr identically.
+pub(crate) fn looks_like_no_audio_stream(err_msg: &str) -> bool {
+    let m = err_msg.to_lowercase();
+    m.contains("does not contain any stream")
+        || m.contains("stream specifier 'a' in filtergraph")
+        || m.contains("matches no streams")
+        || m.contains("no audio stream")
+}
+
 pub async fn merge_audio_video(
     video_path: &str,
     audio_path: &str,
     output_path: &str,
     replace_audio: bool,
+    duck_db: f32,
     on_progress: impl Fn(f64, Option<String>),
-) -> Result<String, NarratorError> {
+) -> Result<MergeOutcome, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
     if replace_audio {
@@ -525,7 +549,10 @@ pub async fn merge_audio_video(
         }
 
         on_progress(100.0, Some("Audio complete".to_string()));
-        return Ok(output_path.to_string());
+        return Ok(MergeOutcome {
+            output_path: output_path.to_string(),
+            fell_back_to_narration_only: false,
+        });
     }
 
     // Mix original + narration audio. Phase 5: this happens in Rust via the
@@ -537,55 +564,70 @@ pub async fn merge_audio_video(
     let mixed_wav = tmp_dir.join(format!("_narrator_mix_{}.wav", uuid::Uuid::new_v4()));
     let _cleanup = TempCleanup(vec![mixed_wav.clone()]);
 
-    // Default ducking: -8dB whenever narration has signal. Keeps narration
-    // intelligible without making the original disappear.
+    // Ducking: `duck_db` dB drop on the original whenever narration has
+    // signal (defaults to -8 dB at the IPC layer). Gains are held at 0.85
+    // to keep ±0.8 peaks on both streams well under ±1.0 once the duck is
+    // applied — otherwise `write_wav_from_f32` would hard-clip on loud TTS
+    // over music-heavy originals.
     let mix_result = crate::compositor::audio::mix_narration(
         Path::new(video_path),
         Path::new(audio_path),
         &mixed_wav,
-        1.0,
-        1.0,
-        -8.0,
+        0.85,
+        0.85,
+        duck_db,
     )
     .await;
 
     if let Err(e) = mix_result {
-        // Fallback: video might not have an audio stream — use narration only
-        // via straight mux.
-        tracing::warn!("Rust mix failed ({e}), falling back to narration-only mux");
-        let fallback = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                video_path,
-                "-i",
-                audio_path,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-        if !fallback.status.success() {
-            let stderr = String::from_utf8_lossy(&fallback.stderr);
-            return Err(NarratorError::FfmpegFailed(format!(
-                "Audio merge fallback failed: {}",
-                &stderr[stderr.len().saturating_sub(500)..]
-            )));
+        let err_msg = e.to_string();
+        if looks_like_no_audio_stream(&err_msg) {
+            // Source video has no audio stream. The user asked for "mix with
+            // original" but there's nothing to mix — produce a narration-only
+            // mux and signal it so the UI can warn the user.
+            tracing::warn!("Source has no audio — falling back to narration-only mux");
+            let fallback = Command::new(ffmpeg.as_os_str())
+                .no_window()
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    video_path,
+                    "-i",
+                    audio_path,
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "1:a:0",
+                    output_path,
+                ])
+                .output()
+                .await
+                .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+            if !fallback.status.success() {
+                let stderr = String::from_utf8_lossy(&fallback.stderr);
+                return Err(NarratorError::FfmpegFailed(format!(
+                    "Audio merge fallback failed: {}",
+                    &stderr[stderr.len().saturating_sub(500)..]
+                )));
+            }
+            on_progress(100.0, Some("Audio complete".to_string()));
+            return Ok(MergeOutcome {
+                output_path: output_path.to_string(),
+                fell_back_to_narration_only: true,
+            });
         }
-        on_progress(100.0, Some("Audio complete".to_string()));
-        return Ok(output_path.to_string());
+        // Any other mix failure is a real problem — surface it instead of
+        // silently dropping the original audio.
+        return Err(NarratorError::FfmpegFailed(format!(
+            "Audio mix failed: {err_msg}"
+        )));
     }
 
     on_progress(70.0, Some("Encoding final audio".to_string()));
@@ -630,7 +672,10 @@ pub async fn merge_audio_video(
     }
 
     on_progress(100.0, Some("Audio complete".to_string()));
-    Ok(output_path.to_string())
+    Ok(MergeOutcome {
+        output_path: output_path.to_string(),
+        fell_back_to_narration_only: false,
+    })
 }
 
 /// RAII helper for cleaning up temp files inside merge_audio_video.
@@ -687,6 +732,43 @@ fn hex_rgb_to_ass_bgr(hex: &str) -> String {
     }
 }
 
+/// Build the value passed to ffmpeg's `-vf subtitles=...` filter. Kept
+/// separate so we can unit-test path escaping without running ffmpeg.
+///
+/// Escaping rules we rely on (filtergraph docs + libass behavior):
+/// - Single-quote wrapping turns off most tokenization for the path, so
+///   `:` inside the quotes is safe — the older code escaped `\:` on top of
+///   the quotes, which some ffmpeg builds render into the path literally
+///   and fail with "No such file".
+/// - Backslashes and single quotes still need literal escaping even inside
+///   single quotes, per https://ffmpeg.org/ffmpeg-filters.html#Notes-on-filtergraph-escaping.
+/// - Forward slashes are universal, so we normalize Windows separators
+///   first to keep the drive-letter colon inside the single-quoted value.
+fn build_subtitles_filter(srt_path: &Path, style: &SubtitleStyle) -> String {
+    let normalized = srt_path.to_string_lossy().replace('\\', "/");
+    let escaped_path = normalized.replace('\\', "\\\\").replace('\'', "\\'");
+
+    let primary_colour = hex_rgb_to_ass_bgr(&style.color);
+    let outline_colour = hex_rgb_to_ass_bgr(&style.outline_color);
+
+    let position_style = if style.position == "top" {
+        "MarginV=10,Alignment=6"
+    } else {
+        "MarginV=30"
+    };
+
+    let font_size = style.font_size.clamp(8, 72);
+    let outline = style.outline.clamp(0, 10);
+
+    // FontName is pinned so output is identical across macOS / Windows /
+    // Linux. Without it libass falls through fontconfig/CoreText/DirectWrite
+    // and can pick wildly different metrics per platform.
+    format!(
+        "subtitles='{}':force_style='FontName=Arial,FontSize={},PrimaryColour={},OutlineColour={},Outline={},BackColour=&H80000000,Shadow=1,{}'",
+        escaped_path, font_size, primary_colour, outline_colour, outline, position_style
+    )
+}
+
 pub async fn burn_subtitles(
     video_path: &str,
     srt_path: &str,
@@ -706,31 +788,12 @@ pub async fn burn_subtitles(
         std::env::temp_dir().join(format!("_narrator_burn_subs_{}.srt", uuid::Uuid::new_v4()));
     tokio::fs::copy(srt_path, &temp_srt).await?;
 
-    // Convert hex colors to ASS BGR format
-    let primary_colour = hex_rgb_to_ass_bgr(&style.color);
-    let outline_colour = hex_rgb_to_ass_bgr(&style.outline_color);
+    let subtitle_filter = build_subtitles_filter(&temp_srt, style);
 
-    // Position: bottom uses MarginV=30, top uses MarginV=10 + Alignment=6 (top-center)
-    let position_style = if style.position == "top" {
-        "MarginV=10,Alignment=6".to_string()
-    } else {
-        "MarginV=30".to_string()
-    };
-
-    // Try subtitles filter first (requires libass), fall back to SRT input method
-    let srt_path_str = temp_srt
-        .to_string_lossy()
-        .replace('\\', "/")
-        .replace(':', "\\:");
-    // Sanitize numeric parameters to prevent unexpected ffmpeg filter behavior
-    let font_size = style.font_size.clamp(8, 72);
-    let outline = style.outline.clamp(0, 10);
-
-    let subtitle_filter = format!(
-        "subtitles='{}':force_style='FontSize={},PrimaryColour={},OutlineColour={},Outline={},BackColour=&H80000000,Shadow=1,{}'",
-        srt_path_str, font_size, primary_colour, outline_colour, outline, position_style
-    );
-
+    // -preset medium -crf 18 is visually lossless and produces files ~5-20x
+    // smaller than `-preset ultrafast -crf 0`. CRF 0 also forces High 4:4:4
+    // Predictive which several consumer players refuse to decode.
+    // https://trac.ffmpeg.org/wiki/Encode/H.264
     let result = run_ffmpeg_with_progress(
         &ffmpeg,
         &[
@@ -744,9 +807,11 @@ pub async fn burn_subtitles(
             "-c:v",
             "libx264",
             "-preset",
-            "ultrafast",
+            "medium",
             "-crf",
-            "0",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
             output_path,
         ],
         total_duration,
@@ -754,48 +819,15 @@ pub async fn burn_subtitles(
     )
     .await;
 
-    if result.is_err() {
-        // Fallback: use SRT as an input stream and overlay with mov_text → drawtext
-        tracing::warn!("subtitles filter failed, trying SRT input overlay fallback");
-        let fallback = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args([
-                "-y",
-                "-i",
-                video_path,
-                "-i",
-                &temp_srt.to_string_lossy(),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-crf",
-                "0",
-                "-c:a",
-                "copy",
-                "-c:s",
-                "mov_text",
-                "-metadata:s:s:0",
-                "language=eng",
-                output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
-
-        if !fallback.status.success() {
-            let stderr = String::from_utf8_lossy(&fallback.stderr);
-            let _ = tokio::fs::remove_file(&temp_srt).await;
-            return Err(NarratorError::FfmpegFailed(format!(
-                "Subtitle burn failed: {}",
-                &stderr[..stderr.len().min(400)]
-            )));
-        }
-    }
-
     let _ = tokio::fs::remove_file(&temp_srt).await;
-    on_progress(100.0, Some("Subtitles burned".to_string()));
 
+    // No more silent mov_text fallback: it doesn't actually burn subs (they
+    // end up as a soft stream that obeys none of the user's style) and
+    // reporting "success" while producing a file that looks wrong is the
+    // worst of both worlds. Propagate the original error instead.
+    result?;
+
+    on_progress(100.0, Some("Subtitles burned".to_string()));
     Ok(output_path.to_string())
 }
 
@@ -897,6 +929,59 @@ pub async fn extract_edit_thumbnails(
 mod tests {
     use super::*;
     use crate::models::EasingPreset;
+
+    #[test]
+    fn build_subtitles_filter_posix_path() {
+        let style = SubtitleStyle::default();
+        let filter = build_subtitles_filter(Path::new("/tmp/foo.srt"), &style);
+        assert!(filter.starts_with("subtitles='/tmp/foo.srt':"));
+        assert!(filter.contains("FontName=Arial"));
+        assert!(filter.contains("FontSize=22"));
+    }
+
+    #[test]
+    fn build_subtitles_filter_normalizes_windows_backslashes() {
+        let style = SubtitleStyle::default();
+        let filter = build_subtitles_filter(Path::new(r"C:\Users\foo bar\sub.srt"), &style);
+        // Forward slashes inside the single-quoted path, drive letter colon
+        // preserved (no legacy `\:` escape that ffmpeg parses into the path).
+        assert!(
+            filter.contains("subtitles='C:/Users/foo bar/sub.srt'"),
+            "unexpected escaping:\n{filter}"
+        );
+        assert!(
+            !filter.contains("C\\:"),
+            "drive-letter colon should not be escaped:\n{filter}"
+        );
+    }
+
+    #[test]
+    fn build_subtitles_filter_escapes_single_quotes_in_path() {
+        let style = SubtitleStyle::default();
+        let filter = build_subtitles_filter(Path::new("/tmp/some'path/sub.srt"), &style);
+        // The literal apostrophe in the path must be escaped so it doesn't
+        // terminate the single-quoted filter value.
+        assert!(
+            filter.contains(r"/tmp/some\'path/sub.srt"),
+            "apostrophe in path not escaped:\n{filter}"
+        );
+    }
+
+    #[test]
+    fn build_subtitles_filter_pins_font_and_position() {
+        let style = SubtitleStyle {
+            font_size: 30,
+            color: "#ffff00".into(),
+            outline_color: "#000000".into(),
+            outline: 3,
+            position: "top".into(),
+        };
+        let filter = build_subtitles_filter(Path::new("/tmp/x.srt"), &style);
+        assert!(filter.contains("FontName=Arial"));
+        assert!(filter.contains("FontSize=30"));
+        assert!(filter.contains("Outline=3"));
+        assert!(filter.contains("Alignment=6")); // top-center
+    }
 
     #[test]
     fn test_atempo_chaining_for_high_speeds() {
@@ -1161,6 +1246,25 @@ mod tests {
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
         stdout.contains("drawtext")
+    }
+
+    /// The `subtitles` filter requires ffmpeg to be built with libass.
+    /// Homebrew's default `brew install ffmpeg` does NOT include it, so
+    /// burn-subtitle integration tests must skip themselves — otherwise
+    /// they'd report "No such filter: 'subtitles'" on every dev machine.
+    fn subtitles_filter_available() -> bool {
+        let Ok(ffmpeg) = video_engine::detect_ffmpeg() else {
+            return false;
+        };
+        let Ok(output) = std::process::Command::new(ffmpeg).arg("-filters").output() else {
+            return false;
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Match on a whole-word boundary — some other filter name could
+        // otherwise contain the substring.
+        stdout
+            .lines()
+            .any(|l| l.split_whitespace().any(|tok| tok == "subtitles"))
     }
 
     async fn make_test_video(path: &Path, duration_s: f64) -> Result<(), String> {
@@ -1593,6 +1697,7 @@ mod tests {
             audio.to_str().unwrap(),
             output.to_str().unwrap(),
             true, // replace
+            -8.0,
             |_, _| {},
         )
         .await;
@@ -1623,6 +1728,7 @@ mod tests {
             audio.to_str().unwrap(),
             output.to_str().unwrap(),
             false, // mix
+            -8.0,
             |_, _| {},
         )
         .await;
@@ -1680,6 +1786,7 @@ mod tests {
             audio.to_str().unwrap(),
             final_out.to_str().unwrap(),
             true,
+            -8.0,
             |_, _| {},
         )
         .await
@@ -1857,7 +1964,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_burn_subtitles_basic() {
-        if !ffmpeg_ok() {
+        if !ffmpeg_ok() || !subtitles_filter_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1893,7 +2000,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_burn_subtitles_with_custom_style() {
-        if !ffmpeg_ok() {
+        if !ffmpeg_ok() || !subtitles_filter_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -1931,7 +2038,7 @@ mod tests {
 
     #[tokio::test]
     async fn integration_burn_subtitles_with_unicode() {
-        if !ffmpeg_ok() {
+        if !ffmpeg_ok() || !subtitles_filter_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -2051,7 +2158,7 @@ mod tests {
     /// output's resolution matches the source.
     #[tokio::test]
     async fn integration_e2e_edits_propagate_to_export() {
-        if !ffmpeg_ok() || !drawtext_available() {
+        if !ffmpeg_ok() || !drawtext_available() || !subtitles_filter_available() {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
@@ -2146,6 +2253,7 @@ mod tests {
             audio.to_str().unwrap(),
             merged.to_str().unwrap(),
             true,
+            -8.0,
             |_, _| {},
         )
         .await
