@@ -6,6 +6,7 @@ use crate::models::*;
 use crate::video_engine;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 /// Callback invoked as each new segment is produced. Used by the command layer
@@ -446,8 +447,12 @@ pub fn build_system_prompt(
     style: &NarrationStyle,
     context_docs: &[ProcessedDocument],
     custom_prompt: &str,
+    lang: &str,
 ) -> String {
     let mut prompt = String::new();
+
+    let target_rate = crate::speech_rate::rate_per_minute(lang);
+    let unit = crate::speech_rate::budget_unit(lang);
 
     // Base instructions
     prompt.push_str(
@@ -473,9 +478,28 @@ pub fn build_system_prompt(
         7. Each segment's text MUST be plain speakable text only. NEVER include \
            markup, tags, or directives like [pause], [break], (pause), etc. \
            The text will be sent directly to a text-to-speech engine.\n\
-        8. Write substantive narration for each segment — describe what's happening, \
-           explain context, guide the viewer. Avoid very short throwaway phrases.\n\n",
+        8. Prefer substantive narration when the per-segment word budget allows \
+           (see WORD BUDGET below). When the budget is tight, keep the segment \
+           short — do NOT cram extra detail into a small time window.\n\n",
     );
+
+    // Word budget — the single most important constraint. Without this the LLM
+    // happily emits 550 wpm text that TTS cannot possibly deliver in the window.
+    prompt.push_str(&format!(
+        "## WORD BUDGET (hard constraint)\n\n\
+        The text-to-speech engine for language '{lang}' delivers roughly \
+        {target_rate:.0} {unit} per minute at natural pace. For EVERY segment, \
+        the `text` field MUST fit inside `end_seconds - start_seconds` at that \
+        rate. That means:\n\n\
+        \tmax_{unit} = round((end_seconds - start_seconds) × {target_rate:.0} / 60)\n\n\
+        If an idea doesn't fit the budget, do ONE of these — never cram text:\n\
+        \t• Extend `end_seconds` (borrow from the gap before the next segment).\n\
+        \t• Split the idea into two adjacent segments.\n\
+        \t• Cut the idea down — trim adjectives, drop asides.\n\n\
+        A segment whose speech duration exceeds its window causes the exported \
+        video to visibly desync or stretch. Treat the budget as a hard upper \
+        bound, not a suggestion.\n\n"
+    ));
 
     // Style block
     prompt.push_str("## Narration Style\n\n");
@@ -563,6 +587,53 @@ pub fn build_user_message(
     }
 
     Ok(serde_json::Value::Array(content))
+}
+
+/// Wrap an async API call with a periodic progress heartbeat so the UI doesn't
+/// look frozen during a 10-30s Claude call. Emits a progress event every
+/// ~1.5s with `label · Ns elapsed` at the same `fraction` the caller would
+/// have emitted on its own — we only change the message, never creep the
+/// percent, so this can't interact badly with the frontend's monotonic clamp.
+///
+/// The inner future is awaited; the heartbeat is cancelled as soon as it
+/// resolves (success or error). If the heartbeat is None (no progress
+/// callback), the inner future runs as-is.
+async fn with_heartbeat<F, T>(
+    on_progress: &Option<ProgressCallback>,
+    fraction: f64,
+    label: String,
+    fut: F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let Some(cb) = on_progress.clone() else {
+        return fut.await;
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_clone = cancel.clone();
+    let label_clone = label.clone();
+    let started = std::time::Instant::now();
+    let handle = tokio::spawn(async move {
+        // Short initial delay: if the inner future finishes in <1s we skip the
+        // first tick entirely and avoid flicker.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        while !cancel_clone.load(Ordering::SeqCst) {
+            let elapsed = started.elapsed().as_secs();
+            cb(
+                fraction,
+                Some(format!("{label_clone} · {elapsed}s elapsed")),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        }
+    });
+    let result = fut.await;
+    cancel.store(true, Ordering::SeqCst);
+    // Abort the tick task so it doesn't survive past the function. `abort` is
+    // race-free — if the task already exited via the cancel check, this is a
+    // no-op; otherwise it cancels between ticks so we never double-report.
+    handle.abort();
+    result
 }
 
 /// Generate narration in chunks when there are too many frames for a single API call.
@@ -778,7 +849,15 @@ async fn generate_chunked(
             chunk_end_time
         );
 
-        let response = generate_with_retry(provider, system_prompt, chunk_message).await?;
+        let chunk_label = format!("Analyzing batch {} of {num_chunks}", chunk_idx + 1);
+        let chunk_fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0);
+        let response = with_heartbeat(
+            &on_progress,
+            chunk_fraction,
+            chunk_label,
+            generate_with_retry(provider, system_prompt, chunk_message),
+        )
+        .await?;
 
         // Parse the chunk response
         let json_text = response
@@ -802,6 +881,7 @@ async fn generate_chunked(
                 total_duration_seconds: chunk_script.total_duration_seconds,
                 segments: Vec::new(),
                 metadata: chunk_script.metadata.clone(),
+                speech_rate_report: None,
             };
             merged_script = Some(base);
         }
@@ -868,6 +948,7 @@ async fn generate_chunked(
             total_duration_seconds: all_segments.last().map(|s| s.end_seconds).unwrap_or(0.0),
             segments: Vec::new(),
             metadata: ScriptMetadata::default(),
+            speech_rate_report: None,
         });
     }
 
@@ -1128,6 +1209,32 @@ fn is_rate_limit_error(err: &NarratorError) -> bool {
         || msg.contains("overloaded")
 }
 
+/// Prepend a retry-feedback text block to the user_message content. The
+/// feedback lists the segments that overflowed their word budget on the
+/// previous attempt — giving the model a concrete correction target without
+/// changing the system prompt.
+fn prepend_retry_feedback(user_message: serde_json::Value, feedback: &str) -> serde_json::Value {
+    let feedback_block = json!({
+        "type": "text",
+        "text": format!(
+            "--- RETRY FEEDBACK (your previous draft had timing overflow) ---\n{feedback}\n\
+             Produce a NEW complete script that fits the word budget in every segment. \
+             The full schema and rules from the system prompt still apply.\n\
+             --- END RETRY FEEDBACK ---\n"
+        )
+    });
+    match user_message {
+        serde_json::Value::Array(mut arr) => {
+            arr.insert(0, feedback_block);
+            serde_json::Value::Array(arr)
+        }
+        // Providers that take string messages (rare here — Claude/OpenAI/Gemini
+        // all use the array form). Fall back to a text wrapper so we don't lose
+        // the original payload.
+        other => json!([feedback_block, other]),
+    }
+}
+
 /// Call an AI provider with exponential backoff on rate limit errors.
 async fn generate_with_retry(
     provider: &dyn AiProvider,
@@ -1172,8 +1279,117 @@ pub async fn generate_narration(
     provider: &dyn AiProvider,
     system_prompt: &str,
     user_message: serde_json::Value,
-    _style: &str,
-    _language: &str,
+    style: &str,
+    language: &str,
+    resume_segments: Vec<Segment>,
+    on_segment: Option<SegmentCallback>,
+    on_progress: Option<ProgressCallback>,
+) -> Result<NarrationScript, NarratorError> {
+    // First pass.
+    let mut script = generate_narration_once(
+        provider,
+        system_prompt,
+        user_message.clone(),
+        resume_segments.clone(),
+        on_segment.clone(),
+        on_progress.clone(),
+    )
+    .await?;
+
+    // Validate against the per-language speech-rate budget. Attach the report
+    // so the Review UI can surface overflow before the user exports.
+    let report = crate::script_validator::validate_speech_rate(&script, language);
+    let overflow_fraction = crate::script_validator::overflow_fraction(&report);
+
+    tracing::info!(
+        "Speech-rate validation: {} segments, {:.0}% overflow (style={}, lang={})",
+        report.len(),
+        overflow_fraction * 100.0,
+        style,
+        language
+    );
+
+    // One retry when a large share of segments exceed their budget. The LLM
+    // gets to see exactly which segments overflowed and by how much — this
+    // usually produces a tighter second draft without more prompt tuning.
+    const OVERFLOW_RETRY_THRESHOLD: f64 = 0.30;
+    if overflow_fraction > OVERFLOW_RETRY_THRESHOLD {
+        if let Some(cb) = on_progress.as_ref() {
+            cb(0.75, Some("Retrying for tighter narration…".to_string()));
+        }
+        tracing::warn!(
+            "Overflow fraction {:.0}% exceeded {:.0}% threshold — retrying once with feedback",
+            overflow_fraction * 100.0,
+            OVERFLOW_RETRY_THRESHOLD * 100.0
+        );
+        let feedback = crate::script_validator::format_retry_feedback(&report, language);
+        let retry_message = prepend_retry_feedback(user_message, &feedback);
+        // Retry with NO resume_segments: we want the LLM to produce a fully
+        // fresh draft that respects the word budget for EVERY segment,
+        // including ones the caller had previously resumed from. If we passed
+        // the original resume_segments, the chunked path would skip those
+        // chunks and leave their overflow unfixed.
+        //
+        // Retry also runs silently (on_segment = None) so the frontend's live
+        // preview doesn't get double-populated with segments from both drafts;
+        // the terminal SegmentsReplaced event will carry whichever draft we
+        // keep.
+        match generate_narration_once(
+            provider,
+            system_prompt,
+            retry_message,
+            Vec::new(),
+            None,
+            on_progress,
+        )
+        .await
+        {
+            Ok(retry_script) => {
+                let retry_report =
+                    crate::script_validator::validate_speech_rate(&retry_script, language);
+                let retry_overflow = crate::script_validator::overflow_fraction(&retry_report);
+                // Keep whichever draft fits the budget best. A retry that made
+                // things worse (rare but possible) shouldn't clobber a better
+                // first draft. Strict `<` so ties — retry matched the first
+                // draft's overflow fraction — go to the first draft too:
+                // the user already saw those segments stream in, and
+                // silently swapping in different wording with identical
+                // overflow is pure UX churn for zero measurable win.
+                if retry_overflow < overflow_fraction {
+                    tracing::info!(
+                        "Retry improved overflow: {:.0}% → {:.0}%",
+                        overflow_fraction * 100.0,
+                        retry_overflow * 100.0
+                    );
+                    let final_report = retry_report;
+                    script = retry_script;
+                    script.speech_rate_report = Some(final_report);
+                    return Ok(script);
+                }
+                tracing::warn!(
+                    "Retry did not improve ({:.0}% vs {:.0}%), keeping first draft",
+                    retry_overflow * 100.0,
+                    overflow_fraction * 100.0
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Overflow retry failed, keeping first draft: {e}");
+            }
+        }
+    }
+
+    script.speech_rate_report = Some(report);
+    Ok(script)
+}
+
+/// One narration-generation pass. Splits into chunked vs single-call, parses
+/// the model output into a `NarrationScript`, and runs the full normalization
+/// pipeline. Wrapped by `generate_narration` which handles validate + retry.
+#[allow(clippy::too_many_arguments)]
+async fn generate_narration_once(
+    provider: &dyn AiProvider,
+    system_prompt: &str,
+    user_message: serde_json::Value,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
@@ -1256,7 +1472,19 @@ pub async fn generate_narration(
     // Best-effort: if the polish call fails or returns unparseable output we
     // keep the unpolished script rather than breaking generation entirely.
     if was_chunked && script.segments.len() > 3 {
-        match polish_script(provider, &script, 2.5).await {
+        // Wrap the polish call in a heartbeat — it can take 10-30s on a long
+        // script and is the silent tail right before the final "Complete"
+        // label. Anchor at fraction 0.98 so the bar sits near the end while
+        // ticking; real completion bumps it to 1.0 via the caller.
+        let polish_label = "Polishing narration".to_string();
+        match with_heartbeat(
+            &on_progress,
+            0.98,
+            polish_label,
+            polish_script(provider, &script, 2.5),
+        )
+        .await
+        {
             Ok(polished) => {
                 tracing::info!(
                     "AI polish: {} → {} segments",
@@ -1694,11 +1922,62 @@ mod tests {
             source_path: "/tmp/glossary.md".to_string(),
         }];
 
-        let prompt = build_system_prompt(&style, &docs, "Focus on the UI elements.");
+        let prompt = build_system_prompt(&style, &docs, "Focus on the UI elements.", "en");
         assert!(prompt.contains("technical video"));
         assert!(prompt.contains("glossary.md"));
         assert!(prompt.contains("Focus on the UI elements"));
         assert!(prompt.contains("JSON"));
+        assert!(
+            prompt.contains("WORD BUDGET") && prompt.contains("150"),
+            "expected word-budget section mentioning 150 wpm"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_japanese_uses_chars() {
+        let style = NarrationStyle {
+            id: "x".into(),
+            label: "x".into(),
+            description: "x".into(),
+            system_prompt: "x".into(),
+            pacing: "medium".into(),
+            pause_markers: false,
+        };
+        let prompt = build_system_prompt(&style, &[], "", "ja");
+        assert!(prompt.contains("characters"));
+        assert!(prompt.contains("400"));
+    }
+
+    #[test]
+    fn prepend_retry_feedback_inserts_at_front_of_array() {
+        let user_message = json!([
+            {"type": "text", "text": "original"},
+            {"type": "image", "source": {"data": "..."}},
+        ]);
+        let with_feedback = prepend_retry_feedback(user_message, "shorten segment 0");
+        let arr = with_feedback.as_array().expect("must stay an array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["type"], "text");
+        assert!(arr[0]["text"].as_str().unwrap().contains("RETRY FEEDBACK"));
+        assert!(arr[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("shorten segment 0"));
+        // Original content still there, in order
+        assert_eq!(arr[1]["text"], "original");
+        assert_eq!(arr[2]["type"], "image");
+    }
+
+    #[test]
+    fn prepend_retry_feedback_wraps_non_array() {
+        // Shouldn't happen in practice (all providers use array form) but the
+        // helper must not drop the original payload.
+        let user_message = json!("just a string");
+        let with_feedback = prepend_retry_feedback(user_message, "fb");
+        let arr = with_feedback.as_array().expect("wrapped into array");
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0]["text"].as_str().unwrap().contains("fb"));
+        assert_eq!(arr[1], "just a string");
     }
 
     #[test]
@@ -2868,6 +3147,7 @@ mod tests {
                 model: "mock-v1".into(),
                 generated_at: "2026-04-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         };
         let resp = translation_response_json("Original", "ja", &[(0.0, 15.0, "こんにちは世界")]);
         let provider = ScriptedProvider::new(vec![&resp]);
@@ -2894,6 +3174,7 @@ mod tests {
                 model: "mock-v1".into(),
                 generated_at: "2026-01-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         };
         let fenced = format!(
             "```json\n{}\n```",
@@ -2917,6 +3198,7 @@ mod tests {
                 model: "mock-v1".into(),
                 generated_at: "2026-01-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         };
         let provider = ScriptedProvider::new(vec!["not json at all"]);
         let err = translate_script(&provider, &original, "fr")
@@ -2988,6 +3270,7 @@ mod tests {
                 model: "mock-v1".into(),
                 generated_at: "2026-01-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         }
     }
 

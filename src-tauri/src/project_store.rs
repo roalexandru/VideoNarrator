@@ -1088,6 +1088,7 @@ mod tests {
                 model: "m".into(),
                 generated_at: "2026-04-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         };
 
         let path1 = save_script(&id, "en", &script).unwrap();
@@ -1172,6 +1173,7 @@ mod tests {
                 model: "m".into(),
                 generated_at: "2026-04-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         };
         save_script(&id, "en", &script).unwrap();
 

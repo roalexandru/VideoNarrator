@@ -318,6 +318,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
                 generated_at: "2026-04-03T14:00:00Z".to_string(),
             },
+            speech_rate_report: None,
         }
     }
 
@@ -434,6 +435,7 @@ mod tests {
                 model: "test".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
             },
+            speech_rate_report: None,
         }
     }
 
@@ -531,6 +533,7 @@ mod tests {
                 model: "test".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
             },
+            speech_rate_report: None,
         };
 
         // SRT: should be empty (no segments)
@@ -591,6 +594,7 @@ mod tests {
                 model: "mock-v1".into(),
                 generated_at: "2026-01-01T00:00:00Z".into(),
             },
+            speech_rate_report: None,
         }
     }
 

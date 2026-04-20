@@ -119,7 +119,7 @@ pub async fn render_timeline_audio(
 
 /// Decompose any speed factor into a chain of atempo values each in [0.5, 2.0].
 /// Returns an empty vec for speed == 1.0.
-fn atempo_factors(speed: f64) -> Vec<f64> {
+pub(crate) fn atempo_factors(speed: f64) -> Vec<f64> {
     if !(speed.is_finite()) || speed <= 0.0 {
         return vec![];
     }
@@ -570,5 +570,17 @@ mod tests {
         for pair in stereo.chunks_exact(2) {
             assert!((pair[0] - pair[1]).abs() < 1e-6);
         }
+    }
+
+    /// The TTS compression path in `commands::generate_tts` caps speed at
+    /// `speech_rate::COMPRESSION_CAP` (1.20). That must always produce a
+    /// single-step chain — anything else would indicate someone changed the
+    /// cap above 2.0 without thinking through the filter chain's multi-stage
+    /// reencode cost.
+    #[test]
+    fn atempo_for_compression_cap_is_single_step() {
+        let f = atempo_factors(crate::speech_rate::COMPRESSION_CAP);
+        assert_eq!(f.len(), 1);
+        assert!((f[0] - crate::speech_rate::COMPRESSION_CAP).abs() < 1e-9);
     }
 }

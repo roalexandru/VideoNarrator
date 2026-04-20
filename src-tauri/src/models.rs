@@ -127,6 +127,12 @@ pub struct NarrationScript {
     pub total_duration_seconds: f64,
     pub segments: Vec<Segment>,
     pub metadata: ScriptMetadata,
+    /// Per-segment prediction of whether the text will fit inside its window
+    /// at natural TTS speed. Populated by `script_validator::validate_speech_rate`
+    /// at generation time and consumed by the Review UI. Serialized so it
+    /// persists to disk and the frontend doesn't need to recompute on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speech_rate_report: Option<Vec<crate::speech_rate::SegmentOverflow>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -430,6 +436,7 @@ mod tests {
                 model: "test-model".to_string(),
                 generated_at: "2026-01-01T00:00:00Z".to_string(),
             },
+            speech_rate_report: None,
         };
 
         // Serialize to JSON

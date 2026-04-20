@@ -121,6 +121,10 @@ const sections = [
         q: "Multi-language",
         a: "When multiple languages exist, tabs appear in the header. Switch between languages to edit each independently. Use \"+ Translate\" to generate a new language from the current script.",
       },
+      {
+        q: "Overflow badges & export prediction",
+        a: "An amber or red chip under a segment means the narration text is longer than its time window. Amber (\"will speed up\") means the export will slightly accelerate that segment's TTS (up to 1.2×) to fit. Red (\"overflows by Xs\") means even after speed-up the audio still won't fit — the export will extend the video by holding the final frame for the overrun. The banner above the segment list shows the overall prediction. To avoid any speed-up or frame-hold, shorten the segment text or widen its time window.",
+      },
     ],
   },
   {
