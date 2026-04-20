@@ -79,17 +79,15 @@ describe("ConfigurationScreen", () => {
     });
   });
 
-  it("project overrides toggle shows temperature and custom prompt", () => {
+  it("shows Custom Prompt, Max Frames, and Temperature inline (no Project Overrides toggle)", () => {
     render(<ConfigurationScreen />);
 
-    // Overrides section should be hidden by default
-    expect(screen.queryByText(/Temperature/)).not.toBeInTheDocument();
-
-    // Click to show
-    fireEvent.click(screen.getByText(/Project Overrides/));
-    expect(screen.getByText(/Temperature/)).toBeInTheDocument();
-    expect(screen.getByText(/Max Frames/)).toBeInTheDocument();
+    // All three controls live inline next to their related section, not
+    // hidden behind an accordion.
+    expect(screen.queryByText(/Project Overrides/)).not.toBeInTheDocument();
     expect(screen.getByText(/Custom Prompt/)).toBeInTheDocument();
+    expect(screen.getByText(/Max Frames/)).toBeInTheDocument();
+    expect(screen.getByText(/Temperature/)).toBeInTheDocument();
   });
 
   it("frame density buttons render and update store", () => {

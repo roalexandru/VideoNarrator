@@ -1,10 +1,46 @@
 /**
+ * True when the error looks like the request payload exceeded the model's
+ * context / token limit. Different providers word this very differently —
+ * Claude uses 400 with "prompt is too long", OpenAI uses "context_length_exceeded"
+ * or "maximum context length", Gemini uses "overloaded_token_input" or a
+ * 400 with "exceeds the maximum number of tokens". A plain 413 also qualifies.
+ *
+ * Retrying the same request will always fail, so callers use this to skip
+ * the rate-limit cooldown (retry after 30s is pointless here) and to show a
+ * different, actionable error message.
+ */
+export function isContextOverflowError(raw: unknown): boolean {
+  const msg = typeof raw === "string" ? raw : raw instanceof Error ? raw.message : String(raw);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("context length") ||
+    lower.includes("context window") ||
+    lower.includes("context_length_exceeded") ||
+    lower.includes("maximum context") ||
+    lower.includes("prompt is too long") ||
+    lower.includes("too many tokens") ||
+    lower.includes("token limit") ||
+    lower.includes("tokens_exceed") ||
+    lower.includes("overloaded_token_input") ||
+    lower.includes("payload too large") ||
+    lower.includes("413 ") ||
+    lower.includes(" 413") ||
+    lower.includes("request entity too large")
+  );
+}
+
+/**
  * Maps raw backend error strings to user-friendly, actionable messages.
  * Each message tells the user WHAT happened and WHAT TO DO about it.
  */
 export function toUserMessage(raw: unknown): string {
   const msg = typeof raw === "string" ? raw : raw instanceof Error ? raw.message : String(raw);
   const lower = msg.toLowerCase();
+
+  // ── Context / token overflow ── (check before generic 4xx so "413" routes here)
+  if (isContextOverflowError(raw)) {
+    return "Request exceeds the model's context window. Try lowering Frame Extraction density, removing context documents, or switching to a larger-context model in Settings.";
+  }
 
   // ── API key / auth errors ──
   if (lower.includes("no api key") || lower.includes("noapikey")) {

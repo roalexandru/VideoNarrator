@@ -1,10 +1,12 @@
-import { useState, useEffect, type CSSProperties } from "react";
+import { useState, useEffect, useMemo, type CSSProperties } from "react";
 import { useConfigStore } from "../../stores/configStore";
+import { useEditStore } from "../../stores/editStore";
 import { STYLES, LANGUAGES, PROVIDERS, TTS_PROVIDERS } from "../../lib/constants";
 import { Card } from "../../components/ui/Card";
 import { getProviderStatus, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { trackEvent } from "../telemetry/analytics";
 import { useOpenSettings } from "../../contexts/SettingsContext";
+import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
 import type { ProviderKeyStatus } from "../../types/config";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
@@ -34,7 +36,27 @@ const configureBtn: CSSProperties = {
 export function ConfigurationScreen() {
   const config = useConfigStore();
   const openSettings = useOpenSettings();
-  const [showOverrides, setShowOverrides] = useState(false);
+
+  // Edited video duration = sum of each clip's output length (post-speed).
+  // Used to recommend max_frames so it scales with video length instead of
+  // silently truncating long videos at 30 frames.
+  const clips = useEditStore((s) => s.clips);
+  const editedDuration = useMemo(
+    () =>
+      clips.reduce((acc, c) => {
+        const len = Math.max(0, c.sourceEnd - c.sourceStart);
+        const speed = c.speed > 0 ? c.speed : 1;
+        return acc + len / speed;
+      }, 0),
+    [clips],
+  );
+  const recommended = recommendedMaxFrames(editedDuration, config.frameDensity);
+
+  // Auto-raise maxFrames to the recommendation when duration / density change.
+  // Never lower — respect user choosing a higher manual cap.
+  useEffect(() => {
+    if (config.maxFrames < recommended) config.setMaxFrames(recommended);
+  }, [recommended, config]);
 
   // Provider status (which AI providers have keys configured)
   const [providerStatuses, setProviderStatuses] = useState<ProviderKeyStatus[]>([]);
@@ -81,9 +103,19 @@ export function ConfigurationScreen() {
   const currentModel = currentProvider?.models.find((m) => m.id === config.model);
   const currentProviderStatus = providerStatuses.find((s) => s.provider === config.aiProvider);
   const aiHasKey = currentProviderStatus?.has_key ?? false;
+  const reasoning = isReasoningModel(config.aiProvider, config.model);
+
+  // Reasoning models reject a user-set temperature. Pin to 1.0 so the effective
+  // value the UI shows matches what the backend will send (it strips temperature
+  // for these models but users shouldn't see 0.7 on a control they can't change).
+  useEffect(() => {
+    if (reasoning && config.temperature !== 1.0) config.setTemperature(1.0);
+  }, [reasoning, config]);
 
   // Derived: current TTS provider info
   const currentTts = TTS_PROVIDERS.find((t) => t.id === config.ttsProvider);
+
+  const displayTemp = reasoning ? 1.0 : config.temperature;
 
   return (
     <div style={{ maxWidth: 680, margin: "0 auto" }}>
@@ -146,6 +178,22 @@ export function ConfigurationScreen() {
         <p style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Click to toggle. Click the star to set a language as primary.</p>
       </section>
 
+      {/* Custom Prompt — inline right after Languages */}
+      <section style={{ marginBottom: 28 }}>
+        <div style={label}>Custom Prompt</div>
+        <textarea
+          value={config.customPrompt}
+          onChange={(e) => config.setCustomPrompt(e.target.value)}
+          placeholder="Extra instructions for the AI (optional)…"
+          rows={2}
+          style={{
+            width: "100%", padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8,
+            fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text,
+            resize: "vertical" as const, fontFamily: "inherit",
+          }}
+        />
+      </section>
+
       {/* Density */}
       <section style={{ marginBottom: 28 }}>
         <div style={label}>Frame Extraction</div>
@@ -167,6 +215,42 @@ export function ConfigurationScreen() {
               <span style={{ fontSize: 10, opacity: 0.6, fontWeight: 400 }}>{d.desc}</span>
             </button>
           ))}
+        </div>
+      </section>
+
+      {/* Max Frames — inline right after Frame Extraction */}
+      <section style={{ marginBottom: 28 }}>
+        <div style={label}>Max Frames</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <input
+            type="number" min={5} max={300} value={config.maxFrames}
+            onChange={(e) => {
+              const n = parseInt(e.target.value);
+              config.setMaxFrames(Number.isFinite(n) && n > 0 ? n : recommended);
+            }}
+            style={{
+              width: 90, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 6,
+              fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "inherit",
+            }}
+          />
+          {editedDuration > 0 ? (
+            <span style={{ fontSize: 12, color: C.dim }}>
+              Recommended {recommended} for a {Math.round(editedDuration)}s video at {config.frameDensity} density
+              {config.maxFrames !== recommended && (
+                <>
+                  {" — "}
+                  <button
+                    onClick={() => config.setMaxFrames(recommended)}
+                    style={{ background: "none", border: "none", color: C.accent, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "inherit" }}
+                  >
+                    reset
+                  </button>
+                </>
+              )}
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, color: C.muted }}>Load a video to see the recommendation.</span>
+          )}
         </div>
       </section>
 
@@ -193,6 +277,38 @@ export function ConfigurationScreen() {
         )}
       </section>
 
+      {/* Temperature — inline right after AI. Disabled for reasoning models. */}
+      <section style={{ marginBottom: 28 }}>
+        <div style={{ ...label, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Temperature</span>
+          <span style={{
+            fontSize: 12, fontWeight: 600, color: reasoning ? C.muted : C.text,
+            fontVariantNumeric: "tabular-nums", letterSpacing: 0,
+          }}>
+            {displayTemp.toFixed(1)}
+          </span>
+        </div>
+        <input
+          type="range" min={0} max={1} step={0.1} value={displayTemp}
+          disabled={reasoning}
+          onChange={(e) => config.setTemperature(parseFloat(e.target.value))}
+          style={{
+            width: "100%", accentColor: C.accent,
+            opacity: reasoning ? 0.4 : 1,
+            cursor: reasoning ? "not-allowed" : "pointer",
+          }}
+        />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginTop: 4 }}>
+          <span>Precise</span>
+          <span>Creative</span>
+        </div>
+        {reasoning && (
+          <p style={{ fontSize: 11, color: C.muted, marginTop: 6, lineHeight: 1.5 }}>
+            Reasoning models (o1/o3/o4, GPT-5) don't support a custom temperature — they always run at the default.
+          </p>
+        )}
+      </section>
+
       {/* Voice Summary Card */}
       <section style={{ marginBottom: 28 }}>
         <div style={label}>Voice</div>
@@ -213,42 +329,6 @@ export function ConfigurationScreen() {
           <p style={{ fontSize: 11, color: "#fb923c", marginTop: 6 }}>
             No TTS key configured. Open Settings to set up {currentTts?.label ?? "voice synthesis"}.
           </p>
-        )}
-      </section>
-
-      {/* Project Overrides */}
-      <section style={{ marginBottom: 28 }}>
-        <button onClick={() => setShowOverrides(!showOverrides)} style={{
-          background: "none", border: "none", color: C.accent, fontSize: 13, fontWeight: 500,
-          cursor: "pointer", padding: 0, fontFamily: "inherit",
-        }}>{showOverrides ? "- Hide" : "+ Show"} Project Overrides</button>
-        {showOverrides && (
-          <div style={{
-            marginTop: 14, padding: "18px 20px", background: "rgba(255,255,255,0.02)",
-            borderRadius: 10, border: `1px solid ${C.border}`,
-            display: "flex", flexDirection: "column", gap: 16,
-          }}>
-            <div>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.dim, marginBottom: 5 }}>
-                Temperature ({config.temperature.toFixed(1)})
-              </label>
-              <input type="range" min="0" max="1" step="0.1" value={config.temperature}
-                onChange={(e) => config.setTemperature(parseFloat(e.target.value))}
-                style={{ width: "100%", accentColor: "#6366f1" }} />
-            </div>
-            <div>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.dim, marginBottom: 5 }}>Max Frames</label>
-              <input type="number" min="5" max="100" value={config.maxFrames}
-                onChange={(e) => config.setMaxFrames(parseInt(e.target.value) || 30)}
-                style={{ width: 80, padding: "7px 10px", border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text, fontFamily: "inherit" }} />
-            </div>
-            <div>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.dim, marginBottom: 5 }}>Custom Prompt</label>
-              <textarea value={config.customPrompt} onChange={(e) => config.setCustomPrompt(e.target.value)}
-                placeholder="Additional instructions..." rows={2}
-                style={{ width: "100%", padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text, resize: "none" as const, fontFamily: "inherit" }} />
-            </div>
-          </div>
         )}
       </section>
 

@@ -9,7 +9,8 @@ import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProv
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { buildEditPlan } from "../../lib/buildEditPlan";
 import { trackEvent, trackError, resetErrorCount } from "../telemetry/analytics";
-import { toUserMessage } from "../../lib/errorMessages";
+import { toUserMessage, isContextOverflowError } from "../../lib/errorMessages";
+import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import { secondsToTimestamp } from "../../lib/formatters";
@@ -38,9 +39,19 @@ export function ProcessingScreen() {
     return () => clearInterval(timer);
   }, [rateLimitCooldown]);
 
-  const run = useCallback(async () => {
+  const run = useCallback(async ({ resume = false }: { resume?: boolean } = {}) => {
     const generationStart = Date.now();
-    proc.reset(); proc.setPhase("extracting_frames");
+    // Snapshot segments from any prior partial run BEFORE we clear state.
+    // On resume we send them to the backend so completed chunks aren't re-billed.
+    const resumeSegments = resume ? useProcessingStore.getState().streamingSegments : [];
+    if (resume) {
+      // Preserve streamingSegments; clear only the phase/error/progress so the UI unblocks.
+      proc.setError(null);
+      proc.setProgress(0);
+    } else {
+      proc.reset();
+    }
+    proc.setPhase("extracting_frames");
     trackEvent("generation_started", {
       provider: config.aiProvider,
       model: config.model,
@@ -49,6 +60,8 @@ export function ProcessingScreen() {
       has_custom_prompt: !!config.customPrompt.trim(),
       has_context_docs: project.contextDocuments.length > 0,
       doc_count: project.contextDocuments.length,
+      resume: resumeSegments.length > 0,
+      resume_segments: resumeSegments.length,
     });
 
     // Snapshot edit state at generation start to prevent mid-run mutations
@@ -60,6 +73,7 @@ export function ProcessingScreen() {
       else if (e.kind === "progress") proc.setProgress(e.percent);
       else if (e.kind === "frame_extracted") proc.appendFrame(e.frame);
       else if (e.kind === "segment_streamed") proc.appendSegment(e.segment);
+      else if (e.kind === "segments_replaced") proc.replaceStreamingSegments(e.segments);
       else if (e.kind === "error") proc.setError(e.message);
     };
 
@@ -107,6 +121,24 @@ export function ProcessingScreen() {
       }
     }
 
+    // Derive effective max_frames from the edited video's duration so long
+    // videos aren't silently truncated at 30 frames — matches the
+    // recommendation shown in Configuration.
+    const editedDuration = editSnapshot.clips.reduce((acc, c) => {
+      const len = Math.max(0, c.sourceEnd - c.sourceStart);
+      const speed = c.speed > 0 ? c.speed : 1;
+      return acc + len / speed;
+    }, 0);
+    const effectiveMaxFrames = Math.max(
+      config.maxFrames,
+      recommendedMaxFrames(editedDuration, config.frameDensity),
+    );
+    // Reasoning models reject user-set temperature — send 1.0 so the UI and
+    // request agree (backend also strips it, but consistency > silent mutation).
+    const effectiveTemperature = isReasoningModel(config.aiProvider, config.model)
+      ? 1.0
+      : config.temperature;
+
     const params: GenerationParams = {
       project_id: project.projectId,
       video_path: videoPath,
@@ -114,9 +146,10 @@ export function ProcessingScreen() {
       title: project.title, description: project.description,
       style: config.style, primary_language: config.primaryLanguage,
       additional_languages: config.languages.filter((l) => l !== config.primaryLanguage),
-      frame_config: { density: "heavy", scene_threshold: config.sceneThreshold, max_frames: Math.max(config.maxFrames, 30), skip_dedup: true },
-      ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature },
+      frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: effectiveMaxFrames, skip_dedup: true },
+      ai_config: { provider: config.aiProvider, model: config.model, temperature: effectiveTemperature },
       custom_prompt: config.customPrompt,
+      ...(resumeSegments.length > 0 ? { resume_segments: resumeSegments } : {}),
     };
     try {
       const script = await startGeneration(params, ch);
@@ -139,13 +172,25 @@ export function ProcessingScreen() {
       const errMsg = toUserMessage(err);
       proc.setError(errMsg);
       proc.setPhase("error");
-      // Detect rate limit errors and enforce cooldown to prevent retry spam
+      // Rate-limit: enforce a cooldown so rapid retries don't hammer the API.
+      // Context-overflow: do NOT cool down — retry with the same payload will
+      // always fail. The user must change settings (density, docs, model) first.
       const errStr = String(err).toLowerCase();
-      if (errStr.includes("rate limit") || errStr.includes("429") || errStr.includes("too many requests")) {
+      const isRateLimit = errStr.includes("rate limit") || errStr.includes("429") || errStr.includes("too many requests");
+      if (isRateLimit && !isContextOverflowError(err)) {
         setRateLimitCooldown(30);
       }
     }
   }, [project, config, proc, setScript]);
+
+  // Retry preserves accumulated streamingSegments and asks the backend to
+  // resume after the last successful chunk. Start Over discards them for a
+  // clean run.
+  const retry = useCallback(() => run({ resume: true }), [run]);
+  const startOver = useCallback(() => {
+    setRateLimitCooldown(0);
+    proc.reset();
+  }, [proc]);
 
   const hasScript = Object.keys(useScriptStore.getState().scripts).length > 0;
 
@@ -188,7 +233,7 @@ export function ProcessingScreen() {
           <p style={{ fontSize: 13, color: C.dim, marginBottom: 20 }}>This will extract frames, analyze the video, and generate a narration script using AI.</p>
           {noVideo && <p style={{ fontSize: 12, color: "#fb923c", marginBottom: 12 }}>No video selected. Go to Project Setup to add one.</p>}
           {noApiKey && <p style={{ fontSize: 12, color: "#fb923c", marginBottom: 12 }}>No API key for {config.aiProvider}. Go to Settings to add one.</p>}
-          <Button onClick={run} disabled={blocked}>Start Generation</Button>
+          <Button onClick={() => run()} disabled={blocked}>Start Generation</Button>
         </div>
       </div>
     );
@@ -207,7 +252,7 @@ export function ProcessingScreen() {
           <p style={{ fontSize: 16, fontWeight: 600, color: C.text, marginBottom: 6 }}>Narration Generated</p>
           <p style={{ fontSize: 13, color: C.dim }}>{scriptSegCount} segments ready for review</p>
           <div style={{ marginTop: 16 }}>
-            <Button onClick={run}>Regenerate</Button>
+            <Button onClick={() => run()}>Regenerate</Button>
           </div>
         </div>
       </div>
@@ -380,9 +425,18 @@ export function ProcessingScreen() {
           <Button variant="secondary" onClick={() => cancelGeneration().then(() => proc.setPhase("cancelled"))}>Cancel</Button>
         )}
         {(proc.phase === "error" || proc.phase === "cancelled") && (
-          <Button onClick={run} disabled={rateLimitCooldown > 0}>
-            {rateLimitCooldown > 0 ? `Wait ${rateLimitCooldown}s (rate limited)` : "Retry"}
-          </Button>
+          <>
+            {/* Start Over is the always-available escape from a retry-fail loop.
+               It clears progress so the user isn't forced to retry. */}
+            <Button variant="secondary" onClick={startOver}>Start Over</Button>
+            <Button onClick={retry} disabled={rateLimitCooldown > 0}>
+              {rateLimitCooldown > 0
+                ? `Wait ${rateLimitCooldown}s (rate limited)`
+                : proc.streamingSegments.length > 0
+                  ? `Resume (${proc.streamingSegments.length} saved)`
+                  : "Retry"}
+            </Button>
+          </>
         )}
       </div>
 

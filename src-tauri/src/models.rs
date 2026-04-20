@@ -171,7 +171,7 @@ impl std::fmt::Display for Pace {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScriptMetadata {
     #[serde(default)]
     pub style: String,
@@ -338,6 +338,12 @@ pub struct GenerationParams {
     pub frame_config: FrameConfig,
     pub ai_config: AiConfig,
     pub custom_prompt: String,
+    /// Segments from a prior partial run. When present, `generate_chunked`
+    /// seeds its accumulator with these and skips chunks whose frames are
+    /// entirely before the last segment's `end_seconds`, so API calls that
+    /// already succeeded are not re-billed on retry.
+    #[serde(default)]
+    pub resume_segments: Vec<Segment>,
 }
 
 // ── Export ──
@@ -539,6 +545,12 @@ pub enum ProgressEvent {
     FrameExtracted { frame: Frame },
     #[serde(rename = "segment_streamed")]
     SegmentStreamed { segment: Segment },
+    /// Emitted once at the end of generation with the full, normalized script.
+    /// The frontend replaces its streaming-segments preview with this list so
+    /// users see the polished output after chunked generation's raw per-chunk
+    /// stream.
+    #[serde(rename = "segments_replaced")]
+    SegmentsReplaced { segments: Vec<Segment> },
     #[serde(rename = "error")]
     Error { message: String },
 }

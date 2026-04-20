@@ -640,12 +640,27 @@ pub async fn generate_narration(
         }
     });
 
+    // Stream per-chunk segments to the frontend as generate_chunked produces
+    // them. This is the primary source of "live" preview during chunked
+    // generation, and the segments the frontend sends back on retry via
+    // `resume_segments` to skip already-completed chunks.
+    let stream_channel = channel.clone();
+    let on_segment: ai_client::SegmentCallback = Arc::new(move |seg: &Segment| {
+        stream_channel
+            .send(ProgressEvent::SegmentStreamed {
+                segment: seg.clone(),
+            })
+            .ok();
+    });
+
     let script = ai_client::generate_narration(
         provider.as_ref(),
         &system_prompt,
         user_message,
         &params.style,
         &params.primary_language,
+        params.resume_segments.clone(),
+        Some(on_segment),
     )
     .await;
 
@@ -662,13 +677,14 @@ pub async fn generate_narration(
 
     let script = script?;
 
-    for segment in &script.segments {
-        channel
-            .send(ProgressEvent::SegmentStreamed {
-                segment: segment.clone(),
-            })
-            .ok();
-    }
+    // Terminal event: replace the live per-chunk preview with the final,
+    // normalized/polished script so what the user sees matches what's saved.
+    // Without this the preview could show pre-polish drafts + leftover entries.
+    channel
+        .send(ProgressEvent::SegmentsReplaced {
+            segments: script.segments.clone(),
+        })
+        .ok();
     channel
         .send(ProgressEvent::PhaseChange {
             phase: "done".to_string(),

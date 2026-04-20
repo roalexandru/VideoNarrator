@@ -13,6 +13,10 @@ interface ProcessingStore {
   setProgress: (pct: number) => void;
   appendFrame: (frame: Frame) => void;
   appendSegment: (segment: Segment) => void;
+  /** Replace the streaming preview with the final, normalized segment list.
+   *  Used for the terminal `segments_replaced` progress event so the UI
+   *  reflects post-processing (polish, merge, dedup) without duplicates. */
+  replaceStreamingSegments: (segments: Segment[]) => void;
   setError: (err: string | null) => void;
   reset: () => void;
 }
@@ -32,6 +36,7 @@ export const useProcessingStore = create<ProcessingStore>((set) => ({
     set((state) => ({
       streamingSegments: [...state.streamingSegments, segment],
     })),
+  replaceStreamingSegments: (segments) => set({ streamingSegments: segments }),
   setError: (error) => set({ error }),
   reset: () =>
     set({

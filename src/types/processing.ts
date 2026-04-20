@@ -22,4 +22,6 @@ export type ProgressEvent =
   | { kind: "progress"; percent: number }
   | { kind: "frame_extracted"; frame: Frame }
   | { kind: "segment_streamed"; segment: Segment }
+  /** Terminal event: the full normalized script. Replaces streaming preview. */
+  | { kind: "segments_replaced"; segments: Segment[] }
   | { kind: "error"; message: string };

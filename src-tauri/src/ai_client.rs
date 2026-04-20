@@ -6,6 +6,13 @@ use crate::models::*;
 use crate::video_engine;
 use async_trait::async_trait;
 use serde_json::json;
+use std::sync::Arc;
+
+/// Callback invoked as each new segment is produced. Used by the command layer
+/// to push `ProgressEvent::SegmentStreamed` over the progress channel so the UI
+/// can render partial progress — and, on failure, so the frontend can pass the
+/// same segments back via `resume_segments` to skip completed chunks on retry.
+pub type SegmentCallback = Arc<dyn Fn(&Segment) + Send + Sync>;
 
 /// Truncate a string to at most `max_chars` CHARACTERS (not bytes), safe for
 /// multi-byte UTF-8 text like Japanese or emoji. Returns a borrowed slice when
@@ -554,11 +561,23 @@ pub fn build_user_message(
 
 /// Generate narration in chunks when there are too many frames for a single API call.
 /// Splits frames into batches, generates segments per batch with context from previous.
+///
+/// `resume_segments`: segments already produced by a prior partial run. The loop
+/// seeds its accumulator with these and skips any chunk whose frames are fully
+/// before the last resumed segment's `end_seconds`, so the API isn't billed
+/// again for work that already succeeded.
+///
+/// `on_segment`: called once for each newly-produced, kept segment (after
+/// clamping + ordering checks). Not called for resumed segments — the caller
+/// already has them. Use this to stream partial progress to the UI so users
+/// can see what's been generated mid-flight.
 async fn generate_chunked(
     provider: &dyn AiProvider,
     system_prompt: &str,
     user_message: &serde_json::Value,
     image_count: usize,
+    resume_segments: Vec<Segment>,
+    on_segment: Option<SegmentCallback>,
 ) -> Result<String, NarratorError> {
     let parts = user_message
         .as_array()
@@ -609,8 +628,14 @@ async fn generate_chunked(
         })
         .collect();
 
-    let mut all_segments: Vec<crate::models::Segment> = Vec::new();
+    // Seed the accumulator with any resumed segments so subsequent chunks
+    // get coherent `prev_summary` context and continue from the right
+    // timestamp. `resume_cutoff` is used below to skip chunks the prior run
+    // already completed.
+    let resume_cutoff = resume_segments.last().map(|s| s.end_seconds).unwrap_or(0.0);
+    let mut all_segments: Vec<crate::models::Segment> = resume_segments;
     let mut merged_script: Option<NarrationScript> = None;
+    let mut skipped_chunks = 0usize;
 
     for chunk_idx in 0..num_chunks {
         let start = chunk_idx * MAX_FRAMES_PER_CALL;
@@ -623,6 +648,23 @@ async fn generate_chunked(
         let chunk_first_ts = frame_times.get(start).copied().unwrap_or(0.0);
         let chunk_last_ts = frame_times.get(end - 1).copied().unwrap_or(chunk_first_ts);
         let next_chunk_first_ts = frame_times.get(end).copied();
+
+        // Skip chunks already covered by resume_segments. A chunk is covered
+        // when its last frame timestamp is at or before the resumed cutoff —
+        // meaning every frame in this chunk was part of the prior successful
+        // run and regenerating would waste an API call.
+        if resume_cutoff > 0.0 && chunk_last_ts <= resume_cutoff + 0.01 {
+            skipped_chunks += 1;
+            tracing::info!(
+                "Chunk {}/{} skipped (frames {:.2}s–{:.2}s covered by resume cutoff {:.2}s)",
+                chunk_idx + 1,
+                num_chunks,
+                chunk_first_ts,
+                chunk_last_ts,
+                resume_cutoff
+            );
+            continue;
+        }
 
         // Bound the chunk strictly between the first frame and the first frame of the next chunk.
         // For the final chunk, allow up to chunk_last_ts + buffer (no hard upper bound known here).
@@ -747,6 +789,12 @@ async fn generate_chunked(
                     continue;
                 }
             }
+            // Emit before moving into the accumulator so callers see each new
+            // segment in order. Kept minimal — callers are expected to be cheap
+            // (sending over a channel).
+            if let Some(cb) = on_segment.as_ref() {
+                cb(&seg);
+            }
             all_segments.push(seg);
             kept += 1;
         }
@@ -760,7 +808,28 @@ async fn generate_chunked(
         }
     }
 
-    // Build the final merged script
+    if skipped_chunks > 0 {
+        tracing::info!(
+            "Resumed generation: skipped {} of {} chunks covered by {} prior segment(s)",
+            skipped_chunks,
+            num_chunks,
+            all_segments.len()
+        );
+    }
+
+    // Build the final merged script. If every chunk was skipped because
+    // resume_segments already covers the whole video, we still have a valid
+    // script — fabricate a minimal header so the caller gets back the existing
+    // segments rather than an error.
+    if merged_script.is_none() && !all_segments.is_empty() {
+        merged_script = Some(NarrationScript {
+            title: String::new(),
+            total_duration_seconds: all_segments.last().map(|s| s.end_seconds).unwrap_or(0.0),
+            segments: Vec::new(),
+            metadata: ScriptMetadata::default(),
+        });
+    }
+
     if let Some(mut script) = merged_script {
         // Final normalization pass (guarantees monotonic, non-overlapping, re-indexed)
         let normalized = normalize_timeline(all_segments, script.total_duration_seconds);
@@ -1059,6 +1128,8 @@ pub async fn generate_narration(
     user_message: serde_json::Value,
     _style: &str,
     _language: &str,
+    resume_segments: Vec<Segment>,
+    on_segment: Option<SegmentCallback>,
 ) -> Result<NarrationScript, NarratorError> {
     // Check if the message has too many image parts — if so, chunk it
     let parts = user_message.as_array();
@@ -1068,8 +1139,18 @@ pub async fn generate_narration(
     let was_chunked = image_count > MAX_FRAMES_PER_CALL;
 
     let response_text = if was_chunked {
-        generate_chunked(provider, system_prompt, &user_message, image_count).await?
+        generate_chunked(
+            provider,
+            system_prompt,
+            &user_message,
+            image_count,
+            resume_segments,
+            on_segment.clone(),
+        )
+        .await?
     } else {
+        // Single-call path: resume doesn't apply (there's only one call), but
+        // we still stream segments post-parse so the UI behaves consistently.
         generate_with_retry(provider, system_prompt, user_message).await?
     };
 
@@ -1709,6 +1790,8 @@ mod tests {
             json!("user message"),
             "technical",
             "en",
+            vec![],
+            None,
         )
         .await;
 
@@ -1737,6 +1820,8 @@ mod tests {
             json!("user message"),
             "technical",
             "en",
+            vec![],
+            None,
         )
         .await;
 
@@ -1754,8 +1839,16 @@ mod tests {
             response: actual_response.to_string(),
         };
 
-        let result =
-            generate_narration(&mock, "system prompt", json!("user message"), "test", "en").await;
+        let result = generate_narration(
+            &mock,
+            "system prompt",
+            json!("user message"),
+            "test",
+            "en",
+            vec![],
+            None,
+        )
+        .await;
 
         assert!(result.is_ok());
         let script = result.unwrap();
@@ -2150,7 +2243,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
 
         let msg = user_msg_with_frames(25, 1.0);
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2192,7 +2285,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0); // 2 chunks
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2215,7 +2308,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en")
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2255,7 +2348,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2285,7 +2378,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2306,7 +2399,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en")
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
 
@@ -2385,7 +2478,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .expect("must not panic on multibyte text");
         // Monotonic order preserved
@@ -2405,7 +2498,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
         assert_eq!(result.segments.len(), 1);
@@ -2426,7 +2519,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "ja")
+        let result = generate_narration(&provider, "sys", msg, "test", "ja", vec![], None)
             .await
             .unwrap();
         assert_eq!(result.segments.len(), 3);
@@ -2440,7 +2533,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en")
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
         // Exactly one call — confirms the threshold check is `>` not `>=`
@@ -2455,7 +2548,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL + 1, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en")
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
         assert_eq!(provider.captured().len(), 2);
@@ -2478,7 +2571,7 @@ mod tests {
         }
         let msg = serde_json::Value::Array(parts);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en").await;
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None).await;
         assert!(
             result.is_ok(),
             "should still succeed with unparseable timestamps"
@@ -2492,7 +2585,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, "NOT JSON AT ALL"]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let err = generate_narration(&provider, "sys", msg, "test", "en")
+        let err = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap_err();
         let err_str = err.to_string();
@@ -2510,7 +2603,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en")
+        generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
         let first_call_text: String = provider.captured()[0]
@@ -2535,7 +2628,7 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en")
+        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None)
             .await
             .unwrap();
         // Should succeed with empty segments — not crash

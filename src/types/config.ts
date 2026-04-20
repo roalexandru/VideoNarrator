@@ -71,4 +71,8 @@ export interface GenerationParams {
   frame_config: FrameConfig;
   ai_config: AiConfig;
   custom_prompt: string;
+  /** Segments from a prior partial run — if provided, generation resumes
+   *  after the last segment's end_seconds rather than re-consuming API calls
+   *  for chunks that already succeeded. */
+  resume_segments?: import("./script").Segment[];
 }
