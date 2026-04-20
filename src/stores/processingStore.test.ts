@@ -63,4 +63,22 @@ describe("processingStore", () => {
     expect(state.frames).toEqual([]);
     expect(state.error).toBeNull();
   });
+
+  it("replaces streamingSegments wholesale (used by the final SegmentsReplaced event)", () => {
+    const store = useProcessingStore.getState();
+    // Seed with raw per-chunk output
+    store.appendSegment({ index: 0, start_seconds: 0, end_seconds: 5, text: "raw 0", visual_description: "", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [] });
+    store.appendSegment({ index: 1, start_seconds: 5, end_seconds: 10, text: "raw 1", visual_description: "", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [] });
+    expect(useProcessingStore.getState().streamingSegments).toHaveLength(2);
+
+    // Polish pass produces a single merged segment
+    useProcessingStore.getState().replaceStreamingSegments([
+      { index: 0, start_seconds: 0, end_seconds: 10, text: "polished", visual_description: "", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [] },
+    ]);
+
+    // Old raw entries must not linger — users should see the final count.
+    const state = useProcessingStore.getState();
+    expect(state.streamingSegments).toHaveLength(1);
+    expect(state.streamingSegments[0].text).toBe("polished");
+  });
 });

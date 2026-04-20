@@ -668,15 +668,15 @@ async fn generate_chunked(
 
         // Bound the chunk strictly between the first frame and the first frame of the next chunk.
         // For the final chunk, allow up to chunk_last_ts + buffer (no hard upper bound known here).
-        let chunk_start_time = if chunk_idx == 0 {
-            0.0
-        } else {
-            // Hard-lock: must start where previous chunk ended
-            all_segments
-                .last()
-                .map(|s| s.end_seconds)
-                .unwrap_or(chunk_first_ts)
-        };
+        //
+        // When `all_segments` is non-empty (either prior chunks succeeded OR
+        // we seeded with `resume_segments`), chunk_start_time is the last
+        // segment's end — so the AI can't emit content that overlaps what we
+        // already have. Only fall back to 0.0 for a truly fresh chunk 0.
+        let chunk_start_time = all_segments
+            .last()
+            .map(|s| s.end_seconds)
+            .unwrap_or(if chunk_idx == 0 { 0.0 } else { chunk_first_ts });
         let chunk_end_time = next_chunk_first_ts.unwrap_or(chunk_last_ts + 30.0);
 
         // Build the message for this chunk
@@ -1149,8 +1149,10 @@ pub async fn generate_narration(
         )
         .await?
     } else {
-        // Single-call path: resume doesn't apply (there's only one call), but
-        // we still stream segments post-parse so the UI behaves consistently.
+        // Single-call path: resume doesn't apply (there's only one call). No
+        // per-segment streaming happens here — the caller emits a single
+        // `SegmentsReplaced` event with the final segments after we return.
+        let _ = on_segment.as_ref(); // only used by the chunked path
         generate_with_retry(provider, system_prompt, user_message).await?
     };
 

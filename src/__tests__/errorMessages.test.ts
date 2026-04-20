@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toUserMessage } from "../lib/errorMessages";
+import { toUserMessage, isContextOverflowError } from "../lib/errorMessages";
 
 describe("toUserMessage", () => {
   // ── API key / auth errors ──
@@ -287,5 +287,53 @@ describe("toUserMessage", () => {
       const result = toUserMessage(undefined);
       expect(result).toBe("undefined");
     });
+  });
+
+  describe("context overflow errors", () => {
+    // These should all route to the "Request exceeds the model's context window"
+    // message, NOT the generic rate-limit path — retrying the same payload
+    // would always fail.
+    const cases = [
+      "Claude API error: prompt is too long (400)",
+      "OpenAI error: context_length_exceeded",
+      "exceeds the maximum context length",
+      "Gemini: overloaded_token_input",
+      "token limit exceeded for gpt-4o",
+      "413 Payload Too Large",
+      "Request Entity Too Large",
+      "too many tokens in request",
+    ];
+    for (const input of cases) {
+      it(`routes "${input}" to context-overflow guidance`, () => {
+        const msg = toUserMessage(input);
+        expect(msg).toContain("context window");
+        expect(msg).toContain("density");
+      });
+    }
+
+    it("does NOT match generic rate-limit text", () => {
+      expect(isContextOverflowError("HTTP 429 rate limit exceeded")).toBe(false);
+    });
+  });
+});
+
+describe("isContextOverflowError", () => {
+  it("detects common provider wordings", () => {
+    expect(isContextOverflowError("prompt is too long")).toBe(true);
+    expect(isContextOverflowError("maximum context length is 128000")).toBe(true);
+    expect(isContextOverflowError("context_length_exceeded")).toBe(true);
+    expect(isContextOverflowError("overloaded_token_input")).toBe(true);
+    expect(isContextOverflowError("HTTP 413 Payload Too Large")).toBe(true);
+  });
+
+  it("does not misfire on unrelated errors", () => {
+    expect(isContextOverflowError("network timeout")).toBe(false);
+    expect(isContextOverflowError("401 unauthorized")).toBe(false);
+    expect(isContextOverflowError("rate limit exceeded")).toBe(false);
+  });
+
+  it("accepts Error instances and non-string input", () => {
+    expect(isContextOverflowError(new Error("prompt is too long"))).toBe(true);
+    expect(isContextOverflowError({ toString: () => "413 " })).toBe(true);
   });
 });
