@@ -794,6 +794,43 @@ async fn pad_video_to_audio_length(
         return Ok((PathBuf::from(video_path), None));
     }
 
+    // Cap the tpad hold to something sane. `tpad=stop_mode=clone` buffers
+    // held frames in memory and the filter doesn't fail loudly when asked
+    // for unbounded padding — users with severely overrun narration would
+    // just see ffmpeg burn RAM. 120s is well past any realistic script
+    // overrun; beyond that we refuse to pad and let the final frame hold
+    // naturally via the container's shorter-stream behaviour.
+    const MAX_PAD_SECONDS: f64 = 120.0;
+    if delta > MAX_PAD_SECONDS {
+        tracing::warn!(
+            "Narration overruns source by {delta:.1}s (> {MAX_PAD_SECONDS:.0}s cap) — skipping tpad; output will report audio duration"
+        );
+        return Ok((PathBuf::from(video_path), None));
+    }
+
+    // Probe source pix_fmt: libx264 silently downcasts 10-bit / 4:4:4
+    // inputs to 8-bit yuv420p, so a source the user carefully mastered in
+    // HDR or broadcast 4:2:2 would get quality-degraded on the overflow
+    // path and NOWHERE ELSE in the pipeline. Refuse to pad in that case
+    // and log the reason — the user can either trim the script or accept
+    // the container-duration mismatch, but we won't silently change their
+    // colour pipeline.
+    let pix_fmt = video_engine::probe_pix_fmt(Path::new(video_path))
+        .await
+        .ok()
+        .flatten();
+    let safe_to_reencode = matches!(
+        pix_fmt.as_deref(),
+        Some("yuv420p") | Some("yuvj420p") | Some("yuv420p10le") | None
+    );
+    if !safe_to_reencode {
+        tracing::warn!(
+            "Source pix_fmt {:?} isn't a lossless libx264 target — skipping tpad to avoid silent quality downgrade",
+            pix_fmt
+        );
+        return Ok((PathBuf::from(video_path), None));
+    }
+
     let padded_path =
         std::env::temp_dir().join(format!("_narrator_padded_{}.mp4", uuid::Uuid::new_v4()));
     let filter = format!("tpad=stop_mode=clone:stop_duration={delta:.3}");
@@ -814,6 +851,12 @@ async fn pad_video_to_audio_length(
             "veryfast",
             "-crf",
             "20",
+            // Pin pix_fmt explicitly so the padded tail matches the rest of
+            // the container. Without this libx264 defaults are
+            // build-dependent and we've seen yuv444p inputs turn into
+            // yuv420p unannounced.
+            "-pix_fmt",
+            "yuv420p",
             "-an",
         ])
         .arg(&padded_path)

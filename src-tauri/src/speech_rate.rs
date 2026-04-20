@@ -87,8 +87,12 @@ pub fn budget_unit(lang: &str) -> &'static str {
 /// Returns lowercase with region only when it changes the rate (pt-BR).
 fn normalize_lang(lang: &str) -> String {
     let lower = lang.to_ascii_lowercase();
-    if lower.starts_with("pt") {
-        // Only pt-BR is configured; treat any pt-* as pt-BR for now.
+    // Only pt-BR is configured today. Match the `pt` base and the `pt-*`
+    // region form specifically — `starts_with("pt")` would also swallow
+    // `ptolemy` or any future `ptX` code and silently classify it as
+    // Brazilian Portuguese. European `pt-PT` also lands on pt-BR for now;
+    // once pt-PT is tuned separately this branch is the place to split.
+    if lower == "pt" || lower.starts_with("pt-") {
         return "pt-br".to_string();
     }
     // Strip any region suffix: "en-US" -> "en", "ja-JP" -> "ja".

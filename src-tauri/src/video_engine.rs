@@ -205,6 +205,45 @@ pub async fn probe_has_audio_stream(path: &Path) -> Result<bool, NarratorError> 
         .unwrap_or(false))
 }
 
+/// Probe the pixel format of the first video stream. Used by the overflow
+/// padding path to decide whether a libx264 re-encode would silently
+/// downgrade the source's colour pipeline (e.g. 10-bit → 8-bit).
+///
+/// Returns `Ok(None)` when ffprobe parsed the file but found no video
+/// stream or no pix_fmt field (e.g. image containers). Returns `Err` only
+/// when ffprobe itself failed to run.
+pub async fn probe_pix_fmt(path: &Path) -> Result<Option<String>, NarratorError> {
+    let ffprobe = detect_ffprobe()?;
+    let output = Command::new(ffprobe.as_os_str())
+        .no_window()
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+        ])
+        .arg(path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::VideoProbeError(stderr.to_string()));
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}"))
+    })?;
+
+    Ok(json["streams"][0]["pix_fmt"]
+        .as_str()
+        .map(|s| s.to_string()))
+}
+
 /// Probe the duration of any media file (audio or video).
 pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
     let ffprobe = detect_ffprobe()?;

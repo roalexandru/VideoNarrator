@@ -148,6 +148,14 @@ export function ExportScreen() {
     return "builtin:default:1.0";
   })();
 
+  // Telemetry-safe provider label. The full `ttsProvider` string for
+  // builtin looks like `builtin:Samantha:1.0` — the voice name comes from
+  // the host OS ("Samantha" is macOS-only) and leaks the user's platform.
+  // For analytics we only need the category, so collapse builtin:* to
+  // just "builtin" and keep Azure/ElevenLabs as the literals they already
+  // are.
+  const ttsProviderTelemetry = ttsProvider.startsWith("builtin") ? "builtin" : ttsProvider;
+
   // Video export pipeline
   const [videoPhase, setVideoPhase] = useState<"idle" | "rendering" | "audio" | "merge" | "subtitles" | "done" | "error">("idle");
   const [videoProgress, setVideoProgress] = useState(0);
@@ -345,7 +353,7 @@ export function ExportScreen() {
       setVideoProgress(100);
       setVideoOutputPath(finalPath);
       setVideoPhase("done");
-      trackEvent("export_completed", { type: "video", tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio, wall_time_s: Math.round((Date.now() - exportStart) / 1000) });
+      trackEvent("export_completed", { type: "video", tts_provider: ttsProviderTelemetry, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio, wall_time_s: Math.round((Date.now() - exportStart) / 1000) });
 
       // Predicted compression / padding stats — computed from the same
       // deterministic math Export uses (see speechRate.predictExport).
@@ -369,11 +377,11 @@ export function ExportScreen() {
         segments_over_cap: prediction.overCap,
         video_padded_ms: Math.round(prediction.padSeconds * 1000),
         language: scriptLang,
-        tts_provider: ttsProvider,
+        tts_provider: ttsProviderTelemetry,
       });
     } catch (e: any) {
       console.error("Export video:", e);
-      trackError("export_video", e, { tts_provider: ttsProvider, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
+      trackError("export_video", e, { tts_provider: ttsProviderTelemetry, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
       setVideoError(toUserMessage(e));
       setVideoPhase("error");
     }
@@ -418,10 +426,10 @@ export function ExportScreen() {
 
       setAudioOutputPath(ttsOk[0].file_path);
       setAudioPhase("done");
-      trackEvent("export_completed", { type: "audio", tts_provider: ttsProvider, wall_time_s: Math.round((Date.now() - audioExportStart) / 1000) });
+      trackEvent("export_completed", { type: "audio", tts_provider: ttsProviderTelemetry, wall_time_s: Math.round((Date.now() - audioExportStart) / 1000) });
     } catch (e: any) {
       console.error("Export audio:", e);
-      trackError("export_audio", e, { tts_provider: ttsProvider });
+      trackError("export_audio", e, { tts_provider: ttsProviderTelemetry });
       setAudioError(toUserMessage(e));
       setAudioPhase("error");
     }

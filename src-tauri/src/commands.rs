@@ -1407,6 +1407,7 @@ pub async fn generate_tts(
             )
             .await;
 
+            let concat_succeeded = concat_output.is_ok();
             match concat_output {
                 Ok(stats) => {
                     // Write the narration_timings.json sidecar alongside the
@@ -1450,15 +1451,20 @@ pub async fn generate_tts(
                 }
             }
 
-            // Clean up temp files. The concat helper wrote these alongside
-            // the final mp3 — names are predictable so a directory sweep is
-            // safe and doesn't require tracking them through the callee.
+            // Clean up temp files. The concat list + silence padding are
+            // never referenced outside this function so they're always safe
+            // to delete. Per-segment `_tmp_seg_*` files, however, are the
+            // fallback results we just handed back to the caller on concat
+            // failure — sweeping them here would leave the UI pointing at
+            // paths that don't exist. Only delete them on success.
             let _ = tokio::fs::remove_file(out.join("_concat_list.txt")).await;
             if let Ok(mut entries) = tokio::fs::read_dir(&out).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    if name.starts_with("_tmp_sil_") || name.starts_with("_tmp_seg_") {
+                    let is_silence = name.starts_with("_tmp_sil_");
+                    let is_segment = name.starts_with("_tmp_seg_");
+                    if is_silence || (is_segment && concat_succeeded) {
                         let _ = tokio::fs::remove_file(entry.path()).await;
                     }
                 }

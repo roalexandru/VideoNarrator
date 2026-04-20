@@ -144,7 +144,10 @@ export function predictExport(
 
 function normalizeLang(lang: string): string {
   const lower = lang.toLowerCase();
-  if (lower.startsWith("pt")) return "pt-br";
+  // Match `pt` and `pt-*` specifically — plain `startsWith("pt")` would
+  // also swallow `ptolemy`-style codes and classify them as Portuguese.
+  // Mirrors `speech_rate::normalize_lang` on the Rust side.
+  if (lower === "pt" || lower.startsWith("pt-")) return "pt-br";
   const dash = lower.indexOf("-");
   return dash >= 0 ? lower.slice(0, dash) : lower;
 }

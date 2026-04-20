@@ -1350,8 +1350,12 @@ pub async fn generate_narration(
                 let retry_overflow = crate::script_validator::overflow_fraction(&retry_report);
                 // Keep whichever draft fits the budget best. A retry that made
                 // things worse (rare but possible) shouldn't clobber a better
-                // first draft.
-                if retry_overflow <= overflow_fraction {
+                // first draft. Strict `<` so ties — retry matched the first
+                // draft's overflow fraction — go to the first draft too:
+                // the user already saw those segments stream in, and
+                // silently swapping in different wording with identical
+                // overflow is pure UX churn for zero measurable win.
+                if retry_overflow < overflow_fraction {
                     tracing::info!(
                         "Retry improved overflow: {:.0}% → {:.0}%",
                         overflow_fraction * 100.0,
