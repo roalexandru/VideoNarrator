@@ -322,6 +322,13 @@ fn parse_frame_rate(rate: &str) -> f64 {
 ///
 /// Both callbacks must be `Send + Sync + 'static` because they cross task
 /// boundaries (spawn_blocking for dimensions, ffmpeg stderr reader task).
+///
+/// Sampling strategy: when the video has an audio stream we first try to
+/// anchor frame extraction on scene changes + silence boundaries, which
+/// lines up better with meaningful visual events than a fixed interval.
+/// If that yields too few anchors (static slideshows, screencasts, very
+/// short clips) we fall back to the fixed-interval path that matches the
+/// historical behaviour.
 pub async fn extract_frames(
     video_path: &Path,
     config: &FrameConfig,
@@ -337,6 +344,302 @@ pub async fn extract_frames(
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let metadata = probe_video(video_path).await?;
+
+    let on_frame: Arc<dyn Fn(Frame) + Send + Sync> = Arc::new(on_frame);
+    let on_tick: Arc<dyn Fn(f64, String) + Send + Sync> = Arc::new(on_tick);
+
+    // Attempt anchor-based sampling first; fall back to fixed-interval if it
+    // didn't yield enough anchors or if any detection step errored. We need
+    // at least `MIN_ANCHORS` frames for the fallback threshold to feel
+    // meaningful — fewer than that and the LLM can't tell scene structure
+    // from a handful of samples.
+    const MIN_ANCHORS: usize = 3;
+    if let Ok(anchors) =
+        detect_anchors(&ffmpeg, video_path, &metadata, config, on_tick.clone()).await
+    {
+        if anchors.len() >= MIN_ANCHORS {
+            return extract_frames_at_anchors(
+                &ffmpeg, video_path, &anchors, &metadata, output_dir, on_frame, on_tick,
+            )
+            .await;
+        }
+        tracing::info!(
+            "anchor-based sampling found only {} frames (< {}), falling back to fixed interval",
+            anchors.len(),
+            MIN_ANCHORS
+        );
+    } else {
+        tracing::warn!("anchor detection failed, falling back to fixed interval");
+    }
+
+    extract_frames_fixed_interval(
+        &ffmpeg, video_path, &metadata, config, output_dir, on_frame, on_tick,
+    )
+    .await
+}
+
+/// Parse `showinfo` stderr lines (`... pts_time:X.Y ...`) into timestamps.
+pub(crate) fn parse_showinfo_timestamps(stderr: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    for line in stderr.lines() {
+        // showinfo prefixes each frame with `[Parsed_showinfo_N @ ...]` and
+        // the timestamp is reported as `pts_time:1.234`.
+        if let Some(idx) = line.find("pts_time:") {
+            let rest = &line[idx + "pts_time:".len()..];
+            let end = rest
+                .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+                .unwrap_or(rest.len());
+            if let Ok(t) = rest[..end].parse::<f64>() {
+                if t.is_finite() && t >= 0.0 {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse `silencedetect` stderr lines (`silence_start:` / `silence_end:`)
+/// into midpoint timestamps — those land in the quiet gap between phrases,
+/// which is usually a good narration anchor because the frame there is
+/// stable and shows the speaker finishing a thought.
+pub(crate) fn parse_silence_midpoints(stderr: &str) -> Vec<f64> {
+    let mut starts: Vec<f64> = Vec::new();
+    let mut ends: Vec<f64> = Vec::new();
+    for line in stderr.lines() {
+        if let Some(idx) = line.find("silence_start: ") {
+            let tail = &line[idx + "silence_start: ".len()..];
+            let end = tail
+                .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+                .unwrap_or(tail.len());
+            if let Ok(t) = tail[..end].parse::<f64>() {
+                starts.push(t.max(0.0));
+            }
+        } else if let Some(idx) = line.find("silence_end: ") {
+            let tail = &line[idx + "silence_end: ".len()..];
+            let end = tail
+                .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+                .unwrap_or(tail.len());
+            if let Ok(t) = tail[..end].parse::<f64>() {
+                ends.push(t.max(0.0));
+            }
+        }
+    }
+    // Pair starts with ends positionally. A silencedetect pass always logs
+    // starts before the matching end, but runs may finish with an unterminated
+    // silence (ending at EOF) that has no `silence_end` line. Ignore unpaired
+    // trailing starts.
+    let pairs = starts.len().min(ends.len());
+    (0..pairs)
+        .map(|i| 0.5 * (starts[i] + ends[i]))
+        .filter(|t| t.is_finite() && *t >= 0.0)
+        .collect()
+}
+
+/// Merge candidate anchor timestamps, drop near-duplicates (within `min_gap`
+/// seconds of another anchor), and cap total count to `max_frames` by keeping
+/// an evenly-spaced subset. Returns a sorted Vec.
+pub(crate) fn merge_anchors(
+    scene: Vec<f64>,
+    silence: Vec<f64>,
+    duration: f64,
+    max_frames: usize,
+    min_gap: f64,
+) -> Vec<f64> {
+    let mut all: Vec<f64> = scene
+        .into_iter()
+        .chain(silence)
+        .filter(|t| t.is_finite() && *t >= 0.0 && (duration <= 0.0 || *t <= duration))
+        .collect();
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Deduplicate anchors within min_gap of each other, keeping the first.
+    let mut deduped: Vec<f64> = Vec::with_capacity(all.len());
+    for t in all {
+        if deduped.last().is_none_or(|last| (t - *last) > min_gap) {
+            deduped.push(t);
+        }
+    }
+
+    if max_frames == 0 || deduped.len() <= max_frames {
+        return deduped;
+    }
+    // Subsample evenly so we keep the shape of the timeline rather than the
+    // densest cluster at the front.
+    let step = deduped.len() as f64 / max_frames as f64;
+    let mut out = Vec::with_capacity(max_frames);
+    for i in 0..max_frames {
+        let idx = (i as f64 * step).floor() as usize;
+        out.push(deduped[idx.min(deduped.len() - 1)]);
+    }
+    out.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+    out
+}
+
+/// Run scene-change and silence detection, merge + cap, return anchor times.
+/// The detection passes run sequentially to keep ffmpeg from thrashing two
+/// decodes at once on the same file; both are O(duration).
+async fn detect_anchors(
+    ffmpeg: &Path,
+    video_path: &Path,
+    metadata: &VideoMetadata,
+    config: &FrameConfig,
+    on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+) -> Result<Vec<f64>, NarratorError> {
+    on_tick(0.02, "Detecting scene changes".to_string());
+    let scene = detect_scene_changes(ffmpeg, video_path, config.scene_threshold).await?;
+
+    let silence = match probe_has_audio_stream(video_path).await {
+        Ok(true) => {
+            on_tick(0.12, "Detecting silence boundaries".to_string());
+            detect_silence_boundaries(ffmpeg, video_path)
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    let anchors = merge_anchors(
+        scene,
+        silence,
+        metadata.duration_seconds,
+        config.max_frames,
+        1.0,
+    );
+    tracing::info!(
+        "anchor sampling: {} anchors over {:.1}s (scene_threshold={:.2})",
+        anchors.len(),
+        metadata.duration_seconds,
+        config.scene_threshold
+    );
+    Ok(anchors)
+}
+
+async fn detect_scene_changes(
+    ffmpeg: &Path,
+    video_path: &Path,
+    threshold: f64,
+) -> Result<Vec<f64>, NarratorError> {
+    let threshold = threshold.clamp(0.05, 0.95);
+    let filter = format!("select='gt(scene,{threshold:.3})',showinfo");
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args(["-nostats", "-hide_banner", "-i"])
+        .arg(video_path.as_os_str())
+        .args(["-vf", &filter, "-vsync", "vfr", "-f", "null", "-"])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        // showinfo pipes data on success; non-success here means the detect
+        // pass itself failed and we should not pretend we have anchors.
+        return Err(NarratorError::FfmpegFailed(
+            stderr.lines().rev().take(3).collect::<Vec<_>>().join("\n"),
+        ));
+    }
+    Ok(parse_showinfo_timestamps(&stderr))
+}
+
+async fn detect_silence_boundaries(
+    ffmpeg: &Path,
+    video_path: &Path,
+) -> Result<Vec<f64>, NarratorError> {
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args(["-nostats", "-hide_banner", "-i"])
+        .arg(video_path.as_os_str())
+        .args(["-af", "silencedetect=n=-30dB:d=0.5", "-f", "null", "-"])
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+    // silencedetect writes detection lines to stderr even on success.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Ok(parse_silence_midpoints(&stderr))
+}
+
+/// Extract one frame per anchor timestamp via independent `-ss / -frames:v 1`
+/// invocations. Each call is cheap (~200ms cold) and gives us accurate
+/// per-frame progress without relying on `-progress pipe:2` tailing.
+async fn extract_frames_at_anchors(
+    ffmpeg: &Path,
+    video_path: &Path,
+    anchors: &[f64],
+    metadata: &VideoMetadata,
+    output_dir: &Path,
+    on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
+    on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+) -> Result<Vec<Frame>, NarratorError> {
+    on_tick(
+        0.30,
+        format!("Extracting {} anchored frames", anchors.len()),
+    );
+
+    let mut frames: Vec<Frame> = Vec::with_capacity(anchors.len());
+    let total = anchors.len().max(1) as f64;
+    for (i, &ts) in anchors.iter().enumerate() {
+        let out_path = output_dir.join(format!("frame_{:04}.jpg", i + 1));
+        let ts_str = format!("{ts:.3}");
+        let status = Command::new(ffmpeg.as_os_str())
+            .no_window()
+            .args(["-nostats", "-hide_banner", "-y", "-ss", &ts_str, "-i"])
+            .arg(video_path.as_os_str())
+            .args(["-frames:v", "1", "-q:v", "2"])
+            .arg(out_path.as_os_str())
+            .output()
+            .await
+            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        if !status.status.success() {
+            tracing::warn!(
+                "anchor frame at {:.2}s failed, skipping ({})",
+                ts,
+                String::from_utf8_lossy(&status.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("")
+            );
+            continue;
+        }
+        let Some((width, height)) = get_image_dimensions(&out_path) else {
+            tracing::warn!(
+                "skipping anchor frame with unreadable dimensions: {}",
+                out_path.display()
+            );
+            continue;
+        };
+        let frame = Frame {
+            index: frames.len(),
+            timestamp_seconds: ts.min(metadata.duration_seconds.max(0.0)),
+            path: out_path,
+            width,
+            height,
+        };
+        on_frame(frame.clone());
+        frames.push(frame);
+
+        let fraction = 0.30 + ((i + 1) as f64 / total) * 0.65;
+        on_tick(
+            fraction,
+            format!("Extracted anchor frame {} of {}", i + 1, anchors.len()),
+        );
+    }
+
+    on_tick(1.0, format!("Extracted {} frames", frames.len()));
+    Ok(frames)
+}
+
+/// The historical fixed-interval extraction path. Kept as a fallback for
+/// silent / static / very short videos where anchor detection produces too
+/// few candidates to be useful.
+async fn extract_frames_fixed_interval(
+    ffmpeg: &Path,
+    video_path: &Path,
+    metadata: &VideoMetadata,
+    config: &FrameConfig,
+    output_dir: &Path,
+    on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
+    on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+) -> Result<Vec<Frame>, NarratorError> {
     let base_interval = config.density.interval_seconds();
 
     // Adaptive: ensure we don't extract more frames than max_frames
@@ -352,11 +655,6 @@ pub async fn extract_frames(
     } else {
         config.max_frames.max(1)
     };
-
-    // Share the tick callback between the ffmpeg stderr reader and the
-    // spawn_blocking dimension pass without leaking its 'static bound into
-    // the outer signature twice.
-    let on_tick: Arc<dyn Fn(f64, String) + Send + Sync> = Arc::new(on_tick);
 
     on_tick(0.0, "Starting frame extraction".to_string());
 
@@ -720,5 +1018,78 @@ mod tests {
         let stream = serde_json::json!({ "duration": "100.0" });
         let format = serde_json::json!({ "duration": "90.0" });
         assert!((resolve_video_duration(&stream, &format) - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn showinfo_timestamps_parses_multiple_frames() {
+        let stderr = r#"
+[Parsed_showinfo_1 @ 0x7f] n:   0 pts:    0 pts_time:0     pos:        0 fmt:yuv420p sar:0/1 s:1920x1080 i:P
+[Parsed_showinfo_1 @ 0x7f] n:   1 pts: 60000 pts_time:2.5   pos:   200000 fmt:yuv420p sar:0/1 s:1920x1080 i:P
+[Parsed_showinfo_1 @ 0x7f] n:   2 pts:120000 pts_time:12.34 pos:   400000 fmt:yuv420p sar:0/1 s:1920x1080 i:P
+"#;
+        let ts = parse_showinfo_timestamps(stderr);
+        assert_eq!(ts, vec![0.0, 2.5, 12.34]);
+    }
+
+    #[test]
+    fn showinfo_timestamps_ignores_non_pts_lines() {
+        let stderr = "Input #0, mov,mp4,m4a,3gp,3g2,mj2\n  Duration: 00:01:30.00, start: 0.000000\n[something else] pts_time:99.0\n";
+        let ts = parse_showinfo_timestamps(stderr);
+        // The line has pts_time, so we take it — we intentionally don't try
+        // to disambiguate showinfo from other filters' log lines.
+        assert_eq!(ts, vec![99.0]);
+    }
+
+    #[test]
+    fn silence_midpoints_pairs_starts_with_ends() {
+        let stderr = r#"
+[silencedetect @ 0x7f] silence_start: 1.0
+[silencedetect @ 0x7f] silence_end: 2.0 | silence_duration: 1.0
+[silencedetect @ 0x7f] silence_start: 10.5
+[silencedetect @ 0x7f] silence_end: 11.5 | silence_duration: 1.0
+"#;
+        let mids = parse_silence_midpoints(stderr);
+        assert_eq!(mids.len(), 2);
+        assert!((mids[0] - 1.5).abs() < 1e-9);
+        assert!((mids[1] - 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn silence_midpoints_drops_unpaired_trailing_start() {
+        // silencedetect occasionally leaves an open silence at EOF without
+        // emitting a silence_end line. Treat that as "no midpoint available."
+        let stderr = r#"
+[silencedetect @ 0x7f] silence_start: 1.0
+[silencedetect @ 0x7f] silence_end: 2.0 | silence_duration: 1.0
+[silencedetect @ 0x7f] silence_start: 99.0
+"#;
+        let mids = parse_silence_midpoints(stderr);
+        assert_eq!(mids, vec![1.5]);
+    }
+
+    #[test]
+    fn merge_anchors_deduplicates_within_gap() {
+        let scene = vec![1.0, 5.0, 5.4, 10.0];
+        let silence = vec![1.1, 7.0];
+        let merged = merge_anchors(scene, silence, 30.0, 10, 1.0);
+        // 1.0 kept, 1.1 dropped (within 1.0s). 5.0 kept, 5.4 dropped.
+        assert_eq!(merged, vec![1.0, 5.0, 7.0, 10.0]);
+    }
+
+    #[test]
+    fn merge_anchors_caps_to_max_frames_with_even_spacing() {
+        let scene: Vec<f64> = (0..100).map(|i| i as f64 * 0.5).collect();
+        let merged = merge_anchors(scene, vec![], 60.0, 5, 0.1);
+        assert_eq!(merged.len(), 5);
+        // Even spacing across the timeline — first near start, last near end.
+        assert!(merged[0] < 5.0);
+        assert!(merged[4] > 30.0);
+    }
+
+    #[test]
+    fn merge_anchors_drops_out_of_range_and_nan() {
+        let scene = vec![-1.0, 5.0, f64::NAN, 100.0];
+        let merged = merge_anchors(scene, vec![], 30.0, 10, 1.0);
+        assert_eq!(merged, vec![5.0]);
     }
 }
