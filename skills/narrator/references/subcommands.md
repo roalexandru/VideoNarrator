@@ -14,15 +14,20 @@ Reports media metadata.
 {
   "ok": true,
   "data": {
+    "path": "/absolute/path/to/video.mp4",
     "duration_seconds": 123.45,
-    "width": 1920, "height": 1080,
+    "width": 1920,
+    "height": 1080,
     "fps": 30.0,
     "codec": "h264",
-    "has_audio": true,
-    "file_size_bytes": 98765432
+    "file_size": 98765432
   }
 }
 ```
+
+- `file_size` is in bytes.
+- `codec` is the first video stream's codec name (e.g. `h264`, `hevc`, `vp9`).
+- No `has_audio` field here — this probe only reports video metadata. If you need to branch on whether the source has an audio track, call `ffprobe` directly for now (the Tauri backend has a separate `probe_has_audio_stream` helper that isn't yet exposed on the CLI).
 
 Use this before any render to confirm the file is readable and reason about frame rates / durations.
 
