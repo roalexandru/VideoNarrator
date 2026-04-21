@@ -214,4 +214,30 @@ describe("speechRate.predictExport", () => {
     expect(p.overCap).toBe(1); // cap at 1.20× can't save this
     expect(p.padSeconds).toBeGreaterThan(0);
   });
+
+  it("segmentsPastEnd counts segments scheduled past the video end", () => {
+    // Regression for the Autopilot-imported project: AI generated 11 segments
+    // spanning 0→231.9s against a file whose video stream was only 104.8s long
+    // (container duration was inflated by a trailing audio track). Segments
+    // 6–10 (start >= 96s, after the visual end) should be flagged as past-end
+    // so the banner can tell the user "regenerate" instead of "compress".
+    const segments = [
+      { start_seconds: 0,   end_seconds: 10,  text: "hello" },
+      { start_seconds: 50,  end_seconds: 80,  text: "mid video" },
+      { start_seconds: 106, end_seconds: 128, text: "past end one" },
+      { start_seconds: 144, end_seconds: 170, text: "past end two" },
+      { start_seconds: 184, end_seconds: 213, text: "past end three" },
+    ];
+    const p = predictExport(segments, "en", 104.833);
+    expect(p.segmentsPastEnd).toBe(3);
+  });
+
+  it("segmentsPastEnd is zero when every segment starts within the video", () => {
+    const segments = [
+      { start_seconds: 0,  end_seconds: 10, text: "a" },
+      { start_seconds: 10, end_seconds: 20, text: "b" },
+    ];
+    const p = predictExport(segments, "en", 20);
+    expect(p.segmentsPastEnd).toBe(0);
+  });
 });
