@@ -891,6 +891,18 @@ pub struct SubtitleStyle {
     pub outline_color: String,
     pub outline: u32,
     pub position: String,
+    /// Text transform applied to the SRT before libass sees it.
+    /// "uppercase" uppercases every letter; any other value / None leaves
+    /// casing alone. Kept as Option<String> rather than an enum so adding
+    /// new transforms ("lowercase", "titlecase") doesn't break the IPC
+    /// contract or older persisted styles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_transform: Option<String>,
+    /// Re-wrap each cue's text so at most this many words appear per line.
+    /// `Some(2)` is the Shorts/TikTok punchy-caption look; `None` keeps the
+    /// original line breaks the SRT ships with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_words_per_line: Option<u32>,
 }
 
 impl Default for SubtitleStyle {
@@ -901,8 +913,62 @@ impl Default for SubtitleStyle {
             outline_color: "#000000".to_string(),
             outline: 2,
             position: "bottom".to_string(),
+            text_transform: None,
+            max_words_per_line: None,
         }
     }
+}
+
+/// Apply style-driven text transforms to an SRT in memory. Preserves the
+/// cue index and timestamp lines verbatim; only text lines are rewritten.
+/// Returns the input unchanged when neither transform is set, so callers
+/// can unconditionally pipe SRTs through without perf cost on the default
+/// path.
+pub(crate) fn preprocess_srt_for_style(srt: &str, style: &SubtitleStyle) -> String {
+    if style.text_transform.is_none() && style.max_words_per_line.is_none() {
+        return srt.to_string();
+    }
+    let normalized = srt.replace("\r\n", "\n");
+    let mut out_blocks: Vec<String> = Vec::new();
+    for block in normalized.split("\n\n") {
+        let trimmed = block.trim_matches('\n');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lines: Vec<&str> = trimmed.split('\n').collect();
+        // Expect: index, timestamp, one or more text lines. Anything shorter
+        // isn't a well-formed cue — pass it through untouched rather than
+        // guess at what to do.
+        if lines.len() < 3 {
+            out_blocks.push(trimmed.to_string());
+            continue;
+        }
+        let text_joined = lines[2..].join(" ");
+        let transformed = match style.text_transform.as_deref() {
+            Some("uppercase") => text_joined.to_uppercase(),
+            _ => text_joined,
+        };
+        let wrapped = match style.max_words_per_line {
+            Some(n) if n >= 1 => transformed
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .chunks(n as usize)
+                .map(|chunk| chunk.join(" "))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            _ => transformed,
+        };
+        let mut rebuilt = String::new();
+        rebuilt.push_str(lines[0]);
+        rebuilt.push('\n');
+        rebuilt.push_str(lines[1]);
+        rebuilt.push('\n');
+        rebuilt.push_str(&wrapped);
+        out_blocks.push(rebuilt);
+    }
+    let mut joined = out_blocks.join("\n\n");
+    joined.push('\n');
+    joined
 }
 
 /// Convert a hex RGB color string (e.g. "#ffffff") to ffmpeg ASS BGR format (e.g. "&H00FFFFFF").
@@ -980,10 +1046,19 @@ pub async fn burn_subtitles(
     let total_duration = meta.duration_seconds;
 
     // Copy SRT to temp dir with a unique name to avoid path escaping issues
-    // with ffmpeg's subtitles filter (chokes on colons, spaces, special chars)
+    // with ffmpeg's subtitles filter (chokes on colons, spaces, special chars).
+    // When the style requests text_transform or word-wrap, rewrite the temp
+    // copy in place before libass reads it — the source SRT on disk stays
+    // untouched so subsequent non-style renders still use the untransformed
+    // text.
     let temp_srt =
         std::env::temp_dir().join(format!("_narrator_burn_subs_{}.srt", uuid::Uuid::new_v4()));
     tokio::fs::copy(srt_path, &temp_srt).await?;
+    if style.text_transform.is_some() || style.max_words_per_line.is_some() {
+        let original = tokio::fs::read_to_string(&temp_srt).await?;
+        let transformed = preprocess_srt_for_style(&original, style);
+        tokio::fs::write(&temp_srt, transformed).await?;
+    }
 
     let subtitle_filter = build_subtitles_filter(&temp_srt, style);
 
@@ -1172,6 +1247,7 @@ mod tests {
             outline_color: "#000000".into(),
             outline: 3,
             position: "top".into(),
+            ..Default::default()
         };
         let filter = build_subtitles_filter(Path::new("/tmp/x.srt"), &style);
         assert!(filter.contains("FontName=Arial"));
@@ -2217,6 +2293,7 @@ mod tests {
             outline_color: "#000000".into(),
             outline: 3,
             position: "top".into(),
+            ..Default::default()
         };
         let res = burn_subtitles(
             input.to_str().unwrap(),
@@ -2594,5 +2671,72 @@ mod tests {
             "lossless output ({out_size}) unexpectedly smaller than source ({src_size}) — \
              likely indicates we're not actually encoding lossless"
         );
+    }
+
+    #[test]
+    fn preprocess_srt_no_transform_returns_input_verbatim() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nHello world\n";
+        let style = SubtitleStyle::default();
+        assert_eq!(preprocess_srt_for_style(srt, &style), srt);
+    }
+
+    #[test]
+    fn preprocess_srt_uppercase_preserves_timing_lines() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n2\n00:00:03,000 --> 00:00:05,000\nsecond cue\n";
+        let style = SubtitleStyle {
+            text_transform: Some("uppercase".into()),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("00:00:01,000 --> 00:00:03,000"));
+        assert!(out.contains("HELLO WORLD"));
+        assert!(out.contains("SECOND CUE"));
+        assert!(!out.contains("Hello world"));
+    }
+
+    #[test]
+    fn preprocess_srt_max_words_per_line_wraps_text() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nthis is a four word line\n";
+        let style = SubtitleStyle {
+            max_words_per_line: Some(2),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("this is\na four\nword line"), "got:\n{out}");
+    }
+
+    #[test]
+    fn preprocess_srt_uppercase_plus_wrap_compose() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nOne Two Three Four\n";
+        let style = SubtitleStyle {
+            text_transform: Some("uppercase".into()),
+            max_words_per_line: Some(2),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("ONE TWO\nTHREE FOUR"), "got:\n{out}");
+    }
+
+    #[test]
+    fn preprocess_srt_unknown_transform_is_passthrough() {
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nMixed Case\n";
+        let style = SubtitleStyle {
+            text_transform: Some("sentence".into()),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("Mixed Case"));
+    }
+
+    #[test]
+    fn preprocess_srt_tolerates_crlf_line_endings() {
+        let srt = "1\r\n00:00:01,000 --> 00:00:03,000\r\nhello\r\n\r\n2\r\n00:00:03,000 --> 00:00:05,000\r\nworld\r\n";
+        let style = SubtitleStyle {
+            text_transform: Some("uppercase".into()),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("HELLO"));
+        assert!(out.contains("WORLD"));
     }
 }

@@ -321,6 +321,11 @@ export interface SubtitleStyle {
   outline_color: string;
   outline: number;
   position: string;
+  /** Optional text transform applied to the SRT before libass renders it.
+   *  Currently only "uppercase" is recognized; other values are passthrough. */
+  text_transform?: string | null;
+  /** Optional re-wrap so each cue renders with at most N words per line. */
+  max_words_per_line?: number | null;
 }
 
 export const burnSubtitles = (
