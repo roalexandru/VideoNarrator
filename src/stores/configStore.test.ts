@@ -19,6 +19,7 @@ describe("configStore", () => {
     expect(state.model).toBe("claude-sonnet-4-20250514");
     expect(state.temperature).toBe(0.7);
     expect(state.ttsProvider).toBe("elevenlabs");
+    expect(state.strictMode).toBe(false);
   });
 
   it("sets style", () => {
@@ -61,15 +62,25 @@ describe("configStore", () => {
     expect(useConfigStore.getState().ttsProvider).toBe("azure");
   });
 
+  it("toggles strict mode", () => {
+    expect(useConfigStore.getState().strictMode).toBe(false);
+    useConfigStore.getState().setStrictMode(true);
+    expect(useConfigStore.getState().strictMode).toBe(true);
+    useConfigStore.getState().setStrictMode(false);
+    expect(useConfigStore.getState().strictMode).toBe(false);
+  });
+
   it("resets to initial state", () => {
     useConfigStore.getState().setStyle("technical");
     useConfigStore.getState().setTemperature(0.2);
     useConfigStore.getState().setAiProvider("openai");
+    useConfigStore.getState().setStrictMode(true);
     useConfigStore.getState().reset();
 
     const state = useConfigStore.getState();
     expect(state.style).toBe("product_demo");
     expect(state.temperature).toBe(0.7);
     expect(state.aiProvider).toBe("claude");
+    expect(state.strictMode).toBe(false);
   });
 });

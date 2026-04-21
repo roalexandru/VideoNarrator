@@ -783,6 +783,13 @@ pub async fn generate_narration(
             Some(strict_on_progress),
         )
         .await;
+        // Critique rewrites can change segment text length, which makes the
+        // speech_rate_report stale (Review UI reads it to predict overflow).
+        // Recompute against the post-critique text so the prediction stays
+        // honest.
+        let post_report =
+            crate::script_validator::validate_speech_rate(&script, &params.primary_language);
+        script.speech_rate_report = Some(post_report);
     }
 
     // Finalize: pin the bar to 100% with a one-word label so the UI shows
