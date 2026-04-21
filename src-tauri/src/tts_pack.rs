@@ -39,10 +39,34 @@ pub struct NarrationConcatStats {
     pub actual_timings: Vec<crate::export_engine::ActualTiming>,
 }
 
+/// Fade duration applied to the head and tail of each TTS segment before
+/// concat, to suppress the clicks/pops that show up at splice boundaries when
+/// MP3 frames start/end on non-zero samples.
+const FADE_SECONDS: f64 = 0.03;
+
+/// Build the per-segment ffmpeg filter chain: optional atempo compression
+/// followed by afade in/out. Pure function so it can be unit-tested without
+/// invoking ffmpeg.
+fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if applied_speed > 1.0 + f64::EPSILON {
+        for f in crate::compositor::audio::atempo_factors(applied_speed) {
+            parts.push(format!("atempo={f:.4}"));
+        }
+    }
+    parts.push(format!("afade=t=in:d={FADE_SECONDS:.3}"));
+    let fade_out_start = (effective_dur - FADE_SECONDS).max(0.0);
+    parts.push(format!(
+        "afade=t=out:st={fade_out_start:.3}:d={FADE_SECONDS:.3}"
+    ));
+    parts.join(",")
+}
+
 /// Concat per-segment TTS audio files into one MP3 that tracks the script's
 /// timeline. Applies atempo speed-up (capped at `speech_rate::COMPRESSION_CAP`)
-/// when a segment's audio overruns its window, and inserts silence where the
-/// script has gaps. Temp files (_tmp_sil_*.mp3, _tmp_seg_*_fast.mp3,
+/// when a segment's audio overruns its window, applies a 30ms afade in/out on
+/// every segment so splice boundaries don't pop, and inserts silence where
+/// the script has gaps. Temp files (_tmp_sil_*.mp3, _tmp_seg_*_proc.mp3,
 /// _concat_list.txt) are written alongside the final output.
 ///
 /// `silence_sample_rate`: the per-TTS-engine sample rate string for
@@ -121,9 +145,9 @@ pub async fn concat_narration_segments(
         let seg_start_in_output = audio_pos;
 
         let window = (sf.end_seconds - sf.start_seconds).max(0.5);
-        let (push_path, effective_dur) = if seg_dur > window + 0.10 {
+        let needs_compression = seg_dur > window + 0.10;
+        let applied_speed = if needs_compression {
             let ideal_speed = seg_dur / window;
-            let applied_speed = ideal_speed.min(crate::speech_rate::COMPRESSION_CAP);
             if ideal_speed > crate::speech_rate::COMPRESSION_CAP {
                 stats.segments_over_cap += 1;
                 tracing::warn!(
@@ -134,62 +158,64 @@ pub async fn concat_narration_segments(
                     crate::speech_rate::COMPRESSION_CAP,
                     seg_dur - window * crate::speech_rate::COMPRESSION_CAP
                 );
+                crate::speech_rate::COMPRESSION_CAP
             } else {
                 tracing::info!(
                     "Segment {} compressed by {:.2}× ({:.2}s → {:.2}s)",
                     sf.index,
-                    applied_speed,
+                    ideal_speed,
                     seg_dur,
-                    seg_dur / applied_speed
+                    seg_dur / ideal_speed
                 );
-            }
-            let factors = crate::compositor::audio::atempo_factors(applied_speed);
-            debug_assert!(!factors.is_empty());
-            let filter_chain: String = factors
-                .iter()
-                .map(|f| format!("atempo={f:.4}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let fast_path = temp_dir.join(format!("_tmp_seg_{:03}_fast.mp3", sf.index));
-            let fast_output = Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args(["-y", "-i"])
-                .arg(sf.path.as_os_str())
-                .args([
-                    "-filter:a",
-                    &filter_chain,
-                    "-codec:a",
-                    "libmp3lame",
-                    "-q:a",
-                    "2",
-                ])
-                .arg(fast_path.as_os_str())
-                .output()
-                .await;
-            match fast_output {
-                Ok(o) if o.status.success() => {
-                    stats.segments_compressed += 1;
-                    (fast_path, seg_dur / applied_speed)
-                }
-                Ok(o) => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    tracing::warn!(
-                        "atempo compression failed for segment {}, using original: {}",
-                        sf.index,
-                        &stderr[..stderr.len().min(300)]
-                    );
-                    (sf.path.clone(), seg_dur)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "atempo compression exec failed for segment {}: {e}",
-                        sf.index
-                    );
-                    (sf.path.clone(), seg_dur)
-                }
+                ideal_speed
             }
         } else {
-            (sf.path.clone(), seg_dur)
+            1.0
+        };
+
+        let effective_dur = seg_dur / applied_speed;
+        let filter_chain = build_segment_filter(applied_speed, effective_dur);
+        let proc_path = temp_dir.join(format!("_tmp_seg_{:03}_proc.mp3", sf.index));
+        let proc_output = Command::new(ffmpeg.as_os_str())
+            .no_window()
+            .args(["-y", "-i"])
+            .arg(sf.path.as_os_str())
+            .args([
+                "-filter:a",
+                &filter_chain,
+                "-codec:a",
+                "libmp3lame",
+                "-q:a",
+                "2",
+            ])
+            .arg(proc_path.as_os_str())
+            .output()
+            .await;
+        // Fall back to the raw segment on any failure: we'd rather ship a
+        // popping splice than drop the segment entirely.
+        let (push_path, effective_dur) = match proc_output {
+            Ok(o) if o.status.success() => {
+                if needs_compression {
+                    stats.segments_compressed += 1;
+                }
+                (proc_path, effective_dur)
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(
+                    "segment {} filter pass failed, using original (no fade): {}",
+                    sf.index,
+                    &stderr[..stderr.len().min(300)]
+                );
+                (sf.path.clone(), seg_dur)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "segment {} filter pass exec failed, using original: {e}",
+                    sf.index
+                );
+                (sf.path.clone(), seg_dur)
+            }
         };
 
         concat_parts.push(push_path);
@@ -275,4 +301,38 @@ pub async fn concat_narration_segments(
     }
 
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_pass_through_is_fade_only() {
+        let chain = build_segment_filter(1.0, 1.0);
+        assert!(!chain.contains("atempo"));
+        assert!(chain.contains("afade=t=in:d=0.030"));
+        assert!(chain.contains("afade=t=out:st=0.970:d=0.030"));
+    }
+
+    #[test]
+    fn filter_with_compression_includes_atempo() {
+        let chain = build_segment_filter(1.5, 2.0);
+        assert!(chain.contains("atempo=1.5000"));
+        assert!(chain.contains("afade=t=in:d=0.030"));
+        assert!(chain.contains("afade=t=out:st=1.970:d=0.030"));
+    }
+
+    #[test]
+    fn filter_fade_out_clamps_to_zero_for_short_segments() {
+        let chain = build_segment_filter(1.0, 0.01);
+        assert!(chain.contains("afade=t=out:st=0.000:d=0.030"));
+    }
+
+    #[test]
+    fn filter_compression_cap_produces_single_atempo() {
+        let chain = build_segment_filter(crate::speech_rate::COMPRESSION_CAP, 1.0);
+        let atempo_count = chain.matches("atempo=").count();
+        assert_eq!(atempo_count, 1);
+    }
 }

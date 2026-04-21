@@ -98,7 +98,7 @@ pub async fn run(cmd: TtsCmd) -> Result<Value, NarratorError> {
                     let name = name.to_string_lossy();
                     // Two exact prefixes so a user who names their output
                     // `_tmp_anything.mp3` doesn't have it deleted out from
-                    // under them. Atempo temps are `_tmp_seg_NNN_fast.mp3`,
+                    // under them. Per-segment temps are `_tmp_seg_NNN_proc.mp3`,
                     // so `_tmp_seg_` catches them too.
                     if name.starts_with("_tmp_sil_")
                         || name.starts_with("_tmp_seg_")
