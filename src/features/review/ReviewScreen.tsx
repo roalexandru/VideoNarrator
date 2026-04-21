@@ -1050,23 +1050,33 @@ function SegmentSpeechChip({ overflow }: { overflow: { severity: Severity; predi
   );
 }
 
-function ExportPredictionBanner({ prediction }: { prediction: { compressed: number; overCap: number; padSeconds: number } }) {
-  const { compressed, overCap, padSeconds } = prediction;
+function ExportPredictionBanner({ prediction }: { prediction: { compressed: number; overCap: number; padSeconds: number; segmentsPastEnd: number } }) {
+  const { compressed, overCap, padSeconds, segmentsPastEnd } = prediction;
+  const pastEnd = segmentsPastEnd > 0;
   const padded = padSeconds > 0.25;
   const anyCompressed = compressed > 0;
 
-  if (!padded && !anyCompressed) {
+  if (!pastEnd && !padded && !anyCompressed) {
     // Don't show the banner when everything fits — keep the UI uncluttered.
     return null;
   }
 
-  const border = padded ? "rgba(239,68,68,0.35)" : "rgba(249,115,22,0.35)";
-  const bg = padded ? "rgba(239,68,68,0.08)" : "rgba(249,115,22,0.08)";
-  const fg = padded ? "#fca5a5" : "#fdba74";
-  const icon = padded ? "!" : "i";
+  // `pastEnd` is strictly worse than `padded` — it means narration is
+  // scheduled at timestamps the video doesn't reach at all. Typical cause is
+  // a script generated against an inflated video duration (e.g. a source file
+  // whose audio track outlived its picture). Call it out specifically so the
+  // user knows to regenerate, not just to shorten.
+  const severity: "error" | "warn" | "info" = pastEnd || padded ? "error" : anyCompressed ? "warn" : "info";
+  const border = severity === "error" ? "rgba(239,68,68,0.35)" : "rgba(249,115,22,0.35)";
+  const bg = severity === "error" ? "rgba(239,68,68,0.08)" : "rgba(249,115,22,0.08)";
+  const fg = severity === "error" ? "#fca5a5" : "#fdba74";
+  const icon = severity === "error" ? "!" : "i";
 
   let message: string;
-  if (padded) {
+  if (pastEnd) {
+    const freeze = padSeconds > 0.25 ? ` — on export the last frame will be held for ~${padSeconds.toFixed(1)}s while narration continues` : "";
+    message = `${segmentsPastEnd} segment${segmentsPastEnd === 1 ? "" : "s"} ${segmentsPastEnd === 1 ? "is" : "are"} scheduled past the end of the video${freeze}. The script was likely generated against a longer video — regenerate narration on the Processing step, or delete these segments.`;
+  } else if (padded) {
     message = `${overCap} segment${overCap === 1 ? "" : "s"} can't be sped up enough — Export will hold the final frame for ~${padSeconds.toFixed(1)}s so the narration can finish. Shorten those segments to avoid a longer video.`;
   } else {
     message = `${compressed} segment${compressed === 1 ? "" : "s"} will be sped up slightly (≤ 1.2×) at Export to fit the narration into the video's timing. Speech still sounds natural.`;

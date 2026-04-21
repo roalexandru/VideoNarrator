@@ -441,6 +441,57 @@ export default function App() {
           console.warn("[load] video file read check failed:", msg);
           ps.setVideoAccessError(msg);
         }
+        // Heal stale cached duration in the background. Earlier builds of
+        // probe_video read the container duration, which overstates length
+        // when a trailing audio track outlives the picture (e.g. a
+        // previously-narrated Narrator export). If the fresh probe disagrees
+        // with the cache by more than 0.5s, overwrite the cache and — when a
+        // saved script is longer than the corrected video — tell the user
+        // to regenerate narration so the segments don't run past the end.
+        (async () => {
+          try {
+            const fresh = await probeVideo(cleanedPath);
+            const cachedDur = cachedMeta.duration_seconds;
+            const freshDur = fresh.duration_seconds;
+            if (
+              freshDur > 0 &&
+              Number.isFinite(freshDur) &&
+              Math.abs(cachedDur - freshDur) > 0.5
+            ) {
+              console.warn(
+                `[load] cached duration ${cachedDur}s disagrees with probe ${freshDur}s — healing`,
+              );
+              const current = useProjectStore.getState().videoFile;
+              if (current) {
+                useProjectStore.getState().setVideoFile({
+                  ...current,
+                  duration: freshDur,
+                  resolution: { width: fresh.width, height: fresh.height },
+                  codec: fresh.codec,
+                  fps: fresh.fps,
+                  size: fresh.file_size,
+                });
+              }
+              try {
+                await saveProject({ ...cfg, video_metadata: fresh });
+              } catch {
+                // Non-critical: stale cache is harmless now that state is corrected.
+              }
+              const scripts = useScriptStore.getState().scripts;
+              const scriptOvershoot = Object.values(scripts).some(
+                (s) => s && s.total_duration_seconds > freshDur + 0.5,
+              );
+              if (scriptOvershoot) {
+                showToast(
+                  "Video length was corrected. The saved narration runs past the end of the video — regenerate on the Processing step.",
+                  "info",
+                );
+              }
+            }
+          } catch {
+            // Probe failure is non-fatal — cached metadata still drives the UI.
+          }
+        })();
       } else {
         try {
           const meta = await probeVideo(cfg.video_path);

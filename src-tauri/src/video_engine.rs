@@ -144,10 +144,7 @@ pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
         .unwrap_or("0/1");
     let fps = parse_frame_rate(fps_str);
 
-    let duration = json["format"]["duration"]
-        .as_str()
-        .and_then(|d| d.parse::<f64>().ok())
-        .unwrap_or(0.0);
+    let duration = resolve_video_duration(video_stream, &json["format"]);
 
     let file_size = json["format"]["size"]
         .as_str()
@@ -267,6 +264,27 @@ pub async fn probe_duration(path: &Path) -> Result<f64, NarratorError> {
         .as_str()
         .and_then(|d| d.parse::<f64>().ok())
         .ok_or_else(|| NarratorError::VideoProbeError("No duration found".into()))
+}
+
+/// Resolve the authoritative video duration from an ffprobe JSON blob.
+///
+/// Prefers the video stream's own `duration` over the container
+/// `format.duration`. The format value is the max across all streams, so a
+/// trailing audio track that outlives the picture (e.g. a previously-narrated
+/// Narrator export whose audio holds the last frame) would otherwise overstate
+/// visual length and mislead narration generation into emitting segments past
+/// the end of the video. Falls back to format duration when the stream omits
+/// its own (some containers like WebM do).
+fn resolve_video_duration(video_stream: &serde_json::Value, format: &serde_json::Value) -> f64 {
+    let stream_duration = video_stream["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d > 0.0);
+    let format_duration = format["duration"]
+        .as_str()
+        .and_then(|d| d.parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d > 0.0);
+    stream_duration.or(format_duration).unwrap_or(0.0)
 }
 
 fn parse_frame_rate(rate: &str) -> f64 {
@@ -659,5 +677,48 @@ mod tests {
     fn test_frame_to_base64_nonexistent() {
         let result = frame_to_base64(Path::new("/nonexistent/frame.jpg"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_duration_prefers_video_stream_over_longer_audio() {
+        // Regression: a previously-narrated Narrator export has audio >> video.
+        // Without this fix probe_video returned 231.888 (audio) instead of
+        // 104.833 (video), so the AI generated 3:51 of narration for a 1:44
+        // video.
+        let stream = serde_json::json!({ "duration": "104.833300" });
+        let format = serde_json::json!({ "duration": "231.888000" });
+        let d = resolve_video_duration(&stream, &format);
+        assert!((d - 104.8333).abs() < 1e-4, "got {d}");
+    }
+
+    #[test]
+    fn resolve_duration_falls_back_to_format_when_stream_missing() {
+        // WebM and some MKV files don't expose per-stream duration — use
+        // format.duration instead of failing.
+        let stream = serde_json::json!({});
+        let format = serde_json::json!({ "duration": "60.0" });
+        assert!((resolve_video_duration(&stream, &format) - 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resolve_duration_ignores_na_and_zero() {
+        // ffprobe occasionally emits "N/A" or "0.000000" for unreadable streams.
+        // Both should fall through to the next source rather than poisoning
+        // the result.
+        let stream = serde_json::json!({ "duration": "N/A" });
+        let format = serde_json::json!({ "duration": "0.000000" });
+        assert_eq!(resolve_video_duration(&stream, &format), 0.0);
+
+        let stream2 = serde_json::json!({ "duration": "0" });
+        let format2 = serde_json::json!({ "duration": "42.5" });
+        assert!((resolve_video_duration(&stream2, &format2) - 42.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resolve_duration_uses_stream_even_when_format_shorter() {
+        // Defensive — stream duration is authoritative for visual content.
+        let stream = serde_json::json!({ "duration": "100.0" });
+        let format = serde_json::json!({ "duration": "90.0" });
+        assert!((resolve_video_duration(&stream, &format) - 100.0).abs() < 1e-9);
     }
 }

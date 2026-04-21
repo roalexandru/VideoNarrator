@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.8.2 — Container-duration fix for audio-longer-than-video sources
+
+### Fixed
+- **Narration overflowing visual content.** `probe_video` now reads the video stream's own `duration` rather than the container's `format.duration`. For source files whose audio track outlives the picture (e.g. a previously-narrated Narrator export where the last frame was held while narration continued), the old path reported the audio length as the video length — the AI then generated narration spanning the whole inflated timeline, and Export froze the final frame for minutes while the extra audio played. Script generation is now bounded to the actual visual duration.
+- **Stale cached durations on project load.** Projects saved before this fix stored the inflated duration in `video_metadata`. On load, the frontend now re-probes in the background and repairs the cache when the fresh value disagrees by > 0.5 s. When a saved script is longer than the corrected video, a toast prompts regeneration.
+- **Review banner now flags past-end segments.** `predictExport` returns a new `segmentsPastEnd` count, and the Review banner shows a distinct "scheduled past the end of the video — regenerate narration" message instead of the milder "will speed up slightly" when segments start after the video's visual end.
+
 ## v0.3.0 - Settings Revamp & New Providers
 
 ### New Providers

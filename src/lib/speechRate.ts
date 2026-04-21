@@ -101,14 +101,30 @@ export function predictExport(
   lang: string,
   videoDuration: number,
   speedMultiplier: number = 1.0,
-): { compressed: number; overCap: number; padSeconds: number } {
+): {
+  compressed: number;
+  overCap: number;
+  padSeconds: number;
+  /**
+   * Segments whose scheduled start time is at or past the end of the video.
+   * These can't be covered by frames at all — at export, the last video frame
+   * is held while their narration plays. Typically signals a script produced
+   * against a wrong (inflated) video-duration, not a merely tight segment.
+   */
+  segmentsPastEnd: number;
+} {
   let compressed = 0;
   let overCap = 0;
+  let segmentsPastEnd = 0;
   let audioPos = 0;
 
   for (const seg of segments) {
     const window = Math.max(0.5, seg.end_seconds - seg.start_seconds);
     const predicted = estimateTtsSeconds(seg.text, lang, speedMultiplier);
+
+    if (videoDuration > 0 && seg.start_seconds >= videoDuration - 0.5) {
+      segmentsPastEnd += 1;
+    }
 
     // Silence gap before the segment, matching the Rust loop's `if gap > 0.05`
     // guard. A negative gap (previous segment overran) is dropped.
@@ -137,7 +153,7 @@ export function predictExport(
   // the audio longer than the video — only the `audioPos > videoDuration`
   // case does.
   const padSeconds = Math.max(0, audioPos - videoDuration);
-  return { compressed, overCap, padSeconds };
+  return { compressed, overCap, padSeconds, segmentsPastEnd };
 }
 
 // ── private helpers ────────────────────────────────────────────────────────
