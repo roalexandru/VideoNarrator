@@ -350,6 +350,13 @@ pub struct GenerationParams {
     /// already succeeded are not re-billed on retry.
     #[serde(default)]
     pub resume_segments: Vec<Segment>,
+    /// When true, run a self-critique pass after the main generation: the
+    /// model re-reads the draft against sampled frames and suggests fixes
+    /// for segments whose narration contradicts the visible content.
+    /// Disabled by default — it adds one extra multimodal API call plus up
+    /// to five text-only refine calls per iteration.
+    #[serde(default)]
+    pub strict_mode: bool,
 }
 
 // ── Export ──

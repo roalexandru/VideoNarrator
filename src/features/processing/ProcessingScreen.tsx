@@ -196,6 +196,7 @@ export function ProcessingScreen() {
       frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: effectiveMaxFrames, skip_dedup: true },
       ai_config: { provider: config.aiProvider, model: config.model, temperature: effectiveTemperature },
       custom_prompt: config.customPrompt,
+      strict_mode: config.strictMode,
       ...(resumeSegments.length > 0 ? { resume_segments: resumeSegments } : {}),
     };
     try {

@@ -1677,6 +1677,258 @@ pub async fn translate_script(
     Ok(translated)
 }
 
+/// One mismatch reported by the critique pass: `segment_index` is the index
+/// of the offending segment in the script, `suggestion` is the model's
+/// concrete rewrite guidance (fed verbatim into `refine_segment` as the
+/// instruction).
+#[derive(Debug, Clone)]
+struct Mismatch {
+    segment_index: usize,
+    suggestion: String,
+}
+
+/// Run up to 2 critique+refine iterations on `script`, using a handful of
+/// representative frames as ground truth. Each iteration asks the model
+/// whether each segment's narration matches what's visible at or near its
+/// timestamp; any flagged segment is rewritten via `refine_segment` using
+/// the critique's own suggestion as the instruction.
+///
+/// Returns the (possibly updated) script. Never fails the whole pipeline —
+/// any critique-side error downgrades to "skip critique, return as-is".
+///
+/// Cost envelope: one multimodal critique call per iteration + one
+/// text-only `refine_segment` call per mismatch per iteration. Default-off,
+/// gated by `GenerationParams::strict_mode`.
+pub async fn self_critique_and_refine(
+    provider: &dyn AiProvider,
+    script: NarrationScript,
+    frames: &[Frame],
+    on_segment: Option<SegmentCallback>,
+    on_progress: Option<ProgressCallback>,
+) -> NarrationScript {
+    const MAX_ITERATIONS: usize = 2;
+    const MAX_REFINES_PER_ITER: usize = 5;
+
+    let mut script = script;
+    let sample = pick_critique_frames(frames);
+    if sample.is_empty() {
+        tracing::info!("self-critique skipped: no frames available");
+        return script;
+    }
+
+    for iter in 0..MAX_ITERATIONS {
+        if let Some(cb) = on_progress.as_ref() {
+            cb(
+                0.97,
+                Some(format!(
+                    "Self-critique pass {} of {}",
+                    iter + 1,
+                    MAX_ITERATIONS
+                )),
+            );
+        }
+        let mismatches = match run_critique(provider, &script, &sample).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("self-critique call failed, skipping: {e}");
+                return script;
+            }
+        };
+        if mismatches.is_empty() {
+            tracing::info!(
+                "self-critique iteration {}: no mismatches found, stopping",
+                iter + 1
+            );
+            break;
+        }
+        tracing::info!(
+            "self-critique iteration {}: {} mismatches flagged",
+            iter + 1,
+            mismatches.len()
+        );
+
+        // Bound per-iteration refine calls so a runaway critique with dozens
+        // of suggested edits can't run up a surprise bill.
+        for mismatch in mismatches.into_iter().take(MAX_REFINES_PER_ITER) {
+            let Some(segment) = script.segments.get(mismatch.segment_index) else {
+                continue;
+            };
+            let context = surrounding_context(&script.segments, mismatch.segment_index, 1);
+            let instruction = format!(
+                "The narration does not match the on-screen content. Fix: {}",
+                mismatch.suggestion
+            );
+            match refine_segment(provider, &segment.text, &instruction, &context).await {
+                Ok(new_text) => {
+                    if let Some(seg) = script.segments.get_mut(mismatch.segment_index) {
+                        seg.text = new_text;
+                        if let Some(cb) = on_segment.as_ref() {
+                            cb(seg);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "refine_segment failed for index {}: {e}",
+                        mismatch.segment_index
+                    );
+                }
+            }
+        }
+    }
+
+    script
+}
+
+/// Pick up to 3 frames at representative positions (start, middle, end
+/// quarters) so the critique sees a coherent sample of the timeline
+/// without sending the full frame set back to the API.
+fn pick_critique_frames(frames: &[Frame]) -> Vec<Frame> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    if frames.len() <= 3 {
+        return frames.to_vec();
+    }
+    let n = frames.len();
+    let indices = [n / 10, n / 2, (n * 8) / 10];
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(3);
+    for idx in indices {
+        let idx = idx.min(n - 1);
+        if seen.insert(idx) {
+            out.push(frames[idx].clone());
+        }
+    }
+    out
+}
+
+/// Build a context string containing the `window` segments before and after
+/// `idx`, used as the context for `refine_segment`.
+fn surrounding_context(segments: &[Segment], idx: usize, window: usize) -> String {
+    let start = idx.saturating_sub(window);
+    let end = (idx + window + 1).min(segments.len());
+    segments[start..end]
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, seg)| {
+            let abs_idx = start + offset;
+            if abs_idx == idx {
+                None
+            } else {
+                Some(format!(
+                    "[{:.1}s] {}",
+                    seg.start_seconds,
+                    truncate_chars(&seg.text, 300)
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn run_critique(
+    provider: &dyn AiProvider,
+    script: &NarrationScript,
+    sample_frames: &[Frame],
+) -> Result<Vec<Mismatch>, NarratorError> {
+    let system_prompt = "You are reviewing a narration script against sampled video frames. \
+        For each narration segment whose text materially contradicts or misses what is \
+        visible in the closest frame, list one mismatch. Ignore minor wording issues — \
+        only flag real disagreements with the visible content. If the script looks correct, \
+        return an empty array. Respond with ONLY a JSON object of the form \
+        {\"mismatches\": [{\"segment_index\": <int>, \"reason\": \"<why>\", \"suggestion\": \"<concrete rewrite guidance>\"}]} \
+        — no markdown, no commentary.";
+
+    // Compact the script into a single plain-text listing so the model can
+    // reason about timestamps without also having to parse our full JSON
+    // schema. Clip per-segment text to keep the prompt bounded on long
+    // scripts.
+    let script_text: String = script
+        .segments
+        .iter()
+        .map(|s| {
+            format!(
+                "[{}] {:.1}s–{:.1}s: {}",
+                s.index,
+                s.start_seconds,
+                s.end_seconds,
+                truncate_chars(&s.text, 400)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut content: Vec<serde_json::Value> = Vec::new();
+    content.push(json!({
+        "type": "text",
+        "text": format!("Narration script (index, window, text):\n{script_text}\n\nSampled frames follow. Match each frame against the segment whose window contains its timestamp."),
+    }));
+    for frame in sample_frames {
+        if !frame.path.exists() {
+            continue;
+        }
+        let b64 = video_engine::frame_to_base64(&frame.path)?;
+        content.push(json!({
+            "type": "text",
+            "text": format!("[Sample frame at {:.1}s]", frame.timestamp_seconds),
+        }));
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": b64,
+            }
+        }));
+    }
+
+    let user_message = serde_json::Value::Array(content);
+    let response = provider.generate(system_prompt, user_message).await?;
+    parse_critique_response(&response)
+}
+
+/// Parse a critique JSON response tolerant of code fences / stray text.
+fn parse_critique_response(raw: &str) -> Result<Vec<Mismatch>, NarratorError> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    // Extract the first {...} block so leading/trailing prose is tolerated.
+    let start = trimmed.find('{').unwrap_or(0);
+    let end = trimmed.rfind('}').map(|i| i + 1).unwrap_or(trimmed.len());
+    let slice = &trimmed[start..end];
+    let value: serde_json::Value = serde_json::from_str(slice)
+        .map_err(|e| NarratorError::ApiError(format!("critique JSON parse failed: {e}")))?;
+    let arr = value
+        .get("mismatches")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let Some(idx) = entry.get("segment_index").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let suggestion = entry
+            .get("suggestion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if suggestion.is_empty() {
+            continue;
+        }
+        out.push(Mismatch {
+            segment_index: idx as usize,
+            suggestion,
+        });
+    }
+    Ok(out)
+}
+
 /// Refine a single narration segment using AI.
 /// Takes the segment text, a user instruction, and surrounding context,
 /// returns the refined text only (not a full script).
@@ -1903,6 +2155,83 @@ pub fn get_available_models(provider: &AiProviderKind) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn critique_parse_accepts_bare_json() {
+        let raw = r#"{"mismatches":[{"segment_index":0,"reason":"wrong","suggestion":"fix it"}]}"#;
+        let out = parse_critique_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].segment_index, 0);
+        assert_eq!(out[0].suggestion, "fix it");
+    }
+
+    #[test]
+    fn critique_parse_strips_code_fences() {
+        let raw =
+            "```json\n{\"mismatches\":[{\"segment_index\":2,\"suggestion\":\"rewrite\"}]}\n```";
+        let out = parse_critique_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].segment_index, 2);
+    }
+
+    #[test]
+    fn critique_parse_tolerates_prose_prefix() {
+        let raw = "Sure! Here is the JSON:\n{\"mismatches\":[{\"segment_index\":1,\"suggestion\":\"x\"}]}\nLet me know if you need more.";
+        let out = parse_critique_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn critique_parse_empty_mismatches_is_ok() {
+        let raw = r#"{"mismatches":[]}"#;
+        let out = parse_critique_response(raw).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn critique_parse_drops_entries_with_empty_suggestion() {
+        let raw = r#"{"mismatches":[{"segment_index":0,"suggestion":""},{"segment_index":1,"suggestion":"real fix"}]}"#;
+        let out = parse_critique_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].segment_index, 1);
+    }
+
+    #[test]
+    fn critique_parse_invalid_json_errors() {
+        let raw = "not even close to json";
+        assert!(parse_critique_response(raw).is_err());
+    }
+
+    #[test]
+    fn pick_critique_frames_caps_at_three() {
+        let mk = |i: usize, t: f64| Frame {
+            index: i,
+            timestamp_seconds: t,
+            path: std::path::PathBuf::from("/dev/null"),
+            width: 0,
+            height: 0,
+        };
+        let frames: Vec<Frame> = (0..20).map(|i| mk(i, i as f64)).collect();
+        let picked = pick_critique_frames(&frames);
+        assert!(picked.len() <= 3);
+        // Covers start-ish, middle, end-ish.
+        assert!(picked.first().unwrap().index < 5);
+        assert!(picked.last().unwrap().index >= 10);
+    }
+
+    #[test]
+    fn pick_critique_frames_returns_all_when_small() {
+        let mk = |i: usize| Frame {
+            index: i,
+            timestamp_seconds: i as f64,
+            path: std::path::PathBuf::from("/dev/null"),
+            width: 0,
+            height: 0,
+        };
+        let frames: Vec<Frame> = (0..2).map(mk).collect();
+        let picked = pick_critique_frames(&frames);
+        assert_eq!(picked.len(), 2);
+    }
 
     #[test]
     fn test_build_system_prompt() {

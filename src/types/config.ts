@@ -75,4 +75,8 @@ export interface GenerationParams {
    *  after the last segment's end_seconds rather than re-consuming API calls
    *  for chunks that already succeeded. */
   resume_segments?: import("./script").Segment[];
+  /** When true, run an extra critique+refine pass after generation so
+   *  segments whose narration doesn't match the frames get rewritten. Costs
+   *  one multimodal call plus up to five refine calls per iteration. */
+  strict_mode?: boolean;
 }

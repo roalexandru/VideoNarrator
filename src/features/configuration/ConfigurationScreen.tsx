@@ -311,6 +311,28 @@ export function ConfigurationScreen() {
         )}
       </section>
 
+      {/* Strict mode — extra AI critique pass */}
+      <section style={{ marginBottom: 28 }}>
+        <label
+          style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer" }}
+        >
+          <input
+            type="checkbox"
+            checked={config.strictMode}
+            onChange={(e) => config.setStrictMode(e.target.checked)}
+            style={{ marginTop: 3, accentColor: C.accent }}
+          />
+          <div>
+            <div style={{ ...label, marginBottom: 2 }}>Strict mode</div>
+            <p style={{ fontSize: 11, color: C.muted, lineHeight: 1.5, margin: 0 }}>
+              Re-check the draft against a handful of sampled frames and rewrite any segments whose
+              narration doesn't match what's on screen. Adds about 30 seconds and one extra API call
+              per iteration.
+            </p>
+          </div>
+        </label>
+      </section>
+
       {/* Voice Summary Card */}
       <section style={{ marginBottom: 28 }}>
         <div style={label}>Voice</div>

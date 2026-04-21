@@ -746,7 +746,44 @@ pub async fn generate_narration(
         }
     }
 
-    let script = script?;
+    let mut script = script?;
+
+    // Optional self-critique pass — gated behind strict_mode. The critique
+    // uses the same frames + provider as the main generation; a handful of
+    // sampled frames go back to the model along with the generated script,
+    // and any mismatches are rewritten via refine_segment. The loop emits
+    // live segment updates through the same on_segment channel the UI is
+    // already listening on so the Review preview stays in sync.
+    if params.strict_mode && !state.cancel_flag.load(Ordering::SeqCst) {
+        let strict_stream_channel = channel.clone();
+        let strict_on_segment: ai_client::SegmentCallback = Arc::new(move |seg: &Segment| {
+            strict_stream_channel
+                .send(ProgressEvent::SegmentStreamed {
+                    segment: seg.clone(),
+                })
+                .ok();
+        });
+        let strict_progress_ch = channel.clone();
+        let strict_on_progress: ai_client::ProgressCallback =
+            Arc::new(move |_fraction: f64, message: Option<String>| {
+                // Critique runs between narration (99%) and done (100%).
+                // Emit the sub-phase message at a pinned 99% so the bar
+                // doesn't walk backwards.
+                if let Some(msg) = message {
+                    strict_progress_ch
+                        .send(ProgressEvent::progress_msg(99.0, msg))
+                        .ok();
+                }
+            });
+        script = ai_client::self_critique_and_refine(
+            provider.as_ref(),
+            script,
+            &frames,
+            Some(strict_on_segment),
+            Some(strict_on_progress),
+        )
+        .await;
+    }
 
     // Finalize: pin the bar to 100% with a one-word label so the UI shows
     // a clean endcap before the terminal events. Must fire BEFORE
