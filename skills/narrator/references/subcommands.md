@@ -88,7 +88,7 @@ Muxes an audio track onto a video.
 - `--video VIDEO` — source.
 - `--audio AUDIO` — narration audio (MP3, WAV).
 - `--output OUT` — destination.
-- `--replace` *(flag, default off)* — when set, swaps the video's audio track wholesale. When off, mixes narration over the source with auto-ducking at −8 dB.
+- `--replace` *(flag, default off)* — when set, swaps the video's audio track wholesale. When off, mixes narration over the source with auto-ducking at −8 dB (CLI default; the desktop app exposes a `-20..0 dB` slider, but the CLI pins it at −8 for now).
 
 **Output:**
 
@@ -190,12 +190,16 @@ Generates narration audio using the host OS's builtin TTS engine.
     "output_path": "narration.mp3",
     "segments_total": 10,
     "segments_compressed": 2,
-    "segments_over_cap": 0
+    "segments_over_cap": 0,
+    "actual_timings": [
+      {"segment_index": 0, "start_seconds": 0.0, "end_seconds": 2.84}
+    ]
   }
 }
 ```
 
 - `segments_compressed` — how many segments had to be sped up via atempo to fit their scripted window.
 - `segments_over_cap` — segments that needed more compression than the cap (~1.3×) allowed. These will overrun their window by the residual amount.
+- `actual_timings` — per-segment landing record of where each rendered segment actually starts/ends in the concatenated MP3. Accounts for overruns and compression. The GUI's burn-subtitles pass uses this so SRT timings track the real audio. Treat `.data` as an open schema: parse the fields you need via `jq` rather than assuming the set is fixed.
 
 For richer voices (ElevenLabs, Azure), use the desktop GUI — the CLI only exposes the free builtin engine today.

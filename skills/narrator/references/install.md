@@ -4,9 +4,17 @@ The skill needs `narrator-cli` somewhere on `PATH`. Three options:
 
 ## 1. From the desktop app bundle (recommended if you already have Narrator installed)
 
-The binary ships alongside the GUI. Symlink it:
+The binary ships alongside the GUI. Symlink it — prefer a user-writable location (no sudo) over `/usr/local/bin` when you can.
 
-**macOS:**
+**macOS (no sudo, recommended):**
+```bash
+mkdir -p ~/.local/bin
+ln -sf /Applications/Narrator.app/Contents/MacOS/narrator-cli ~/.local/bin/narrator-cli
+# Make sure ~/.local/bin is on PATH (zsh/bash):
+#   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+**macOS (system-wide, asks for sudo):**
 ```bash
 sudo ln -sf /Applications/Narrator.app/Contents/MacOS/narrator-cli /usr/local/bin/narrator-cli
 ```

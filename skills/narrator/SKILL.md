@@ -85,11 +85,24 @@ fi
 duration=$(echo "$out" | jq -r '.data.duration_seconds')
 ```
 
+### Recovery when something is misconfigured
+
+If a `narrator-cli` invocation fails with a "not found" / "command not found" / "No such file or directory" error at the shell level (before the envelope is emitted), the binary is not installed or not on `PATH`. In that case:
+
+1. Run `skills/narrator/scripts/doctor.sh` and surface its output to the user verbatim — it identifies exactly which of `narrator-cli`, `ffmpeg`, `ffprobe` is missing and how to install each.
+2. Do not guess alternative binary names or paths; the doctor script is the source of truth.
+
+If the envelope returns `ok: false` with a specific `error.kind`, show the `error.message` to the user as-is (the message is human-readable and doesn't need interpretation). Do not retry with different arguments unless the user asks — retry without new input is rarely the right recovery.
+
+Treat `.data` as an open schema: parse the fields you need via `jq`/`json.loads`, don't assume the field set is frozen. Additional fields may appear in new releases; consumers that structurally match a fixed shape will break unnecessarily.
+
 ## Installation
 
 The repo ships this skill at `skills/narrator/`. To install for Claude Code:
 
 ```bash
+cd /path/to/VideoNarator            # must be the repo root
+mkdir -p ~/.claude/skills
 ln -s "$(pwd)/skills/narrator" ~/.claude/skills/narrator
 ```
 

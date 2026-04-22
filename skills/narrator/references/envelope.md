@@ -79,6 +79,33 @@ if (!env.ok) throw new Error(`${env.error.kind}: ${env.error.message}`);
 console.log(env.data);
 ```
 
+### Python (parsing the envelope + streaming progress)
+
+```python
+import json, subprocess
+
+# One-shot: capture the final envelope.
+r = subprocess.run(
+    ["narrator-cli", "probe", "video", "--input", "video.mp4"],
+    capture_output=True, text=True, check=False,
+)
+env = json.loads(r.stdout.strip())
+if not env["ok"]:
+    raise RuntimeError(f"{env['error']['kind']}: {env['error']['message']}")
+print(env["data"])
+
+# Long-running: stream NDJSON progress on stderr, keep stdout for the envelope.
+with subprocess.Popen(
+    ["narrator-cli", "--progress", "json", "render", "burn-subs",
+     "--input", "in.mp4", "--srt", "in.srt", "--output", "out.mp4"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+) as p:
+    for line in p.stderr:                       # NDJSON progress events
+        evt = json.loads(line)
+        print(f"{evt['percent']:.0f}%  {evt.get('message', '')}")
+    envelope = json.loads(p.stdout.read().strip())
+```
+
 ## Input handling
 
 Subcommands that take a JSON body accept either:
