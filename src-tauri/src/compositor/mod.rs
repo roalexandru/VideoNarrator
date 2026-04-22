@@ -41,6 +41,20 @@ const MAX_OUTPUT_FPS: f64 = 60.0;
 const SUPPORTED_EFFECTS: &[&str] = &["spotlight", "blur", "text", "fade", "zoom-pan"];
 
 /// Compose all active effects for one frame onto `canvas`.
+///
+/// Runs a two-pass render to keep effect order independent of the array
+/// order `effects` arrives in:
+///
+///   1. **Transform pass.** Any active `zoom-pan` effects apply first.
+///      Zoom-pan clears the canvas and repaints from `source`, so running
+///      it after an overlay would erase the overlay. Previously the render
+///      order was whatever order the user added the effects in — a
+///      spotlight added before a zoom-pan at the same time window would
+///      silently disappear at export.
+///   2. **Overlay pass.** Everything else (spotlight, blur, text, fade)
+///      composites onto the transformed canvas in declaration order. Order
+///      among overlays is still user-visible (e.g. fade-over-text vs
+///      text-over-fade).
 fn compose_frame(
     canvas: &mut Pixmap,
     source: &Pixmap,
@@ -48,33 +62,38 @@ fn compose_frame(
     effects: &[OverlayEffect],
     text_cache: &TextRenderCache,
 ) {
+    // ── Pass 1: transforms ────────────────────────────────────────────────
+    let mut zoom_pan_applied = false;
     for effect in effects {
-        let start = effect.start_time as f32;
-        let end = effect.end_time as f32;
-        let t_in = effect.transition_in.unwrap_or(0.0) as f32;
-        let t_out = effect.transition_out.unwrap_or(0.0) as f32;
-        let reverse = effect.reverse.unwrap_or(false);
-
-        // window_progress takes transitions in seconds (matches the frontend
-        // TimelineEffect schema 1:1 — user enters seconds in the UI).
-        let progress = match window_progress(time, start, end, t_in, t_out, reverse) {
-            Some(p) => p,
-            None => continue,
+        if effect.effect_type != "zoom-pan" {
+            continue;
+        }
+        let Some(progress) = active_progress(effect, time) else {
+            continue;
         };
+        if let Some(zp) = &effect.zoom_pan {
+            effects::zoom_pan::apply_zoom_pan(canvas, source, zp, progress);
+            zoom_pan_applied = true;
+        }
+    }
 
-        // For most effects, `progress` *is* both the value used in the
-        // animated parameters AND the alpha for transitions (since the
-        // ramp shape is the same).
+    // If multiple zoom-pans were active, last-one-wins (matches previous
+    // behaviour). `zoom_pan_applied` is only a marker in case a future
+    // caller wants to know whether the canvas still contains the raw
+    // source copy the caller set up, vs a transformed image.
+    let _ = zoom_pan_applied;
+
+    // ── Pass 2: overlays ──────────────────────────────────────────────────
+    for effect in effects {
+        if effect.effect_type == "zoom-pan" {
+            continue;
+        }
+        let Some(progress) = active_progress(effect, time) else {
+            continue;
+        };
         let effect_alpha = progress;
 
         match effect.effect_type.as_str() {
-            "zoom-pan" => {
-                if let Some(zp) = &effect.zoom_pan {
-                    // Zoom-pan is a transform of the source frame, not an
-                    // overlay — overwrite the canvas wholesale.
-                    effects::zoom_pan::apply_zoom_pan(canvas, source, zp, progress);
-                }
-            }
             "spotlight" => {
                 if let Some(sp) = &effect.spotlight {
                     apply_spotlight_safe(canvas, sp, effect_alpha);
@@ -112,6 +131,21 @@ fn compose_frame(
             }
         }
     }
+}
+
+/// Resolve an effect's `(start_time, end_time, transitions, reverse)` into a
+/// `Some(progress in 0..1)` iff the effect is active at `time`, otherwise
+/// `None`. Extracted so both the transform pass and the overlay pass share
+/// the same activation math — keeps them from drifting.
+fn active_progress(effect: &OverlayEffect, time: f32) -> Option<f32> {
+    let start = effect.start_time as f32;
+    let end = effect.end_time as f32;
+    let t_in = effect.transition_in.unwrap_or(0.0) as f32;
+    let t_out = effect.transition_out.unwrap_or(0.0) as f32;
+    let reverse = effect.reverse.unwrap_or(false);
+    // window_progress takes transitions in seconds (matches the frontend
+    // TimelineEffect schema 1:1 — user enters seconds in the UI).
+    window_progress(time, start, end, t_in, t_out, reverse)
 }
 
 fn apply_spotlight_safe(canvas: &mut Pixmap, sp: &SpotlightData, alpha: f32) {
@@ -379,4 +413,161 @@ pub async fn run_pipeline(
 
     on_progress(100.0, None);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{EasingPreset, ZoomPanEffect, ZoomRegion};
+
+    fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Pixmap {
+        let mut p = Pixmap::new(w, h).unwrap();
+        let d = p.data_mut();
+        for chunk in d.chunks_exact_mut(4) {
+            chunk.copy_from_slice(&rgba);
+        }
+        p
+    }
+
+    fn spotlight_effect(start: f64, end: f64, x: f64, y: f64, radius: f64) -> OverlayEffect {
+        OverlayEffect {
+            effect_type: "spotlight".into(),
+            start_time: start,
+            end_time: end,
+            transition_in: None,
+            transition_out: None,
+            reverse: None,
+            spotlight: Some(SpotlightData {
+                x,
+                y,
+                radius,
+                dim_opacity: 0.8,
+            }),
+            blur: None,
+            text: None,
+            fade: None,
+            zoom_pan: None,
+        }
+    }
+
+    fn zoom_pan_effect(start: f64, end: f64) -> OverlayEffect {
+        OverlayEffect {
+            effect_type: "zoom-pan".into(),
+            start_time: start,
+            end_time: end,
+            transition_in: None,
+            transition_out: None,
+            reverse: None,
+            spotlight: None,
+            blur: None,
+            text: None,
+            fade: None,
+            zoom_pan: Some(ZoomPanEffect {
+                start_region: ZoomRegion {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 0.5,
+                },
+                end_region: ZoomRegion {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.5,
+                    height: 0.5,
+                },
+                easing: EasingPreset::Linear,
+            }),
+        }
+    }
+
+    /// Regression guard for the ordering bug: when spotlight comes BEFORE
+    /// zoom-pan in the effects array and their time windows overlap, the
+    /// old single-pass loop applied spotlight, then let zoom-pan clear the
+    /// canvas to black — spotlight invisible. After the two-pass split,
+    /// zoom-pan runs first regardless of array position, so both orderings
+    /// produce identical frames.
+    #[test]
+    fn compose_frame_order_independent_for_zoom_then_spotlight() {
+        let text_cache = TextRenderCache::default();
+        let source = solid(40, 40, [200, 50, 50, 255]);
+
+        let sp = spotlight_effect(0.0, 2.0, 0.5, 0.5, 0.25);
+        let zp = zoom_pan_effect(0.0, 2.0);
+
+        let mut canvas_a = source.clone();
+        compose_frame(
+            &mut canvas_a,
+            &source,
+            1.0,
+            &[sp.clone(), zp.clone()],
+            &text_cache,
+        );
+
+        let mut canvas_b = source.clone();
+        compose_frame(&mut canvas_b, &source, 1.0, &[zp, sp], &text_cache);
+
+        assert_eq!(
+            canvas_a.data(),
+            canvas_b.data(),
+            "spotlight-before-zoompan and zoompan-before-spotlight must produce identical frames"
+        );
+    }
+
+    /// Guard against a silent regression to the old behaviour: with the bug,
+    /// `[spotlight, zoom-pan]` produced a canvas that was just the zoomed
+    /// source (spotlight wiped). After the fix both orderings have the dim
+    /// layer, so neither canvas matches a naked zoom-pan render.
+    #[test]
+    fn compose_frame_spotlight_survives_when_ordered_before_zoom_pan() {
+        let text_cache = TextRenderCache::default();
+        let source = solid(40, 40, [200, 50, 50, 255]);
+
+        let sp = spotlight_effect(0.0, 2.0, 0.5, 0.5, 0.25);
+        let zp = zoom_pan_effect(0.0, 2.0);
+
+        let mut with_spotlight_first = source.clone();
+        compose_frame(
+            &mut with_spotlight_first,
+            &source,
+            1.0,
+            &[sp, zp.clone()],
+            &text_cache,
+        );
+
+        let mut zoom_only = source.clone();
+        compose_frame(&mut zoom_only, &source, 1.0, &[zp], &text_cache);
+
+        assert_ne!(
+            with_spotlight_first.data(),
+            zoom_only.data(),
+            "spotlight-before-zoompan must not be wiped to a plain zoom-pan render"
+        );
+    }
+
+    /// When an effect's time window doesn't include `time`, it contributes
+    /// nothing to the frame. Regression guard so a future refactor doesn't
+    /// accidentally always-apply zoom-pan.
+    #[test]
+    fn compose_frame_ignores_inactive_effects() {
+        let text_cache = TextRenderCache::default();
+        let source = solid(40, 40, [100, 100, 100, 255]);
+
+        let zp_future = zoom_pan_effect(5.0, 7.0);
+        let sp_past = spotlight_effect(0.0, 1.0, 0.5, 0.5, 0.3);
+
+        let mut canvas = source.clone();
+        compose_frame(
+            &mut canvas,
+            &source,
+            3.0,
+            &[zp_future, sp_past],
+            &text_cache,
+        );
+
+        assert_eq!(
+            canvas.data(),
+            source.data(),
+            "no effect active at time=3s → canvas must equal the source"
+        );
+    }
 }

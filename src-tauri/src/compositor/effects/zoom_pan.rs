@@ -56,14 +56,28 @@ pub fn apply_zoom_pan(canvas: &mut Pixmap, source: &Pixmap, effect: &ZoomPanEffe
         None => return,
     };
 
-    // Scale sub → canvas.
+    // Scale sub → canvas with a UNIFORM factor. The editor now locks regions
+    // to the source aspect (see `lockRegionAspect` in easing.ts), so a
+    // correctly-authored plan has scale_x == scale_y and the crop fills the
+    // canvas without distortion. If an old project sneaks through with a
+    // non-square region, fit-without-stretch is still better than silently
+    // stretching — `min()` picks the axis that fits and we center the
+    // painted rect; the canvas was cleared to black below, so the leftover
+    // area becomes clean letterbox bars instead of smeared edge pixels.
     let scale_x = cw / sub.width() as f32;
     let scale_y = ch / sub.height() as f32;
-    let transform = Transform::from_scale(scale_x, scale_y);
+    let scale = scale_x.min(scale_y);
+    let painted_w = sub.width() as f32 * scale;
+    let painted_h = sub.height() as f32 * scale;
+    let offset_x = ((cw - painted_w) / 2.0).max(0.0);
+    let offset_y = ((ch - painted_h) / 2.0).max(0.0);
 
     canvas.fill(tiny_skia::Color::BLACK);
-    // draw_pixmap uses integer translation for the destination origin (0,0)
-    // and applies `transform` to the *source* pixmap before sampling.
+    // Pattern transform: translate to the centered destination, then scale.
+    // `post_translate` would apply translate in source space; we want it in
+    // destination space, so compose via `Transform::from_scale` first then
+    // `post_translate` for the centering.
+    let transform = Transform::from_scale(scale, scale).post_translate(offset_x, offset_y);
     let pattern = tiny_skia::Pattern::new(
         sub.as_ref(),
         tiny_skia::SpreadMode::Pad,
@@ -76,7 +90,12 @@ pub fn apply_zoom_pan(canvas: &mut Pixmap, source: &Pixmap, effect: &ZoomPanEffe
         anti_alias: false,
         ..tiny_skia::Paint::default()
     };
-    let dst_rect = Rect::from_xywh(0.0, 0.0, cw, ch).expect("dst rect");
+    // Fill only the centered painted area — the rest stays the black we
+    // just filled. With a square region this rect equals the full canvas.
+    let dst_rect = match Rect::from_xywh(offset_x, offset_y, painted_w, painted_h) {
+        Some(r) => r,
+        None => return,
+    };
     canvas.fill_rect(dst_rect, &fill_paint, Transform::identity(), None);
 }
 
@@ -172,5 +191,114 @@ mod tests {
         apply_zoom_pan(&mut canvas, &src, &effect, 0.5);
         apply_zoom_pan(&mut canvas, &src, &effect, 1.0);
         apply_zoom_pan(&mut canvas, &src, &effect, 2.0);
+    }
+
+    /// Gradient source so we can detect horizontal vs vertical stretching.
+    /// Column value = x * 4 (so every 4 x-steps shift 1 unit), row value
+    /// left untouched at full alpha. If a non-uniform scale leaked back in,
+    /// the pattern would be visibly non-square at matching pixel distances.
+    fn h_gradient(w: u32, h: u32) -> Pixmap {
+        let mut p = Pixmap::new(w, h).unwrap();
+        let d = p.data_mut();
+        for y in 0..h {
+            for x in 0..w {
+                let off = ((y * w + x) * 4) as usize;
+                let v = (x * 255 / w.max(1)) as u8;
+                d[off] = v;
+                d[off + 1] = 0;
+                d[off + 2] = 0;
+                d[off + 3] = 255;
+            }
+        }
+        p
+    }
+
+    /// When the crop region aspect doesn't match the canvas aspect, the old
+    /// code non-uniformly stretched the crop to fill the canvas — visibly
+    /// distorting content. The new code scales uniformly (fit) and leaves
+    /// black bars on the mismatched axis. Regression guard: render a non-
+    /// square crop onto a 16:9 canvas and assert there's a black strip on
+    /// at least one pair of edges, rather than gradient reaching the edge.
+    #[test]
+    fn non_square_region_letterboxes_instead_of_stretching() {
+        // 32×32 source with a horizontal gradient — easy to detect stretch.
+        let src = h_gradient(32, 32);
+        // 16:9 canvas — aspect clearly != 1.
+        let mut canvas = Pixmap::new(64, 36).unwrap();
+        // Crop a tall slice (non-square region → non-square pixel rect on a
+        // square source → mismatched aspect with the 16:9 canvas).
+        let effect = ZoomPanEffect {
+            start_region: ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 0.3,
+                height: 0.8,
+            },
+            end_region: ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 0.3,
+                height: 0.8,
+            },
+            easing: EasingPreset::Linear,
+        };
+        apply_zoom_pan(&mut canvas, &src, &effect, 0.0);
+
+        // The left and right strips of the canvas should be black (the
+        // pillarbox bars) since the crop is tall and the canvas is wide.
+        let data = canvas.data();
+        let at = |x: u32, y: u32| {
+            let off = ((y * 64 + x) * 4) as usize;
+            (data[off], data[off + 1], data[off + 2])
+        };
+        // Left edge column, middle row — expect black bar (R=0).
+        let (l_r, _, _) = at(0, 18);
+        assert_eq!(l_r, 0, "left edge should be black (letterbox), got R={l_r}");
+        // Right edge column, middle row — expect black bar.
+        let (r_r, _, _) = at(63, 18);
+        assert_eq!(
+            r_r, 0,
+            "right edge should be black (letterbox), got R={r_r}"
+        );
+        // Center column, middle row — expect content (R > 0 somewhere in
+        // the gradient, picked far enough from black edges that bilinear
+        // can't bleed).
+        let (c_r, _, _) = at(32, 18);
+        assert!(c_r > 0, "center should have gradient content, got R={c_r}");
+    }
+
+    /// When the crop region DOES match the canvas aspect (the new editor
+    /// invariant after Alt 1), the scaled content must fill the canvas
+    /// edge-to-edge — no unintended letterbox bars.
+    #[test]
+    fn matching_aspect_region_fills_canvas_edge_to_edge() {
+        // Square source, square canvas, full region → every pixel is the
+        // source's red gradient, never black.
+        let src = h_gradient(32, 32);
+        let mut canvas = Pixmap::new(32, 32).unwrap();
+        let effect = ZoomPanEffect {
+            start_region: ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            end_region: ZoomRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            easing: EasingPreset::Linear,
+        };
+        apply_zoom_pan(&mut canvas, &src, &effect, 0.0);
+
+        let data = canvas.data();
+        // Sample the rightmost column mid-height — should be near-full red
+        // gradient, definitely not the black (0,0,0) we'd see with
+        // unintended letterboxing.
+        let off = ((16 * 32 + 31) * 4) as usize;
+        let r = data[off];
+        assert!(r > 200, "right edge should be near-max gradient, got R={r}");
     }
 }

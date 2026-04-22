@@ -65,11 +65,15 @@ const sections = [
       },
       {
         q: "Stacking effects",
-        a: "Effects composite in declaration order. Zoom OVERWRITES the frame with the cropped-and-scaled region, so put it FIRST in a stack — Spotlight / Blur / Text / Fade drawn afterwards will appear on top of the zoomed frame. Blur / Spotlight / Text / Fade fade in smoothly with the configured transition; on a zoomed section they operate in screen space (e.g. a blur rect in the top-right stays in the top-right regardless of zoom).",
+        a: "Zoom is always applied first for each frame regardless of the FX track order — it transforms the canvas, then Spotlight / Blur / Text / Fade composite on top in the order they appear in the track. This means you can add effects in any order without worrying about them disappearing. Non-zoom overlays always operate in screen space, so a spotlight in the top-right stays in the top-right even inside a zoomed region.",
       },
       {
         q: "Per-clip zoom vs overlay zoom",
         a: "Per-clip zoom lives on a clip and ramps linearly across the whole clip output duration (no transition controls). Overlay Zoom on the FX track is the full animation model — start region, end region, transitionIn/Hold/Out, reverse, easing. Prefer the overlay version for anything beyond a simple whole-clip pan.",
+      },
+      {
+        q: "Zoom regions lock to the video aspect",
+        a: "Start/End regions always match the output's aspect ratio — dragging a corner scales both dimensions equally, so what you see in the editor is exactly what the export renders. This prevents a class of bugs where a non-square region used to get stretched (export) while the preview showed a uniform scale. Old projects with free-form regions are snapped on load; the snap expands to the larger dimension so nothing you authored is cropped away.",
       },
       {
         q: "Controls",

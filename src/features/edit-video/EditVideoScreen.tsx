@@ -306,6 +306,33 @@ export function EditVideoScreen() {
     }
   }, [outputDuration, store, clips]);
 
+  // When the user selects a non-zoom overlay effect (spotlight / blur / text /
+  // fade) while the playhead sits OUTSIDE its time window, snap the playhead
+  // to the middle of the effect's window. The positioning overlay can still
+  // be dragged while the effect is inactive (it shows at 0.4 opacity), but
+  // the backdrop in that case is *some other* moment of the video — often
+  // mid-zoom-pan. Users dragged based on what they saw and got a different
+  // layout at export because the real render time was un-zoomed (or
+  // differently-zoomed). Seeking inside the window means the preview
+  // matches what the compositor will composite the effect onto.
+  //
+  // We skip the seek during playback (interrupting playback for a click on
+  // the timeline would be hostile) and for zoom-pan (it has its own region-
+  // editing mode where a stable preview matters more than backdrop accuracy).
+  useEffect(() => {
+    if (!selectedEffectId || isPlaying) return;
+    const effect = effects.find((e) => e.id === selectedEffectId);
+    if (!effect || effect.type === 'zoom-pan') return;
+    // Already inside window → leave the scrub position alone so the user
+    // can fine-tune at their chosen frame.
+    if (outputTime >= effect.startTime && outputTime <= effect.endTime) return;
+    const mid = (effect.startTime + effect.endTime) / 2;
+    seekToOutput(mid);
+    // outputTime intentionally not in deps — we only want to re-check on
+    // selection or effect-timing changes, not on every scrub tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEffectId, effects, isPlaying, seekToOutput]);
+
   // During playback: handle clip transitions (skip gaps, change speed at boundaries, freeze clips)
   // Uses isUserPlayingRef + outputTimeRef to avoid stale closures.
   // The rAF loop runs as long as isUserPlayingRef is true, even when the video is paused for freeze clips.

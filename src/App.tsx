@@ -533,6 +533,15 @@ export default function App() {
       // Restore video edit clips if saved
       const es = useEditStore.getState();
       es.reset();
+      // Migration helper: older projects stored free-form zoom-pan regions
+      // that could be non-square. The editor now locks regions to the source
+      // aspect (see lockRegionAspect / ZoomPanOverlay), and the compositor
+      // assumes this invariant. Snap stored regions on load so existing
+      // projects render consistently and the user doesn't open a project
+      // and see a different crop than what they had previously — the snap
+      // expands to the larger dimension so nothing they authored is cropped
+      // away.
+      const { lockRegionAspect } = await import("./features/edit-video/easing");
       if (cfg.edit_clips && cfg.edit_clips.length > 0) {
         const duration = useProjectStore.getState().videoFile?.duration || 0;
         es.initFromVideo(duration);
@@ -548,8 +557,8 @@ export default function App() {
           freezeSourceTime: c.freeze_source_time,
           freezeDuration: c.freeze_duration,
           zoomPan: c.zoom_pan ? {
-            startRegion: c.zoom_pan.startRegion,
-            endRegion: c.zoom_pan.endRegion,
+            startRegion: lockRegionAspect(c.zoom_pan.startRegion),
+            endRegion: lockRegionAspect(c.zoom_pan.endRegion),
             easing: c.zoom_pan.easing as 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out',
           } : undefined,
         }));
@@ -560,17 +569,21 @@ export default function App() {
       // Restore timeline effects if saved — validate known types, warn on unknown
       if (cfg.timeline_effects && Array.isArray(cfg.timeline_effects) && cfg.timeline_effects.length > 0) {
         const KNOWN_TYPES = new Set(['zoom-pan', 'spotlight', 'blur', 'text', 'fade']);
-        const validated = (cfg.timeline_effects as import("./stores/editStore").TimelineEffect[]).filter((e) => {
-          if (!e.id || !e.type || typeof e.startTime !== 'number' || typeof e.endTime !== 'number') {
-            console.warn("Skipping malformed timeline effect:", e);
-            return false;
-          }
-          if (!KNOWN_TYPES.has(e.type)) {
-            console.warn(`Skipping unknown effect type "${e.type}":`, e);
-            return false;
-          }
-          return true;
-        });
+        const validated = (cfg.timeline_effects as import("./stores/editStore").TimelineEffect[])
+          .filter((e) => {
+            if (!e.id || !e.type || typeof e.startTime !== 'number' || typeof e.endTime !== 'number') {
+              console.warn("Skipping malformed timeline effect:", e);
+              return false;
+            }
+            if (!KNOWN_TYPES.has(e.type)) {
+              console.warn(`Skipping unknown effect type "${e.type}":`, e);
+              return false;
+            }
+            return true;
+          })
+          .map((e) => e.type === 'zoom-pan' && e.zoomPan
+            ? { ...e, zoomPan: { ...e.zoomPan, startRegion: lockRegionAspect(e.zoomPan.startRegion), endRegion: lockRegionAspect(e.zoomPan.endRegion) } }
+            : e);
         useEditStore.setState({ effects: validated });
       }
 
