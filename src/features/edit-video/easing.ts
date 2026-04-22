@@ -1,5 +1,35 @@
-import type { EditClip, EasingPreset, TimelineEffect, ZoomPanEffect } from "../../stores/editStore";
+import type { EditClip, EasingPreset, TimelineEffect, ZoomPanEffect, ZoomRegion } from "../../stores/editStore";
 import { clipOutputDuration } from "../../stores/editStore";
+
+/**
+ * Lock a zoom/pan region to the output's aspect ratio.
+ *
+ * Narrator renders output at the source video's resolution and aspect, so a
+ * region with `width === height` in normalized 0..1 space maps to a pixel
+ * rectangle with the source aspect — which fills the output canvas with a
+ * simple uniform scale and no distortion. Free-form (non-square) regions
+ * used to disagree between preview (uniform scale, so the crop actually
+ * shown differed from the drawn rectangle) and export (non-uniform scale,
+ * which stretched content). Both paths now assume the region is locked.
+ *
+ * The snap expands to the *larger* dimension so a user who drew a tall
+ * rectangle still sees everything they drew, rather than silently cropping
+ * down to the smaller side. Center is preserved; result is clamped to
+ * [0, 1] so the snapped region stays inside the source frame.
+ */
+export function lockRegionAspect(r: ZoomRegion): ZoomRegion {
+  if (!Number.isFinite(r.width) || !Number.isFinite(r.height)) {
+    return { x: 0, y: 0, width: 1, height: 1 };
+  }
+  // Already locked — avoid any centering jitter from floating-point drift.
+  if (Math.abs(r.width - r.height) < 1e-6) return r;
+  const size = Math.min(1, Math.max(r.width, r.height));
+  const cx = r.x + r.width / 2;
+  const cy = r.y + r.height / 2;
+  const x = Math.max(0, Math.min(1 - size, cx - size / 2));
+  const y = Math.max(0, Math.min(1 - size, cy - size / 2));
+  return { x, y, width: size, height: size };
+}
 
 export function applyEasing(t: number, preset: EasingPreset): number {
   const clamped = Math.max(0, Math.min(1, t));

@@ -82,16 +82,23 @@ function canonicalizeEffect(e: TimelineEffect): string {
  * Compute a stable hash over the entire edit plan. Two plans that produce
  * the same rendered output will have the same hash; any meaningful change
  * produces a different hash.
+ *
+ * Effect order matters: the Rust compositor now applies zoom-pan first and
+ * then iterates remaining overlays in array order, and `buildEditPlan` sends
+ * the effects in the store's array order. So *reordering* effects in the
+ * timeline can change the rendered output (e.g. fade-over-text vs
+ * text-over-fade) and must invalidate the cache. We hash effects in their
+ * original order. (An earlier version sorted them by `startTime` here,
+ * which silently collided two plans that rendered differently.)
  */
 export function computeEditPlanHash(
   clips: EditClip[],
   effects: TimelineEffect[],
 ): string {
-  // Canonicalize clips in order (clip order matters — it's the timeline sequence)
+  // Canonicalize clips in order (clip order = timeline sequence).
   const clipPart = clips.map(canonicalizeClip).join(";");
-  // Canonicalize effects sorted by startTime so order-insensitive changes to
-  // the effects array don't produce spurious hash changes.
-  const sortedEffects = [...effects].sort((a, b) => a.startTime - b.startTime);
-  const effectPart = sortedEffects.map(canonicalizeEffect).join(";");
+  // Canonicalize effects in array order (matches what buildEditPlan sends
+  // and what the compositor iterates).
+  const effectPart = effects.map(canonicalizeEffect).join(";");
   return hash32(`C:${clipPart}||E:${effectPart}`);
 }

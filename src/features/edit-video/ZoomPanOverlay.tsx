@@ -1,5 +1,6 @@
 import { useRef, useCallback, useEffect } from "react";
 import type { ZoomRegion } from "../../stores/editStore";
+import { lockRegionAspect } from "./easing";
 
 interface ZoomPanOverlayProps {
   videoRect: { width: number; height: number; left: number; top: number };
@@ -79,13 +80,37 @@ function RegionRect({
       if (dragRef.current.handle === 'move') {
         onRegionChange(clampRegion({ ...sr, x: sr.x + dx, y: sr.y + dy }));
       } else {
-        let { x, y, width, height } = sr;
+        // Aspect-locked resize: the region stays width == height (in
+        // normalized units, which maps to the source aspect in pixels, so
+        // `apply_zoom_pan` in the Rust compositor can do a uniform scale
+        // and the export matches the editor rectangle exactly — no more
+        // preview-vs-export mismatch).
+        //
+        // We derive a signed "size delta" from whichever cursor axis moved
+        // the most in the handle's diagonal direction — whichever way the
+        // user drags faster wins. Then both dimensions get that delta, and
+        // we re-anchor the opposite corner so the handle under the cursor
+        // stays under the cursor.
         const h = dragRef.current.handle;
-        if (h === 'nw' || h === 'sw') { x = sr.x + dx; width = sr.width - dx; }
-        if (h === 'ne' || h === 'se') { width = sr.width + dx; }
-        if (h === 'nw' || h === 'ne') { y = sr.y + dy; height = sr.height - dy; }
-        if (h === 'sw' || h === 'se') { height = sr.height + dy; }
-        onRegionChange(clampRegion({ x, y, width, height }));
+        const diag =
+          h === 'se' ? Math.max(dx, dy)      :
+          h === 'nw' ? Math.max(-dx, -dy)    :
+          h === 'ne' ? Math.max(dx, -dy)     :
+          /* 'sw' */   Math.max(-dx, dy);
+        // Use the larger of the pre-drag width/height as the anchor size —
+        // matters when migrating old non-square regions, where resizing one
+        // corner shouldn't silently shrink the region.
+        const baseSize = Math.max(sr.width, sr.height);
+        const size = baseSize + diag;
+
+        // Anchor the opposite corner: for 'se' keep top-left fixed; for
+        // 'nw' keep bottom-right; etc.
+        let x = sr.x, y = sr.y;
+        if (h === 'nw') { x = sr.x + sr.width  - size; y = sr.y + sr.height - size; }
+        if (h === 'ne') {                             y = sr.y + sr.height - size; }
+        if (h === 'sw') { x = sr.x + sr.width  - size;                              }
+        // 'se' anchors at top-left (no translate)
+        onRegionChange(clampRegion(lockRegionAspect({ x, y, width: size, height: size })));
       }
     };
 

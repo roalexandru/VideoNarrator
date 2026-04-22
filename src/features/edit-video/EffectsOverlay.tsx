@@ -117,7 +117,10 @@ function DraggableCircle({ cx, cy, radius, color, videoW, videoH, isSelected, on
   }, [cx, cy, radius, videoW, videoH, onMove, onCommit]);
 
   const pxCx = cx * videoW, pxCy = cy * videoH;
-  const pxR = radius * Math.max(videoW, videoH);
+  // Keep this in lockstep with the SVG mask above and with the Rust
+  // compositor's `apply_spotlight` (min of w/h) — the hit region must match
+  // what the user actually sees or handles drift from the rendered circle.
+  const pxR = radius * Math.min(videoW, videoH);
 
   return (
     <div
@@ -223,7 +226,12 @@ export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime
         if (effect.type === 'spotlight' && effect.spotlight) {
           const { x, y, radius, dimOpacity } = effect.spotlight;
           const cx = x * videoWidth, cy = y * videoHeight;
-          const r = radius * Math.max(videoWidth, videoHeight);
+          // Normalize the radius against the SHORTER dimension so the circle
+          // has the same diameter in both landscape and portrait. Must match
+          // `apply_spotlight` in src-tauri/src/compositor/effects/spotlight.rs
+          // (which uses `w.min(h)`) — otherwise the preview shows one size
+          // and the export renders another (e.g. 192 px vs 108 px on 16:9).
+          const r = radius * Math.min(videoWidth, videoHeight);
           return (
             <div key={effect.id} style={{ position: "absolute", inset: 0, opacity }}>
               <svg width={videoWidth} height={videoHeight} style={{ position: "absolute", inset: 0 }}>
