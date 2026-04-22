@@ -87,6 +87,34 @@ VideoNarrator/
       error.rs              # Error types
 ```
 
+## Using Narrator with Claude Code
+
+Narrator ships a Claude Code skill that wraps the `narrator-cli` binary. Once installed, you can ask Claude Code to narrate a video, burn subtitles, probe media, or run small edits conversationally.
+
+```bash
+# 1. Symlink the skill into your Claude Code skills directory.
+#    `$(pwd)` resolves to your current directory — run this from the
+#    Narrator repo root (`cd` into it first) so the link points at the
+#    checked-out skill.
+cd /path/to/VideoNarator
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/narrator" ~/.claude/skills/narrator
+
+# 2. Put narrator-cli on PATH (pick whichever fits your setup):
+#    a) Build from source — ends up in ~/.cargo/bin, no sudo:
+cargo install --path src-tauri --bin narrator-cli
+#    b) Symlink into a user-writable PATH dir (no sudo):
+mkdir -p ~/.local/bin
+ln -sf /Applications/Narrator.app/Contents/MacOS/narrator-cli ~/.local/bin/narrator-cli
+#    c) System-wide (asks for sudo):
+# sudo ln -sf /Applications/Narrator.app/Contents/MacOS/narrator-cli /usr/local/bin/narrator-cli
+
+# 3. Verify everything is wired up
+./skills/narrator/scripts/doctor.sh
+```
+
+See [`skills/narrator/SKILL.md`](skills/narrator/SKILL.md) for the skill's capabilities and [`skills/narrator/references/install.md`](skills/narrator/references/install.md) for platform-specific install notes.
+
 ## License
 
 MIT
