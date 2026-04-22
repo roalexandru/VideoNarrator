@@ -1056,6 +1056,15 @@ pub async fn burn_subtitles(
 ) -> Result<String, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
+    // Preflight: libass must be compiled in, otherwise the `subtitles` filter
+    // doesn't exist and ffmpeg fails with a cryptic "Error parsing a filter
+    // description". Surface a clear error here before we copy the SRT and
+    // start re-encoding. Frontend hides the toggle in this case, but the
+    // CLI / external callers still go through here.
+    if !video_engine::ffmpeg_has_subtitles_filter() {
+        return Err(NarratorError::FfmpegMissingLibass);
+    }
+
     // Probe video duration for progress reporting
     let meta = video_engine::probe_video(Path::new(video_path)).await?;
     let total_duration = meta.duration_seconds;
@@ -1111,11 +1120,31 @@ pub async fn burn_subtitles(
     // No more silent mov_text fallback: it doesn't actually burn subs (they
     // end up as a soft stream that obeys none of the user's style) and
     // reporting "success" while producing a file that looks wrong is the
-    // worst of both worlds. Propagate the original error instead.
-    result?;
+    // worst of both worlds. Propagate the original error instead — but first
+    // rewrite the "No such filter: 'subtitles'" / "No option name near" /
+    // "Error parsing filterchain" variants into FfmpegMissingLibass so the
+    // frontend shows a user-friendly message. The preflight normally catches
+    // this, but the OnceLock cache could be stale across ffmpeg swaps.
+    result.map_err(upgrade_missing_libass_error)?;
 
     on_progress(100.0, Some("Subtitles burned".to_string()));
     Ok(output_path.to_string())
+}
+
+fn upgrade_missing_libass_error(err: NarratorError) -> NarratorError {
+    let text = match &err {
+        NarratorError::FfmpegFailed(s) => s.as_str(),
+        _ => return err,
+    };
+    let looks_like_missing_libass = text.contains("No such filter: 'subtitles'")
+        || text.contains("No such filter: subtitles")
+        || (text.contains("Error parsing") && text.contains("subtitles="))
+        || text.contains("No option name near");
+    if looks_like_missing_libass {
+        NarratorError::FfmpegMissingLibass
+    } else {
+        err
+    }
 }
 
 pub async fn extract_edit_thumbnails(
@@ -1252,6 +1281,54 @@ mod tests {
             filter.contains(r"/tmp/some\'path/sub.srt"),
             "apostrophe in path not escaped:\n{filter}"
         );
+    }
+
+    #[test]
+    fn upgrade_missing_libass_error_rewrites_no_such_filter() {
+        // ffmpeg with the subtitles filter stripped emits this exact phrase.
+        let err = NarratorError::FfmpegFailed(
+            "[AVFilterGraph @ 0x12345] No such filter: 'subtitles'".into(),
+        );
+        assert!(matches!(
+            upgrade_missing_libass_error(err),
+            NarratorError::FfmpegMissingLibass
+        ));
+    }
+
+    #[test]
+    fn upgrade_missing_libass_error_rewrites_no_option_name() {
+        // The actual stderr observed in issue repro (ffmpeg 8.1 w/o libass
+        // on macOS Homebrew) — the parser chokes mid-filterchain.
+        let err = NarratorError::FfmpegFailed(
+            "No option name near '/tmp/x.srt:force_style=FontName=Arial'\n\
+             Error parsing a filter description around: ;\n\
+             Error parsing filterchain 'subtitles=/tmp/x.srt:...'"
+                .into(),
+        );
+        assert!(matches!(
+            upgrade_missing_libass_error(err),
+            NarratorError::FfmpegMissingLibass
+        ));
+    }
+
+    #[test]
+    fn upgrade_missing_libass_error_leaves_unrelated_errors_alone() {
+        let err = NarratorError::FfmpegFailed("Input file not found".into());
+        match upgrade_missing_libass_error(err) {
+            NarratorError::FfmpegFailed(s) => assert_eq!(s, "Input file not found"),
+            other => panic!("expected FfmpegFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_missing_libass_error_preserves_non_ffmpeg_errors() {
+        // Only FfmpegFailed is inspected; Cancelled should pass through even
+        // if by coincidence its Display contained trigger words.
+        let err = NarratorError::Cancelled;
+        assert!(matches!(
+            upgrade_missing_libass_error(err),
+            NarratorError::Cancelled
+        ));
     }
 
     #[test]

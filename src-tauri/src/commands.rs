@@ -302,6 +302,14 @@ pub async fn check_ffmpeg() -> Result<String, NarratorError> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// True when the detected `ffmpeg` includes the `subtitles` filter (libass).
+/// Frontend uses this to hard-disable the "Burn subtitles" toggle instead of
+/// letting the user discover the limitation after a 10-minute export.
+#[tauri::command]
+pub fn ffmpeg_supports_subtitle_burn() -> bool {
+    video_engine::ffmpeg_has_subtitles_filter()
+}
+
 #[tauri::command]
 pub async fn get_provider_status(
     state: tauri::State<'_, AppState>,

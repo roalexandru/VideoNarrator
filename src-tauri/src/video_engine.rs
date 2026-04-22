@@ -98,6 +98,39 @@ fn detect_binary(name: &str) -> Result<PathBuf, NarratorError> {
     Err(NarratorError::FfmpegNotFound)
 }
 
+/// True if the detected `ffmpeg` has the `subtitles` video filter (libass).
+///
+/// Burning subtitles into a video needs libass-backed `-vf subtitles=...`.
+/// Homebrew's default `ffmpeg` formula ships without libass and silently
+/// produces the very confusing "Error parsing a filter description" error.
+/// Result is cached so we pay ~50 ms once per process.
+pub fn ffmpeg_has_subtitles_filter() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let Ok(ffmpeg) = detect_ffmpeg() else {
+            return false;
+        };
+        let output = std::process::Command::new(ffmpeg.as_os_str())
+            .no_window()
+            .args(["-hide_banner", "-filters"])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                // Filter table has one row per filter; match at a line boundary
+                // so we don't false-positive on the word appearing in a
+                // description (e.g. "Render text subtitles...").
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout.lines().any(|line| {
+                    // Filter rows look like: " .. subtitles  V->V   ..."
+                    line.split_whitespace().nth(1) == Some("subtitles")
+                })
+            }
+            _ => false,
+        }
+    })
+}
+
 pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
     let ffprobe = detect_ffprobe()?;
 
