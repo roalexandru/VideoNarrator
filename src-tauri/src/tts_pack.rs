@@ -47,6 +47,13 @@ const FADE_SECONDS: f64 = 0.03;
 /// Build the per-segment ffmpeg filter chain: optional atempo compression
 /// followed by afade in/out. Pure function so it can be unit-tested without
 /// invoking ffmpeg.
+///
+/// Fade duration auto-shrinks to `effective_dur / 2` when the segment is
+/// shorter than `2 × FADE_SECONDS`. Without this, the fade-in window (0..d)
+/// and fade-out window (dur-d..dur) overlap and ffmpeg multiplies the two
+/// envelopes in the overlap region, producing a double-attenuation dip. The
+/// shrink makes fade-in finish exactly when fade-out begins, preserving the
+/// "no pop at splice" property without introducing an audible dip.
 fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
     let mut parts: Vec<String> = Vec::new();
     if applied_speed > 1.0 + f64::EPSILON {
@@ -54,11 +61,10 @@ fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
             parts.push(format!("atempo={f:.4}"));
         }
     }
-    parts.push(format!("afade=t=in:d={FADE_SECONDS:.3}"));
-    let fade_out_start = (effective_dur - FADE_SECONDS).max(0.0);
-    parts.push(format!(
-        "afade=t=out:st={fade_out_start:.3}:d={FADE_SECONDS:.3}"
-    ));
+    let fade_d = (effective_dur / 2.0).clamp(0.0, FADE_SECONDS);
+    parts.push(format!("afade=t=in:d={fade_d:.3}"));
+    let fade_out_start = (effective_dur - fade_d).max(0.0);
+    parts.push(format!("afade=t=out:st={fade_out_start:.3}:d={fade_d:.3}"));
     parts.join(",")
 }
 
@@ -176,6 +182,12 @@ pub async fn concat_narration_segments(
         let effective_dur = seg_dur / applied_speed;
         let filter_chain = build_segment_filter(applied_speed, effective_dur);
         let proc_path = temp_dir.join(format!("_tmp_seg_{:03}_proc.mp3", sf.index));
+        // `-q:a 0` gives the highest-quality libmp3lame VBR (~245 kbps).
+        // Upstream providers ship 128–160 kbps MP3, so `-q:a 0` keeps the
+        // re-encode headroom well above source quality and minimizes the
+        // generational-loss cost of this per-segment pass. `-ar` pins the
+        // sample rate to match silence inserts so concat demuxer doesn't
+        // hit rate-mismatches.
         let proc_output = Command::new(ffmpeg.as_os_str())
             .no_window()
             .args(["-y", "-i"])
@@ -186,7 +198,9 @@ pub async fn concat_narration_segments(
                 "-codec:a",
                 "libmp3lame",
                 "-q:a",
-                "2",
+                "0",
+                "-ar",
+                silence_sample_rate,
             ])
             .arg(proc_path.as_os_str())
             .output()
@@ -324,9 +338,31 @@ mod tests {
     }
 
     #[test]
-    fn filter_fade_out_clamps_to_zero_for_short_segments() {
+    fn filter_fade_shrinks_to_half_segment_when_too_short() {
+        // For a 10ms segment, full 30ms fades would overlap and multiply to
+        // a double-attenuation dip. Fade duration should halve to 5ms and
+        // fade-out should start exactly where fade-in ends.
         let chain = build_segment_filter(1.0, 0.01);
-        assert!(chain.contains("afade=t=out:st=0.000:d=0.030"));
+        assert!(chain.contains("afade=t=in:d=0.005"));
+        assert!(chain.contains("afade=t=out:st=0.005:d=0.005"));
+    }
+
+    #[test]
+    fn filter_fade_shrinks_at_overlap_boundary() {
+        // At exactly 2×FADE_SECONDS (60ms), fade-in and fade-out should just
+        // touch at the midpoint with the full FADE_SECONDS duration.
+        let chain = build_segment_filter(1.0, 0.060);
+        assert!(chain.contains("afade=t=in:d=0.030"));
+        assert!(chain.contains("afade=t=out:st=0.030:d=0.030"));
+    }
+
+    #[test]
+    fn filter_fade_inside_overlap_window_halves_duration() {
+        // A 40ms segment would otherwise overlap fade windows by 20ms.
+        // Shrunk fade should be 20ms with fade-out starting at 20ms.
+        let chain = build_segment_filter(1.0, 0.040);
+        assert!(chain.contains("afade=t=in:d=0.020"));
+        assert!(chain.contains("afade=t=out:st=0.020:d=0.020"));
     }
 
     #[test]
