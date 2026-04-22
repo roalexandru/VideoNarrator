@@ -107,6 +107,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_menu_context,
             commands::check_ffmpeg,
+            commands::ffmpeg_supports_subtitle_burn,
             commands::get_provider_status,
             commands::set_api_key,
             commands::validate_api_key_cmd,

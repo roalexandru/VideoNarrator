@@ -45,13 +45,19 @@ Windows SmartScreen may show a "Windows protected your PC" warning. Click **More
 
 - [Rust](https://rustup.rs/) (stable toolchain)
 - [Node.js](https://nodejs.org/) (v18+) with pnpm
-- [ffmpeg](https://ffmpeg.org/) installed and available on PATH
+- `curl` and `unzip` (for the ffmpeg fetch script). The app bundles its own
+  ffmpeg, so you don't need one on PATH.
 
 ## Getting Started
 
 ```bash
 # Install frontend dependencies
 pnpm install
+
+# One-time: download the self-contained ffmpeg sidecars (with libass).
+# The default Homebrew/apt builds ship without libass, which silently
+# breaks burn-subtitles export, so the project uses curated builds instead.
+./scripts/fetch-ffmpeg.sh
 
 # Run in development mode
 pnpm tauri dev

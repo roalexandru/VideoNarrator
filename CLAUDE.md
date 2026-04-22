@@ -28,6 +28,7 @@ AI-powered desktop app that generates narration scripts from videos. Built with 
 
 ```bash
 pnpm install              # Install frontend deps
+./scripts/fetch-ffmpeg.sh # One-time: download ffmpeg sidecars with libass
 pnpm dev                  # Vite dev server (frontend only)
 pnpm tauri dev            # Full app dev mode (frontend + Rust)
 pnpm build                # TypeScript check + Vite build
@@ -82,3 +83,4 @@ The PR quality gate enforces this.
 - API keys stored locally at `~/.narrator/config.json` with 0600 permissions
 - No PII in telemetry — never track file paths, content, or user identifiers
 - Speech-rate budget is mirrored between `src-tauri/src/speech_rate.rs` and `src/lib/speechRate.ts` — both sides must produce identical numbers so Review's overflow prediction matches Export's actual behavior. Update both in the same commit.
+- FFmpeg sidecars in `src-tauri/binaries/` are gitignored and fetched by `scripts/fetch-ffmpeg.sh` (macOS from OSXExperts, Windows from BtbN). Always use that script — the default Homebrew `ffmpeg` formula ships without libass, which silently breaks burn-subtitles export.

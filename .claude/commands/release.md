@@ -59,6 +59,8 @@ gh api --method PATCH repos/roalexandru/VideoNarrator/releases/assets/<asset_id>
 
 > **macOS note:** The app is not code-signed. After installing, run `sudo xattr -rd com.apple.quarantine /Applications/Narrator.app` in Terminal.
 
+> **Windows note:** The installer is not code-signed. Windows Defender SmartScreen may show a warning — click **"More info"** → **"Run anyway"** to proceed. Enterprise environments with security tools (e.g., ThreatLocker, CrowdStrike) may block unsigned executables — ask your IT team to allowlist by SHA256 hash, or try the `.msi` installer.
+
 ## What's New in <tag>
 
 <summarize the key changes from the commits — group by feature, use bold headers for major items>

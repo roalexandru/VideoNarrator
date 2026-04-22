@@ -15,6 +15,12 @@ import type { ExportOptions, ExportResult } from "../../types/export";
 // System
 export const checkFfmpeg = () => invoke<string>("check_ffmpeg");
 
+/** True when the detected ffmpeg has the `subtitles` filter (libass). The
+ *  frontend uses this to disable the "Burn subtitles" toggle — a libass-less
+ *  ffmpeg silently produces a cryptic filter parse error at export time. */
+export const ffmpegSupportsSubtitleBurn = () =>
+  invoke<boolean>("ffmpeg_supports_subtitle_burn");
+
 export const getProviderStatus = () =>
   invoke<ProviderKeyStatus[]>("get_provider_status");
 

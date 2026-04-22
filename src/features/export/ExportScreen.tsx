@@ -10,6 +10,7 @@ import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
   getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits, fileExists,
+  ffmpegSupportsSubtitleBurn,
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
 import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
@@ -66,15 +67,28 @@ function Section({ title, icon, children, collapsible, defaultOpen = true }: {
 }
 
 // ── Toggle switch ──
-function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
+function Toggle({
+  checked, onChange, label, disabled = false, disabledReason,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+  /** Tooltip shown on the disabled control. Use to explain *why* it's off. */
+  disabledReason?: string;
+}) {
+  const effectiveCursor = disabled ? "not-allowed" : "pointer";
   return (
-    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", fontSize: 13, color: C.dim }}>
+    <label
+      title={disabled ? disabledReason : undefined}
+      style={{ display: "flex", alignItems: "center", gap: 10, cursor: effectiveCursor, fontSize: 13, color: C.dim, opacity: disabled ? 0.45 : 1 }}
+    >
       <div
-        onClick={() => onChange(!checked)}
+        onClick={() => { if (!disabled) onChange(!checked); }}
         style={{
           width: 36, height: 20, borderRadius: 10, position: "relative",
-          background: checked ? C.accent : "rgba(255,255,255,0.1)",
-          transition: "background 0.2s", cursor: "pointer",
+          background: checked && !disabled ? C.accent : "rgba(255,255,255,0.1)",
+          transition: "background 0.2s", cursor: effectiveCursor,
         }}
       >
         <div style={{
@@ -169,6 +183,29 @@ export function ExportScreen() {
   const [audioProgress, setAudioProgress] = useState(0);
   const [, setAudioOutputPath] = useState<string | null>(null);
   const [audioError, setAudioError] = useState<string | null>(null);
+
+  // Libass availability — decided at mount by probing ffmpeg for the
+  // `subtitles` filter. `null` = probing, `true/false` = known. A rebuild
+  // or ffmpeg swap would require a reload to re-probe (acceptable: nobody
+  // changes ffmpeg mid-export session). If the probe itself errors we
+  // conservatively treat it as "supported" so we don't hide a working
+  // feature behind a bad IPC call.
+  const [libassSupported, setLibassSupported] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    ffmpegSupportsSubtitleBurn()
+      .then((ok) => { if (!cancelled) setLibassSupported(ok); })
+      .catch(() => { if (!cancelled) setLibassSupported(true); });
+    return () => { cancelled = true; };
+  }, []);
+  // Force the stored value off whenever the platform can't honour it, so
+  // a user who previously persisted burnSubtitles=true on a different
+  // machine doesn't silently keep it on.
+  useEffect(() => {
+    if (libassSupported === false && exp.burnSubtitles) {
+      exp.setBurnSubtitles(false);
+    }
+  }, [libassSupported, exp.burnSubtitles, exp.setBurnSubtitles]);
 
   const hasTtsKey = ttsProvider.startsWith("builtin") ? true : ttsProviderRaw === "elevenlabs" ? !!elConfig?.api_key : !!azureConfig?.api_key;
   const primaryScript = Object.values(scripts)[0];
@@ -565,8 +602,14 @@ export function ExportScreen() {
               </div>
             )}
 
-            {/* Subtitles */}
-            <Toggle checked={exp.burnSubtitles} onChange={exp.setBurnSubtitles} label="Burn subtitles into video" />
+            {/* Subtitles — disabled if this ffmpeg build lacks libass. */}
+            <Toggle
+              checked={exp.burnSubtitles}
+              onChange={exp.setBurnSubtitles}
+              label="Burn subtitles into video"
+              disabled={libassSupported === false}
+              disabledReason="This ffmpeg build is missing libass, so subtitles can't be burned in. Reinstall Narrator or run scripts/fetch-ffmpeg.sh."
+            />
 
             {/* Subtitle style options (visible when burn is on) */}
             {exp.burnSubtitles && (

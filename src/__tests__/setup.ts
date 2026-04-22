@@ -79,6 +79,9 @@ export function setupDefaultMocks() {
       case "check_ffmpeg":
         return "/usr/local/bin/ffmpeg";
 
+      case "ffmpeg_supports_subtitle_burn":
+        return true;
+
       case "get_provider_status":
         return [
           { provider: "claude", has_key: true, models: ["claude-sonnet-4-20250514"] },

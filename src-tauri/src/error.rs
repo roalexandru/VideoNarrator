@@ -8,6 +8,13 @@ pub enum NarratorError {
     #[error("ffmpeg not found. Install ffmpeg or configure the sidecar path.")]
     FfmpegNotFound,
 
+    #[error(
+        "This ffmpeg build can't burn subtitles (libass not compiled in). \
+         The bundled Narrator binary includes libass; if you're on a dev build, \
+         run ./scripts/fetch-ffmpeg.sh to install a working ffmpeg."
+    )]
+    FfmpegMissingLibass,
+
     #[error("ffmpeg failed: {0}")]
     FfmpegFailed(String),
 

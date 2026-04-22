@@ -19,6 +19,7 @@ export async function mockTauriIPC(page: Page, overrides?: Record<string, unknow
     // Default mock responses for all IPC commands
     const defaults: Record<string, unknown> = {
       check_ffmpeg: "/usr/local/bin/ffmpeg",
+      ffmpeg_supports_subtitle_burn: true,
       get_provider_status: [
         { provider: "claude", has_key: true, models: ["claude-sonnet-4-20250514"] },
         { provider: "openai", has_key: false, models: ["gpt-4o"] },

@@ -30,3 +30,9 @@ dist-ssr
 /blob-report/
 /playwright/.cache/
 .claude/scheduled_tasks.lock
+
+# Tauri sidecars — fetched at build time by scripts/fetch-ffmpeg.sh.
+# Self-contained builds (~50–80 MB each) are too large to commit.
+# The directory itself is kept alive by src-tauri/binaries/README.md.
+src-tauri/binaries/ffmpeg-*
+src-tauri/binaries/ffprobe-*
