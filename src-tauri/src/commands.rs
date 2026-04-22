@@ -559,6 +559,7 @@ pub async fn generate_narration(
                 .send(ProgressEvent::progress_msg(percent, message))
                 .ok();
         },
+        Some(state.cancel_flag.clone()),
     )
     .await
     {
