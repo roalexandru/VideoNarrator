@@ -5,6 +5,7 @@ use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
 use crate::models::{Frame, FrameConfig, VideoMetadata};
 use crate::process_utils::CommandNoWindow;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -335,6 +336,7 @@ pub async fn extract_frames(
     output_dir: &Path,
     on_frame: impl Fn(Frame) + Send + Sync + 'static,
     on_tick: impl Fn(f64, String) + Send + Sync + 'static,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Vec<Frame>, NarratorError> {
     let ffmpeg = detect_ffmpeg()?;
 
@@ -359,7 +361,14 @@ pub async fn extract_frames(
     {
         if anchors.len() >= MIN_ANCHORS {
             return extract_frames_at_anchors(
-                &ffmpeg, video_path, &anchors, &metadata, output_dir, on_frame, on_tick,
+                &ffmpeg,
+                video_path,
+                &anchors,
+                &metadata,
+                output_dir,
+                on_frame,
+                on_tick,
+                cancel_flag,
             )
             .await;
         }
@@ -376,6 +385,17 @@ pub async fn extract_frames(
         &ffmpeg, video_path, &metadata, config, output_dir, on_frame, on_tick,
     )
     .await
+}
+
+/// Check an optional cancel flag and return `Cancelled` if set. Kept as a
+/// small helper so the anchor loop doesn't sprout repeated `match` blocks.
+fn check_cancelled(cancel_flag: &Option<Arc<AtomicBool>>) -> Result<(), NarratorError> {
+    if let Some(flag) = cancel_flag.as_ref() {
+        if flag.load(Ordering::SeqCst) {
+            return Err(NarratorError::Cancelled);
+        }
+    }
+    Ok(())
 }
 
 /// Parse `showinfo` stderr lines (`... pts_time:X.Y ...`) into timestamps.
@@ -486,15 +506,27 @@ async fn detect_anchors(
     config: &FrameConfig,
     on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
 ) -> Result<Vec<f64>, NarratorError> {
-    on_tick(0.02, "Detecting scene changes".to_string());
+    // Emit a more informative label so the user knows what's happening
+    // during the ffmpeg detect passes (which can each run for many seconds
+    // on a long source — the progress bar would otherwise sit at 2% silently).
+    on_tick(
+        0.02,
+        format!(
+            "Detecting scene changes in {:.0}s video",
+            metadata.duration_seconds
+        ),
+    );
     let scene = detect_scene_changes(ffmpeg, video_path, config.scene_threshold).await?;
+    on_tick(0.10, format!("Found {} scene changes", scene.len()));
 
     let silence = match probe_has_audio_stream(video_path).await {
         Ok(true) => {
             on_tick(0.12, "Detecting silence boundaries".to_string());
-            detect_silence_boundaries(ffmpeg, video_path)
+            let found = detect_silence_boundaries(ffmpeg, video_path)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            on_tick(0.20, format!("Found {} silence boundaries", found.len()));
+            found
         }
         _ => Vec::new(),
     };
@@ -558,9 +590,31 @@ async fn detect_silence_boundaries(
     Ok(parse_silence_midpoints(&stderr))
 }
 
-/// Extract one frame per anchor timestamp via independent `-ss / -frames:v 1`
-/// invocations. Each call is cheap (~200ms cold) and gives us accurate
-/// per-frame progress without relying on `-progress pipe:2` tailing.
+/// Coarse-seek window (seconds) subtracted from an anchor timestamp before
+/// the `-ss BEFORE -i` keyframe jump. The `-ss AFTER -i` decode then walks
+/// forward this much to the exact anchor. Larger = more decode cost, smaller
+/// = risk of landing on the wrong side of sparse keyframes (some screen
+/// recordings GOP every 10s). 2.0s handles most practical GOPs while keeping
+/// the per-anchor decode cheap.
+const ANCHOR_COARSE_SEEK_PAD_SECS: f64 = 2.0;
+
+/// Extract one frame per anchor timestamp via independent ffmpeg invocations.
+///
+/// Uses a two-step seek for frame accuracy:
+/// - `-ss <coarse>` BEFORE `-i` jumps to the nearest keyframe at-or-before
+///   `anchor - PAD` (fast, decodes nothing).
+/// - `-ss <fine>` AFTER `-i` decodes forward to the exact anchor (frame-
+///   accurate, costs ~PAD seconds of decode per anchor).
+///
+/// A single-pass input seek would overshoot backward by up to a full GOP on
+/// sparse-keyframe sources (typical screencasts), which defeats the whole
+/// feature: an anchor placed at a scene cut would extract the pre-cut frame.
+/// The two-step seek is the textbook ffmpeg fix for this.
+///
+/// Checks `cancel_flag` between anchors so a user pressing "cancel" during a
+/// 30-anchor extraction doesn't have to wait through all remaining
+/// invocations.
+#[allow(clippy::too_many_arguments)]
 async fn extract_frames_at_anchors(
     ffmpeg: &Path,
     video_path: &Path,
@@ -569,6 +623,7 @@ async fn extract_frames_at_anchors(
     output_dir: &Path,
     on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
     on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Vec<Frame>, NarratorError> {
     on_tick(
         0.30,
@@ -578,13 +633,18 @@ async fn extract_frames_at_anchors(
     let mut frames: Vec<Frame> = Vec::with_capacity(anchors.len());
     let total = anchors.len().max(1) as f64;
     for (i, &ts) in anchors.iter().enumerate() {
+        check_cancelled(&cancel_flag)?;
+
         let out_path = output_dir.join(format!("frame_{:04}.jpg", i + 1));
-        let ts_str = format!("{ts:.3}");
+        let coarse = (ts - ANCHOR_COARSE_SEEK_PAD_SECS).max(0.0);
+        let fine = ts - coarse;
+        let coarse_str = format!("{coarse:.3}");
+        let fine_str = format!("{fine:.3}");
         let status = Command::new(ffmpeg.as_os_str())
             .no_window()
-            .args(["-nostats", "-hide_banner", "-y", "-ss", &ts_str, "-i"])
+            .args(["-nostats", "-hide_banner", "-y", "-ss", &coarse_str, "-i"])
             .arg(video_path.as_os_str())
-            .args(["-frames:v", "1", "-q:v", "2"])
+            .args(["-ss", &fine_str, "-frames:v", "1", "-q:v", "2"])
             .arg(out_path.as_os_str())
             .output()
             .await
@@ -1091,5 +1151,19 @@ mod tests {
         let scene = vec![-1.0, 5.0, f64::NAN, 100.0];
         let merged = merge_anchors(scene, vec![], 30.0, 10, 1.0);
         assert_eq!(merged, vec![5.0]);
+    }
+
+    #[test]
+    fn check_cancelled_passes_when_flag_absent_or_false() {
+        assert!(check_cancelled(&None).is_ok());
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(check_cancelled(&Some(flag)).is_ok());
+    }
+
+    #[test]
+    fn check_cancelled_returns_err_when_flag_set() {
+        let flag = Arc::new(AtomicBool::new(true));
+        let err = check_cancelled(&Some(flag)).unwrap_err();
+        assert!(matches!(err, NarratorError::Cancelled));
     }
 }
