@@ -83,4 +83,59 @@ describe("exportStore", () => {
     expect(state.selectedFormats).toEqual(["json", "srt"]);
     expect(state.basename).toBe("untitled");
   });
+
+  it("applies shorts preset fields when selected", () => {
+    useExportStore.getState().setSubtitlePreset("shorts");
+    const state = useExportStore.getState();
+    expect(state.subtitlePreset).toBe("shorts");
+    expect(state.subtitleFontSize).toBe(36);
+    expect(state.subtitleTextTransform).toBe("uppercase");
+    expect(state.subtitleMaxWordsPerLine).toBe(2);
+    expect(state.subtitleOutline).toBe(4);
+  });
+
+  it("applies clean preset fields when selected", () => {
+    useExportStore.getState().setSubtitlePreset("clean");
+    const state = useExportStore.getState();
+    expect(state.subtitlePreset).toBe("clean");
+    expect(state.subtitleFontSize).toBe(18);
+    expect(state.subtitleTextTransform).toBeNull();
+    expect(state.subtitleMaxWordsPerLine).toBeNull();
+    expect(state.subtitleOutline).toBe(1);
+  });
+
+  it("leaves fields untouched when switching to custom", () => {
+    useExportStore.getState().setSubtitlePreset("shorts");
+    useExportStore.getState().setSubtitlePreset("custom");
+    const state = useExportStore.getState();
+    // Fields retain the last preset's values; only the selector label flips.
+    expect(state.subtitleFontSize).toBe(36);
+    expect(state.subtitleTextTransform).toBe("uppercase");
+    expect(state.subtitlePreset).toBe("custom");
+  });
+
+  it("snaps preset to custom when any field is edited directly", () => {
+    useExportStore.getState().setSubtitlePreset("documentary");
+    expect(useExportStore.getState().subtitlePreset).toBe("documentary");
+    useExportStore.getState().setSubtitleFontSize(25);
+    expect(useExportStore.getState().subtitlePreset).toBe("custom");
+  });
+
+  it("snaps preset to custom when text transform or word wrap is edited", () => {
+    useExportStore.getState().setSubtitlePreset("documentary");
+    useExportStore.getState().setSubtitleTextTransform("uppercase");
+    expect(useExportStore.getState().subtitlePreset).toBe("custom");
+    useExportStore.getState().setSubtitlePreset("documentary");
+    useExportStore.getState().setSubtitleMaxWordsPerLine(3);
+    expect(useExportStore.getState().subtitlePreset).toBe("custom");
+  });
+
+  it("does NOT snap preset to custom when only position changes", () => {
+    // Position is orthogonal to a preset's visual style — users should be
+    // able to flip top/bottom without losing their preset selection.
+    useExportStore.getState().setSubtitlePreset("shorts");
+    useExportStore.getState().setSubtitlePosition("top");
+    expect(useExportStore.getState().subtitlePreset).toBe("shorts");
+    expect(useExportStore.getState().subtitlePosition).toBe("top");
+  });
 });

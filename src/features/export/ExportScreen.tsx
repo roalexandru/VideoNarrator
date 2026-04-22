@@ -24,6 +24,7 @@ import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
 import type { ExportResult } from "../../types/export";
 import type { ProgressEvent } from "../../types/processing";
+import { PRESET_LABELS, PRESET_DESCRIPTIONS, type SubtitlePreset } from "./subtitlePresets";
 
 // ── Design tokens ──
 const C = {
@@ -334,6 +335,8 @@ export function ExportScreen() {
             outline_color: exp.subtitleOutlineColor,
             outline: exp.subtitleOutline,
             position: exp.subtitlePosition,
+            text_transform: exp.subtitleTextTransform,
+            max_words_per_line: exp.subtitleMaxWordsPerLine,
           },
           audioDir,
           mergedPath,
@@ -571,6 +574,57 @@ export function ExportScreen() {
                 display: "flex", flexDirection: "column", gap: 10, padding: "12px 14px",
                 borderRadius: 8, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`,
               }}>
+                {/* Preset selector */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Preset</span>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {(["shorts", "documentary", "clean", "custom"] as const).map((preset) => (
+                      <button
+                        key={preset}
+                        onClick={() => exp.setSubtitlePreset(preset as SubtitlePreset)}
+                        title={preset === "custom" ? "Edit every field by hand" : PRESET_DESCRIPTIONS[preset]}
+                        style={{
+                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                          border: exp.subtitlePreset === preset
+                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                          background: exp.subtitlePreset === preset ? C.accentDim : "transparent",
+                          color: exp.subtitlePreset === preset ? C.accent : C.muted,
+                          cursor: "pointer",
+                        }}
+                      >{PRESET_LABELS[preset]}</button>
+                    ))}
+                  </div>
+                </div>
+                {exp.subtitlePreset !== "custom" && (
+                  <div style={{ fontSize: 11, color: C.dim, paddingLeft: 74, marginTop: -4 }}>
+                    {PRESET_DESCRIPTIONS[exp.subtitlePreset]}
+                  </div>
+                )}
+
+                {/* Position toggle — always visible. Placement is orthogonal
+                    to a preset's visual style, so users can pair Shorts with
+                    a top-of-screen layout without being forced into Custom. */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Position</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {(["bottom", "top"] as const).map((pos) => (
+                      <button
+                        key={pos}
+                        onClick={() => exp.setSubtitlePosition(pos)}
+                        style={{
+                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                          border: exp.subtitlePosition === pos
+                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                          background: exp.subtitlePosition === pos ? C.accentDim : "transparent",
+                          color: exp.subtitlePosition === pos ? C.accent : C.muted,
+                          cursor: "pointer",
+                        }}
+                      >{pos.charAt(0).toUpperCase() + pos.slice(1)}</button>
+                    ))}
+                  </div>
+                </div>
+
+                {exp.subtitlePreset === "custom" && (<>
                 {/* Font size slider */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Font size</span>
@@ -639,26 +693,62 @@ export function ExportScreen() {
                   <span style={{ fontSize: 11, color: C.dim, minWidth: 16, textAlign: "right" }}>{exp.subtitleOutline}</span>
                 </div>
 
-                {/* Position toggle */}
+                {/* Text transform toggle */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Position</span>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Case</span>
                   <div style={{ display: "flex", gap: 4 }}>
-                    {(["bottom", "top"] as const).map((pos) => (
-                      <button
-                        key={pos}
-                        onClick={() => exp.setSubtitlePosition(pos)}
-                        style={{
-                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
-                          border: exp.subtitlePosition === pos
-                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
-                          background: exp.subtitlePosition === pos ? C.accentDim : "transparent",
-                          color: exp.subtitlePosition === pos ? C.accent : C.muted,
-                          cursor: "pointer",
-                        }}
-                      >{pos.charAt(0).toUpperCase() + pos.slice(1)}</button>
-                    ))}
+                    {([
+                      { value: null, label: "As written" },
+                      { value: "uppercase" as const, label: "UPPERCASE" },
+                    ] as const).map((opt) => {
+                      const active = exp.subtitleTextTransform === opt.value;
+                      return (
+                        <button
+                          key={opt.label}
+                          onClick={() => exp.setSubtitleTextTransform(opt.value)}
+                          style={{
+                            padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                            border: active
+                              ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                            background: active ? C.accentDim : "transparent",
+                            color: active ? C.accent : C.muted,
+                            cursor: "pointer",
+                          }}
+                        >{opt.label}</button>
+                      );
+                    })}
                   </div>
                 </div>
+
+                {/* Max words per line */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Words/line</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {([
+                      { value: null, label: "Auto" },
+                      { value: 2, label: "2" },
+                      { value: 3, label: "3" },
+                      { value: 5, label: "5" },
+                    ] as const).map((opt) => {
+                      const active = exp.subtitleMaxWordsPerLine === opt.value;
+                      return (
+                        <button
+                          key={opt.label}
+                          onClick={() => exp.setSubtitleMaxWordsPerLine(opt.value)}
+                          style={{
+                            padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                            border: active
+                              ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                            background: active ? C.accentDim : "transparent",
+                            color: active ? C.accent : C.muted,
+                            cursor: "pointer",
+                          }}
+                        >{opt.label}</button>
+                      );
+                    })}
+                  </div>
+                </div>
+                </>)}
               </div>
             )}
 
