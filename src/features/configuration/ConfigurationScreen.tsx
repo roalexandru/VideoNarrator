@@ -325,9 +325,10 @@ export function ConfigurationScreen() {
           <div>
             <div style={{ ...label, marginBottom: 2 }}>Strict mode</div>
             <p style={{ fontSize: 11, color: C.muted, lineHeight: 1.5, margin: 0 }}>
-              Re-check the draft against a handful of sampled frames and rewrite any segments whose
-              narration doesn't match what's on screen. Adds about 30 seconds and one extra API call
-              per iteration.
+              Re-check the draft against up to 10 sampled frames — each frame audits the segments
+              whose timestamps land near it — and rewrite any segment whose narration doesn't match
+              what's on screen. Adds up to 12 extra API calls (2 multimodal critiques + up to 5
+              rewrites each) and 30&nbsp;s–2&nbsp;min of wall time.
             </p>
           </div>
         </label>

@@ -781,6 +781,7 @@ pub async fn generate_narration(
             &frames,
             Some(strict_on_segment),
             Some(strict_on_progress),
+            Some(state.cancel_flag.clone()),
         )
         .await;
         // Critique rewrites can change segment text length, which makes the
