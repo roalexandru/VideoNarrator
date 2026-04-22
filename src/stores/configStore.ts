@@ -21,6 +21,11 @@ interface ConfigStore {
   model: ModelId;
   temperature: number;
   ttsProvider: TtsProvider;
+  /** Run an extra critique+refine pass after the initial narration. Catches
+   *  segments whose text doesn't match what's visible at that timestamp, at
+   *  the cost of one multimodal API call plus up to five refine calls per
+   *  iteration. Off by default. */
+  strictMode: boolean;
 
   setStyle: (style: NarrationStyleId) => void;
   toggleLanguage: (lang: LanguageCode) => void;
@@ -34,6 +39,7 @@ interface ConfigStore {
   setModel: (model: ModelId) => void;
   setTemperature: (temp: number) => void;
   setTtsProvider: (provider: TtsProvider) => void;
+  setStrictMode: (enabled: boolean) => void;
   reset: () => void;
 }
 
@@ -49,6 +55,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   model: "claude-sonnet-4-20250514",
   temperature: 0.7,
   ttsProvider: "elevenlabs",
+  strictMode: false,
 
   setStyle: (style) => set({ style }),
 
@@ -74,6 +81,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   setModel: (model) => set({ model }),
   setTemperature: (temp) => set({ temperature: temp }),
   setTtsProvider: (provider) => set({ ttsProvider: provider }),
+  setStrictMode: (enabled) => set({ strictMode: enabled }),
   reset: () =>
     set({
       style: "product_demo",
@@ -87,5 +95,6 @@ export const useConfigStore = create<ConfigStore>((set) => ({
       model: "claude-sonnet-4-20250514",
       temperature: 0.7,
       ttsProvider: "elevenlabs",
+      strictMode: false,
     }),
 }));
