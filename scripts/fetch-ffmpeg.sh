@@ -28,6 +28,12 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEST="$REPO_ROOT/src-tauri/binaries"
 mkdir -p "$DEST"
 
+# One tmpdir for the whole script so a Ctrl-C between targets still cleans up.
+# Replaces the earlier per-function RETURN trap — `EXIT` always fires, even on
+# signals. `trap ... EXIT` runs after the script body exits for any reason.
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
 # ── Pinned versions + checksums ────────────────────────────────────────────
 OSXEXPERTS_BASE="https://www.osxexperts.net"
 # arm64 — ffmpeg 8.1. SHA is of the extracted binary.
@@ -41,8 +47,12 @@ OSX_INTEL_FFMPEG_BIN_SHA="df3f1e3facdc1ae0ad0bd898cdfb072fbc9641bf47b11f17284452
 OSX_INTEL_FFPROBE_ZIP="ffprobe80intel.zip"
 OSX_INTEL_FFPROBE_BIN_SHA="5228e651e2bd67bb55819b27f6138351587b16d2b87446007bf35b7cf930d891"
 
-# Windows — BtbN release build (not nightly master) for reproducibility
-BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+# Windows — pinned to a specific BtbN dated release + SHA-256 so a moving
+# `latest` tag or a compromised host can't land a different binary in a
+# user's build. Bump this manually when updating ffmpeg; there's a sidecar
+# .sha256 file on every BtbN asset if you want to re-verify the pin.
+BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-22-13-15/ffmpeg-n8.1-10-g7f5c90f77e-win64-gpl-8.1.zip"
+BTBN_ZIP_SHA="4ab68a170151f6ce8cb6d48df23f6f297bdb88efb93fa43051199b1f96263b83"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 log() { printf '\e[1;36m[fetch-ffmpeg]\e[0m %s\n' "$*"; }
@@ -76,9 +86,8 @@ verify_binary() {
 
 # ── macOS ──────────────────────────────────────────────────────────────────
 fetch_macos_arm() {
-  local work
-  work=$(mktemp -d)
-  trap 'rm -rf "$work"' RETURN
+  local work="$WORK/macos-arm"
+  mkdir -p "$work"
 
   download "$OSXEXPERTS_BASE/$OSX_ARM_FFMPEG_ZIP"  "$work/ff.zip"
   download "$OSXEXPERTS_BASE/$OSX_ARM_FFPROBE_ZIP" "$work/fp.zip"
@@ -92,9 +101,8 @@ fetch_macos_arm() {
 }
 
 fetch_macos_intel() {
-  local work
-  work=$(mktemp -d)
-  trap 'rm -rf "$work"' RETURN
+  local work="$WORK/macos-intel"
+  mkdir -p "$work"
 
   download "$OSXEXPERTS_BASE/$OSX_INTEL_FFMPEG_ZIP"  "$work/ff.zip"
   download "$OSXEXPERTS_BASE/$OSX_INTEL_FFPROBE_ZIP" "$work/fp.zip"
@@ -109,14 +117,13 @@ fetch_macos_intel() {
 
 # ── Windows ────────────────────────────────────────────────────────────────
 fetch_windows() {
-  local work
-  work=$(mktemp -d)
-  trap 'rm -rf "$work"' RETURN
+  local work="$WORK/windows"
+  mkdir -p "$work"
 
-  log "GET $BTBN_ZIP_URL"
-  curl -fsSL -o "$work/win.zip" "$BTBN_ZIP_URL"
+  download "$BTBN_ZIP_URL" "$work/win.zip"
+  verify_binary "$work/win.zip" "$BTBN_ZIP_SHA"
 
-  # BtbN layout: ffmpeg-master-<date>-win64-gpl/bin/ffmpeg.exe
+  # BtbN layout: ffmpeg-<version>-win64-gpl-<branch>/bin/ffmpeg.exe
   (cd "$work" && unzip -o -q win.zip)
   local ff_src fp_src
   ff_src=$(find "$work" -name 'ffmpeg.exe'  -path '*/bin/*' | head -n 1)

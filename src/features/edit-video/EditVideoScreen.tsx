@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
@@ -316,22 +316,29 @@ export function EditVideoScreen() {
   // differently-zoomed). Seeking inside the window means the preview
   // matches what the compositor will composite the effect onto.
   //
-  // We skip the seek during playback (interrupting playback for a click on
-  // the timeline would be hostile) and for zoom-pan (it has its own region-
-  // editing mode where a stable preview matters more than backdrop accuracy).
+  // Depending on the whole `effects` array would re-fire this on every
+  // drag of an effect's x/y/radius — the user would scrub out of the
+  // window to fine-tune something else, touch a field, and get snapped
+  // back mid-edit. Instead we only care about the selected effect's
+  // type and time range; that's what changes "where this effect renders".
+  const selectedTimingInfo = useMemo(() => {
+    if (!selectedEffectId) return null;
+    const e = effects.find((x) => x.id === selectedEffectId);
+    if (!e) return null;
+    return { type: e.type, startTime: e.startTime, endTime: e.endTime };
+  }, [selectedEffectId, effects]);
   useEffect(() => {
-    if (!selectedEffectId || isPlaying) return;
-    const effect = effects.find((e) => e.id === selectedEffectId);
-    if (!effect || effect.type === 'zoom-pan') return;
+    if (!selectedTimingInfo || isPlaying) return;
+    if (selectedTimingInfo.type === 'zoom-pan') return;
     // Already inside window → leave the scrub position alone so the user
     // can fine-tune at their chosen frame.
-    if (outputTime >= effect.startTime && outputTime <= effect.endTime) return;
-    const mid = (effect.startTime + effect.endTime) / 2;
+    if (outputTime >= selectedTimingInfo.startTime && outputTime <= selectedTimingInfo.endTime) return;
+    const mid = (selectedTimingInfo.startTime + selectedTimingInfo.endTime) / 2;
     seekToOutput(mid);
     // outputTime intentionally not in deps — we only want to re-check on
-    // selection or effect-timing changes, not on every scrub tick.
+    // selection or window-timing changes, not on every scrub tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEffectId, effects, isPlaying, seekToOutput]);
+  }, [selectedTimingInfo, isPlaying, seekToOutput]);
 
   // During playback: handle clip transitions (skip gaps, change speed at boundaries, freeze clips)
   // Uses isUserPlayingRef + outputTimeRef to avoid stale closures.

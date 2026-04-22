@@ -86,17 +86,17 @@ function RegionRect({
         // and the export matches the editor rectangle exactly — no more
         // preview-vs-export mismatch).
         //
-        // We derive a signed "size delta" from whichever cursor axis moved
-        // the most in the handle's diagonal direction — whichever way the
-        // user drags faster wins. Then both dimensions get that delta, and
-        // we re-anchor the opposite corner so the handle under the cursor
-        // stays under the cursor.
+        // We derive a signed "size delta" by averaging the two cursor
+        // components after flipping signs so that "outward" on each handle
+        // is positive. Averaging (rather than max) means a straight-down
+        // drag on the NW handle still shrinks the rect — with max()
+        // that drag yielded 0 on one axis and max(0, -negative)=0 overall,
+        // so the user felt like the handle was dead. Averaging is half-
+        // speed but responsive on every drag direction.
         const h = dragRef.current.handle;
-        const diag =
-          h === 'se' ? Math.max(dx, dy)      :
-          h === 'nw' ? Math.max(-dx, -dy)    :
-          h === 'ne' ? Math.max(dx, -dy)     :
-          /* 'sw' */   Math.max(-dx, dy);
+        const signedX = h === 'se' || h === 'ne' ?  dx : -dx;
+        const signedY = h === 'se' || h === 'sw' ?  dy : -dy;
+        const diag = (signedX + signedY) / 2;
         // Use the larger of the pre-drag width/height as the anchor size —
         // matters when migrating old non-square regions, where resizing one
         // corner shouldn't silently shrink the region.
