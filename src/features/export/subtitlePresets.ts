@@ -1,11 +1,16 @@
 export type SubtitlePreset = "shorts" | "documentary" | "clean" | "custom";
 
+/**
+ * Fields a named preset controls. Deliberately excludes `subtitlePosition` —
+ * top/bottom placement is a layout concern orthogonal to the visual style, so
+ * users can combine any preset with either position without being forced into
+ * Custom just to flip placement.
+ */
 export interface SubtitleStyleFields {
   subtitleFontSize: number;
   subtitleColor: string;
   subtitleOutlineColor: string;
   subtitleOutline: number;
-  subtitlePosition: "bottom" | "top";
   subtitleTextTransform: "uppercase" | null;
   subtitleMaxWordsPerLine: number | null;
 }
@@ -18,7 +23,6 @@ export const SUBTITLE_PRESETS: Record<NamedPreset, SubtitleStyleFields> = {
     subtitleColor: "#ffffff",
     subtitleOutlineColor: "#000000",
     subtitleOutline: 4,
-    subtitlePosition: "bottom",
     subtitleTextTransform: "uppercase",
     subtitleMaxWordsPerLine: 2,
   },
@@ -27,7 +31,6 @@ export const SUBTITLE_PRESETS: Record<NamedPreset, SubtitleStyleFields> = {
     subtitleColor: "#ffffff",
     subtitleOutlineColor: "#000000",
     subtitleOutline: 2,
-    subtitlePosition: "bottom",
     subtitleTextTransform: null,
     subtitleMaxWordsPerLine: null,
   },
@@ -36,7 +39,6 @@ export const SUBTITLE_PRESETS: Record<NamedPreset, SubtitleStyleFields> = {
     subtitleColor: "#ffffff",
     subtitleOutlineColor: "#000000",
     subtitleOutline: 1,
-    subtitlePosition: "bottom",
     subtitleTextTransform: null,
     subtitleMaxWordsPerLine: null,
   },

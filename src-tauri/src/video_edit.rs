@@ -943,20 +943,35 @@ pub(crate) fn preprocess_srt_for_style(srt: &str, style: &SubtitleStyle) -> Stri
             out_blocks.push(trimmed.to_string());
             continue;
         }
-        let text_joined = lines[2..].join(" ");
-        let transformed = match style.text_transform.as_deref() {
-            Some("uppercase") => text_joined.to_uppercase(),
-            _ => text_joined,
+        // Apply the text transform, then handle wrapping. When
+        // `max_words_per_line` is set we re-flow the whole cue into fixed-width
+        // chunks (original line breaks don't matter — they're overridden by
+        // the chunk boundaries). When it's unset we preserve the cue's
+        // original line breaks so a transform-only style doesn't silently
+        // collapse intentional multi-line cues into a single line.
+        let apply_transform = |s: &str| -> String {
+            match style.text_transform.as_deref() {
+                Some("uppercase") => s.to_uppercase(),
+                _ => s.to_string(),
+            }
         };
         let wrapped = match style.max_words_per_line {
-            Some(n) if n >= 1 => transformed
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .chunks(n as usize)
-                .map(|chunk| chunk.join(" "))
+            Some(n) if n >= 1 => {
+                let text_joined = lines[2..].join(" ");
+                let transformed = apply_transform(&text_joined);
+                transformed
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .chunks(n as usize)
+                    .map(|chunk| chunk.join(" "))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            _ => lines[2..]
+                .iter()
+                .map(|l| apply_transform(l))
                 .collect::<Vec<_>>()
                 .join("\n"),
-            _ => transformed,
         };
         let mut rebuilt = String::new();
         rebuilt.push_str(lines[0]);
@@ -2692,6 +2707,22 @@ mod tests {
         assert!(out.contains("HELLO WORLD"));
         assert!(out.contains("SECOND CUE"));
         assert!(!out.contains("Hello world"));
+    }
+
+    #[test]
+    fn preprocess_srt_uppercase_preserves_multiline_cues() {
+        // Regression: `text_transform` alone used to join text lines with a
+        // space before transforming, silently collapsing intentional line
+        // breaks. A transform-only style should leave the cue's line
+        // structure alone.
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nWelcome to\nmy channel\n";
+        let style = SubtitleStyle {
+            text_transform: Some("uppercase".into()),
+            ..Default::default()
+        };
+        let out = preprocess_srt_for_style(srt, &style);
+        assert!(out.contains("WELCOME TO\nMY CHANNEL"), "got:\n{out}");
+        assert!(!out.contains("WELCOME TO MY CHANNEL"), "got:\n{out}");
     }
 
     #[test]

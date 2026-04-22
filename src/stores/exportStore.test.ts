@@ -129,4 +129,13 @@ describe("exportStore", () => {
     useExportStore.getState().setSubtitleMaxWordsPerLine(3);
     expect(useExportStore.getState().subtitlePreset).toBe("custom");
   });
+
+  it("does NOT snap preset to custom when only position changes", () => {
+    // Position is orthogonal to a preset's visual style — users should be
+    // able to flip top/bottom without losing their preset selection.
+    useExportStore.getState().setSubtitlePreset("shorts");
+    useExportStore.getState().setSubtitlePosition("top");
+    expect(useExportStore.getState().subtitlePreset).toBe("shorts");
+    expect(useExportStore.getState().subtitlePosition).toBe("top");
+  });
 });

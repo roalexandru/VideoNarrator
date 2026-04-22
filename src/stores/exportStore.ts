@@ -111,7 +111,9 @@ export const useExportStore = create<ExportStore>((set) => ({
   setSubtitleColor: (color) => set({ subtitleColor: color, subtitlePreset: "custom" }),
   setSubtitleOutlineColor: (color) => set({ subtitleOutlineColor: color, subtitlePreset: "custom" }),
   setSubtitleOutline: (outline) => set({ subtitleOutline: outline, subtitlePreset: "custom" }),
-  setSubtitlePosition: (position) => set({ subtitlePosition: position, subtitlePreset: "custom" }),
+  // Position is orthogonal to a preset's visual style — flipping top/bottom
+  // shouldn't force the user into Custom.
+  setSubtitlePosition: (position) => set({ subtitlePosition: position }),
   setSubtitleTextTransform: (t) => set({ subtitleTextTransform: t, subtitlePreset: "custom" }),
   setSubtitleMaxWordsPerLine: (n) => set({ subtitleMaxWordsPerLine: n, subtitlePreset: "custom" }),
   setDuckDb: (db) => set({ duckDb: Math.max(-20, Math.min(0, db)) }),

@@ -600,6 +600,30 @@ export function ExportScreen() {
                     {PRESET_DESCRIPTIONS[exp.subtitlePreset]}
                   </div>
                 )}
+
+                {/* Position toggle — always visible. Placement is orthogonal
+                    to a preset's visual style, so users can pair Shorts with
+                    a top-of-screen layout without being forced into Custom. */}
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Position</span>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    {(["bottom", "top"] as const).map((pos) => (
+                      <button
+                        key={pos}
+                        onClick={() => exp.setSubtitlePosition(pos)}
+                        style={{
+                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
+                          border: exp.subtitlePosition === pos
+                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
+                          background: exp.subtitlePosition === pos ? C.accentDim : "transparent",
+                          color: exp.subtitlePosition === pos ? C.accent : C.muted,
+                          cursor: "pointer",
+                        }}
+                      >{pos.charAt(0).toUpperCase() + pos.slice(1)}</button>
+                    ))}
+                  </div>
+                </div>
+
                 {exp.subtitlePreset === "custom" && (<>
                 {/* Font size slider */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -667,27 +691,6 @@ export function ExportScreen() {
                     style={{ flex: 1, accentColor: C.accent }}
                   />
                   <span style={{ fontSize: 11, color: C.dim, minWidth: 16, textAlign: "right" }}>{exp.subtitleOutline}</span>
-                </div>
-
-                {/* Position toggle */}
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontSize: 11, color: C.muted, fontWeight: 600, minWidth: 64 }}>Position</span>
-                  <div style={{ display: "flex", gap: 4 }}>
-                    {(["bottom", "top"] as const).map((pos) => (
-                      <button
-                        key={pos}
-                        onClick={() => exp.setSubtitlePosition(pos)}
-                        style={{
-                          padding: "3px 12px", borderRadius: 6, fontSize: 11, fontFamily: "inherit", fontWeight: 600,
-                          border: exp.subtitlePosition === pos
-                            ? "1px solid rgba(99,102,241,0.4)" : `1px solid ${C.border}`,
-                          background: exp.subtitlePosition === pos ? C.accentDim : "transparent",
-                          color: exp.subtitlePosition === pos ? C.accent : C.muted,
-                          cursor: "pointer",
-                        }}
-                      >{pos.charAt(0).toUpperCase() + pos.slice(1)}</button>
-                    ))}
-                  </div>
                 </div>
 
                 {/* Text transform toggle */}
