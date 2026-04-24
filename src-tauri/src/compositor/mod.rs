@@ -164,11 +164,13 @@ fn apply_spotlight_safe(canvas: &mut Pixmap, sp: &SpotlightData, alpha: f32) {
 /// Per-clip output duration on the timeline (after speed compression /
 /// expansion, freeze override, etc).
 fn clip_output_duration(clip: &EditClip) -> f64 {
-    if clip.clip_type.as_deref() == Some("freeze") {
-        clip.freeze_duration.unwrap_or(3.0).max(0.001)
-    } else {
-        let src = (clip.end_seconds - clip.start_seconds).max(0.001);
-        src / clip.speed.max(0.01)
+    match clip.clip_type.as_deref() {
+        Some("freeze") => clip.freeze_duration.unwrap_or(3.0).max(0.001),
+        Some("image") => clip.image_duration.unwrap_or(3.0).max(0.001),
+        _ => {
+            let src = (clip.end_seconds - clip.start_seconds).max(0.001);
+            src / clip.speed.max(0.01)
+        }
     }
 }
 
@@ -269,12 +271,53 @@ pub async fn run_pipeline(
         };
         on_progress(clip_start_pct, Some(clip_label));
 
-        if clip.clip_type.as_deref() == Some("freeze") {
+        // Per-clip source path. Clips appended via "+" carry their own
+        // `input_path`; the primary clip leaves it None and inherits the
+        // pipeline's default `input_path`.
+        let clip_input: &Path = clip
+            .input_path
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(input_path);
+
+        if clip.clip_type.as_deref() == Some("image") {
+            // Image clip: decode the still once and repeat for the image's
+            // output duration. The image path lives on the clip itself;
+            // `start_seconds` is ignored (no time axis).
+            let still = decoder::decode_single_frame_rgba(clip_input, 0.0, width, height).await?;
+            last_decoded.copy_from_slice(&still);
+            for f in 0..out_frames {
+                source_pix.data_mut().copy_from_slice(&last_decoded);
+                canvas.data_mut().copy_from_slice(source_pix.data());
+
+                if let Some(zp) = &clip.zoom_pan {
+                    let p = (f as f32) / (out_frames as f32).max(1.0);
+                    effects::zoom_pan::apply_zoom_pan(&mut canvas, &source_pix, zp, p);
+                    source_pix.data_mut().copy_from_slice(canvas.data());
+                }
+
+                let global_t = clip_start as f32 + (f as f32 / fps as f32);
+                compose_frame(
+                    &mut canvas,
+                    &source_pix,
+                    global_t,
+                    &supported_effects,
+                    &text_cache,
+                );
+
+                encoder.write_frame(canvas.data()).await?;
+                total_emitted += 1;
+                if total_emitted.is_multiple_of(8) {
+                    let pct = (total_emitted as f64 / total_frames as f64).clamp(0.0, 1.0) * 100.0;
+                    on_progress(pct, None);
+                }
+            }
+        } else if clip.clip_type.as_deref() == Some("freeze") {
             // One source frame, repeated `out_frames` times. Per-clip
             // zoom-pan and overlay effects still animate over the duration.
             let frame_time = clip.freeze_source_time.unwrap_or(clip.start_seconds);
             let still =
-                decoder::decode_single_frame_rgba(input_path, frame_time, width, height).await?;
+                decoder::decode_single_frame_rgba(clip_input, frame_time, width, height).await?;
             last_decoded.copy_from_slice(&still);
             for f in 0..out_frames {
                 source_pix.data_mut().copy_from_slice(&last_decoded);
@@ -325,7 +368,7 @@ pub async fn run_pipeline(
             let speed = clip.speed.max(0.01);
             let decode_fps = (fps / speed).clamp(1.0, MAX_OUTPUT_FPS * 4.0);
             let (mut rx, decoder_handle) = decoder::decode_video_range(
-                input_path,
+                clip_input,
                 clip.start_seconds,
                 clip.end_seconds,
                 width,

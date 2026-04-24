@@ -46,6 +46,12 @@ export const checkFileReadable = (path: string) =>
 export const fileExists = (path: string) =>
   invoke<boolean>("file_exists", { path });
 
+/** Fast content-aware fingerprint for a media file (blake3 over size +
+ *  head + tail). Used by the media-pool dedupe to recognise that two paths
+ *  point at the same underlying file. */
+export const computeMediaHash = (path: string) =>
+  invoke<string>("compute_media_hash", { path });
+
 // Documents
 export const processDocuments = (paths: string[]) =>
   invoke<{ name: string; content: string; token_estimate: number }[]>(
@@ -166,8 +172,19 @@ export interface LoadedProject {
     edit_clips?: {
       source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null;
       clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
+      /** Points into config.media_pool. Older projects omit this — callers resolve to the primary video. */
+      media_ref_id?: string;
+      /** For image clips: how long the still shows on the timeline. */
+      image_duration?: number;
       zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
     }[];
+    /** Imported source files (videos + images added via "+"). Keyed by MediaRef.id.
+     *  The primary video lives at key "primary" but we skip saving it here —
+     *  it's reconstructed from video_metadata. */
+    media_pool?: Record<string, {
+      hash: string; kind: "video" | "image"; path: string;
+      duration: number; width: number; height: number; fps?: number;
+    }>;
     timeline_effects?: unknown[];
     video_metadata?: VideoMetadata;
     context_documents?: { id: string; path: string; name: string; size: number; type: string; tokenCount?: number }[];
@@ -204,6 +221,11 @@ export interface VideoEditPlan {
   clips: {
     start_seconds: number; end_seconds: number; speed: number; fps_override: number | null;
     clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
+    /** Output-timeline duration for image clips. */
+    image_duration?: number;
+    /** Per-clip source file for multi-source projects. When absent the
+     *  Rust render falls back to the `inputPath` arg of applyVideoEdits. */
+    input_path?: string;
     zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null;
   }[];
   // Rust overlay effect structs use #[serde(rename_all = "camelCase")] so

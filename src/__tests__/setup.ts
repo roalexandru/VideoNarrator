@@ -100,6 +100,14 @@ export function setupDefaultMocks() {
           file_size: 50_000_000,
         };
 
+      case "compute_media_hash": {
+        // Deterministic fake hash keyed by path — tests that want to
+        // exercise dedupe can pass the same path twice and rely on
+        // matching hashes. Doesn't have to be a real blake3 hash.
+        const p = (payload as Record<string, unknown>)?.path ?? "";
+        return `testhash:${String(p)}`;
+      }
+
       case "list_projects":
         return [
           {
