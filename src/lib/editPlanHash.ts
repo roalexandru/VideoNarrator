@@ -26,6 +26,9 @@ function canonicalizeClip(c: EditClip): string {
   // must be stable; 4 decimals is more than enough since the UI rounds at
   // centisecond precision.
   const parts: string[] = [
+    // Which source file this clip points at. Swapping the media under a
+    // clip — without changing trim — must invalidate the cache.
+    `m=${c.mediaRefId ?? "_"}`,
     `s=${c.sourceStart.toFixed(4)}`,
     `e=${c.sourceEnd.toFixed(4)}`,
     `v=${c.speed.toFixed(3)}`,
@@ -34,6 +37,7 @@ function canonicalizeClip(c: EditClip): string {
     `t=${c.type ?? "normal"}`,
     `fst=${c.freezeSourceTime ?? "_"}`,
     `fd=${c.freezeDuration ?? "_"}`,
+    `id=${c.imageDuration ?? "_"}`,
   ];
   if (c.zoomPan) {
     const zp = c.zoomPan;

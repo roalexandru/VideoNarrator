@@ -293,7 +293,15 @@ export function ExportScreen() {
           const projectId = useProjectStore.getState().projectId;
           const srcExt = originalVideoPath.split(".").pop() || "mp4";
           const editedPath = `${home}/.narrator/projects/${projectId}/edited.${srcExt}`;
-          const plan = buildEditPlan(editState.clips, editState.effects);
+          const plan = buildEditPlan(
+            editState.clips,
+            editState.effects,
+            (c) => {
+              const m = editState.resolveClipMedia(c);
+              return m ? { path: m.path, id: m.id } : null;
+            },
+            editState.primaryMediaRefId,
+          );
           const renderCh = new Channel<ProgressEvent>();
           renderCh.onmessage = (e: ProgressEvent) => {
             if (e.kind === "progress") setVideoProgress(e.percent * 0.25); // 0-25%

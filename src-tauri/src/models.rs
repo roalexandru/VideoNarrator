@@ -249,8 +249,31 @@ pub struct EditClip {
     pub freeze_source_time: Option<f64>,
     #[serde(default)]
     pub freeze_duration: Option<f64>,
+    /// Which MediaRef this clip sources from. `None` on legacy projects and
+    /// on clips that point at the project's primary video; frontend resolves
+    /// absent → primary.
+    #[serde(default)]
+    pub media_ref_id: Option<String>,
+    /// Output-timeline duration for `clip_type == "image"` clips.
+    #[serde(default)]
+    pub image_duration: Option<f64>,
     #[serde(default)]
     pub zoom_pan: Option<ZoomPanEffect>,
+}
+
+/// Extra source file added via the timeline "+" button (mixes in with the
+/// project's primary video). Keyed by id inside `ProjectConfig.media_pool`;
+/// each clip references one of these via `EditClip.media_ref_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMediaRef {
+    pub hash: String,
+    pub kind: String,
+    pub path: String,
+    pub duration: f64,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub fps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -271,6 +294,11 @@ pub struct ProjectConfig {
     pub updated_at: String,
     #[serde(default)]
     pub edit_clips: Option<Vec<EditClip>>,
+    /// Additional source files imported via the timeline "+" button. Keyed
+    /// by MediaRef id (e.g. a UUID). The primary video is NOT stored here —
+    /// it's derived from `video_metadata`. Absent on legacy projects.
+    #[serde(default)]
+    pub media_pool: Option<std::collections::HashMap<String, ProjectMediaRef>>,
     #[serde(default)]
     pub timeline_effects: Option<serde_json::Value>,
     #[serde(default)]

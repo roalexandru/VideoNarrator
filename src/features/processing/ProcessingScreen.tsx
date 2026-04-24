@@ -142,7 +142,15 @@ export function ProcessingScreen() {
         const homeDir = await getHomeDir();
         const ext = videoPath.split(".").pop() || "mp4";
         const editedPath = `${homeDir}/.narrator/projects/${project.projectId}/edited.${ext}`;
-        const editPlan = buildEditPlan(editSnapshot.clips, editSnapshot.effects);
+        const editPlan = buildEditPlan(
+          editSnapshot.clips,
+          editSnapshot.effects,
+          (c) => {
+            const m = editSnapshot.resolveClipMedia(c);
+            return m ? { path: m.path, id: m.id } : null;
+          },
+          editSnapshot.primaryMediaRefId,
+        );
         const editCh = new Channel<ProgressEvent>();
         editCh.onmessage = (e: ProgressEvent) => {
           if (e.kind === "phase_change") proc.setPhase(e.phase);

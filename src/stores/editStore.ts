@@ -46,19 +46,71 @@ export const EFFECT_META: Record<EffectType, { label: string; color: string; ico
   'fade': { label: 'Fade', color: '#64748b', icon: 'fade' },
 };
 
+// ── Media Pool (OpenTimelineIO-style media_reference) ──
+//
+// Every clip points at a MediaRef via `mediaRefId`. The pool holds one entry
+// per imported source file; multiple clips can reuse the same MediaRef (e.g.
+// speeding up sections of the same video). Keyed by content hash — lets us
+// dedupe re-imports and survive file renames when we add relink later.
+// See libopenshot's Clip(ReaderBase*) and omniclip's file_hash pattern.
+
+export type MediaKind = 'video' | 'image';
+
+export interface MediaRef {
+  id: string;                    // stable id used by EditClip.mediaRefId
+  hash: string;                  // content hash; equals id for the synthesized primary
+  kind: MediaKind;
+  path: string;                  // filesystem path — may be "" for the legacy primary until setPrimaryMediaRef resolves it
+  duration: number;              // natural duration (videos); for images we still store a sensible default for ffmpeg
+  width: number;
+  height: number;
+  fps?: number;                  // video only
+}
+
+/** Stable id for the project's primary (original) video. Legacy projects
+ *  don't carry a MediaRef on every clip, so we treat absent mediaRefId as
+ *  pointing at this synthetic entry, which is populated as soon as we know
+ *  the primary video's real path/dimensions. */
+export const PRIMARY_MEDIA_REF_ID = 'primary';
+
 // ── Clip Types ──
 
 export interface EditClip {
   id: string;
+  /** Points into EditStore.mediaPool. Nullable for backward compat with
+   *  projects saved before the multi-source rewrite — resolved to the
+   *  primary MediaRef at read time. */
+  mediaRefId?: string | null;
   sourceStart: number;
   sourceEnd: number;
   speed: number;
   skipFrames: boolean;
   fpsOverride: number | null;
-  type?: 'normal' | 'freeze';
+  type?: 'normal' | 'freeze' | 'image';
   freezeSourceTime?: number;
   freezeDuration?: number;
+  /** Image clips: how long the still shows on the output timeline. */
+  imageDuration?: number;
   zoomPan?: ZoomPanEffect | null;  // kept for backward compat with old saved projects
+}
+
+/** Per-clip resolution result. The preview engine uses this to know which
+ *  media element to show and at what time, independently per clip — so two
+ *  clips with overlapping source ranges (e.g. the same file used twice)
+ *  never collide in the reverse mapping (the bug the old onTime handler had). */
+export interface ClipResolution {
+  clipIndex: number;
+  clip: EditClip;
+  mediaRef: MediaRef | null;
+  /** Seconds from the start of this clip's output window. 0 at the clip's left edge. */
+  localOutputTime: number;
+  /** The timestamp inside the source file to seek to. For freeze clips it's
+   *  the frozen moment; for image clips it's 0 (no time coordinate). */
+  sourceTime: number;
+  /** Absolute output-timeline seconds where this clip begins. */
+  clipOutputStart: number;
+  /** Output-timeline duration of this clip. */
+  clipOutputDuration: number;
 }
 
 // Snapshot for undo/redo — only the data that changes
@@ -74,10 +126,15 @@ const MAX_UNDO = 30;
 /** Get the output duration of a single clip */
 export function clipOutputDuration(c: EditClip): number {
   if (c.type === 'freeze') return c.freezeDuration ?? 3.0;
+  if (c.type === 'image') return c.imageDuration ?? 3.0;
   return (c.sourceEnd - c.sourceStart) / c.speed;
 }
 
 interface EditStore {
+  /** Pool of source media keyed by MediaRef.id. Every clip resolves to one
+   *  of these via its mediaRefId (nullable → primary). */
+  mediaPool: Record<string, MediaRef>;
+  primaryMediaRefId: string | null;
   clips: EditClip[];
   effects: TimelineEffect[];
   selectedClipIndex: number | null;
@@ -108,14 +165,32 @@ interface EditStore {
   setClipSkipFrames: (index: number, skip: boolean) => void;
   setClipFps: (index: number, fps: number | null) => void;
   moveClip: (fromIndex: number, toIndex: number) => void;
-  addClip: (sourceFile: string, sourceStart: number, sourceEnd: number) => void;
+  /** Append a video clip. `mediaRefId` must already be registered in the pool.
+   *  For legacy-style calls that pass a raw path, register via registerMedia first. */
+  addClip: (mediaRefId: string, sourceStart: number, sourceEnd: number) => void;
+  /** Append a still-image clip. `mediaRefId` must already be registered and of kind 'image'. */
+  addImageClip: (mediaRefId: string, duration?: number) => void;
+  setImageDuration: (index: number, duration: number) => void;
   selectClip: (index: number | null) => void;
   setEditedVideoPath: (path: string | null) => void;
   setEditedVideoPlanHash: (hash: string | null) => void;
   getOutputDuration: () => number;
   getClipOutputStart: (index: number) => number;
+  /** Legacy accessor — returns the source time only. Prefer resolveAtOutputTime. */
   outputTimeToSource: (outputTime: number) => number;
+  /** Per-clip resolver for the preview engine. Returns which clip is active
+   *  at `outputTime`, its MediaRef, and the in-source time to seek to. */
+  resolveAtOutputTime: (outputTime: number) => ClipResolution | null;
   reset: () => void;
+
+  // ── Media Pool ──
+  /** Register a MediaRef (or update the existing entry by id). Returns the id. */
+  registerMedia: (ref: MediaRef) => string;
+  /** Convenience: upsert-and-set the primary MediaRef (called from the setVideoFile flow). */
+  setPrimaryMediaRef: (ref: MediaRef) => void;
+  getMediaRef: (id: string | null | undefined) => MediaRef | null;
+  /** Resolve the MediaRef for a clip, honouring legacy `mediaRefId === null` → primary. */
+  resolveClipMedia: (clip: EditClip) => MediaRef | null;
 
   // Freeze frame
   insertFreezeFrame: (outputTime: number, duration?: number) => void;
@@ -160,6 +235,8 @@ function snapshotState(state: EditStore): ClipSnapshot {
 }
 
 export const useEditStore = create<EditStore>((set, get) => ({
+  mediaPool: {},
+  primaryMediaRefId: null,
   clips: [],
   effects: [],
   selectedClipIndex: null,
@@ -172,6 +249,35 @@ export const useEditStore = create<EditStore>((set, get) => ({
   _preSpeedSnapshot: null,
   _preZoomPanSnapshot: null,
   _preEffectSnapshot: null,
+
+  // ── Media Pool ──
+
+  registerMedia: (ref) => {
+    set((state) => ({ mediaPool: { ...state.mediaPool, [ref.id]: ref } }));
+    return ref.id;
+  },
+
+  setPrimaryMediaRef: (ref) =>
+    set((state) => {
+      // Always normalise the primary to PRIMARY_MEDIA_REF_ID so legacy clips
+      // (mediaRefId=null) resolve correctly without a follow-up migration.
+      const primary: MediaRef = { ...ref, id: PRIMARY_MEDIA_REF_ID };
+      return {
+        mediaPool: { ...state.mediaPool, [PRIMARY_MEDIA_REF_ID]: primary },
+        primaryMediaRefId: PRIMARY_MEDIA_REF_ID,
+      };
+    }),
+
+  getMediaRef: (id) => {
+    if (!id) return null;
+    return get().mediaPool[id] ?? null;
+  },
+
+  resolveClipMedia: (clip) => {
+    const state = get();
+    const id = clip.mediaRefId ?? state.primaryMediaRefId;
+    return id ? state.mediaPool[id] ?? null : null;
+  },
 
   canUndo: () => get().undoStack.length > 0,
   canRedo: () => get().redoStack.length > 0,
@@ -195,16 +301,44 @@ export const useEditStore = create<EditStore>((set, get) => ({
     }),
 
   initFromVideo: (duration) =>
-    set({
-      clips: [{ id: crypto.randomUUID(), sourceStart: 0, sourceEnd: duration, speed: 1.0, skipFrames: false, fpsOverride: null }],
-      effects: [],
-      selectedClipIndex: 0,
-      selectedEffectId: null,
-      editedVideoPath: null,
-      editedVideoPlanHash: null,
-      sourceDuration: duration,
-      undoStack: [],
-      redoStack: [],
+    set((state) => {
+      // Preserve any primary MediaRef that was registered via setPrimaryMediaRef
+      // (called from setVideoFile) — we only synthesise a placeholder if nothing
+      // is there yet, so tests calling `initFromVideo(120)` still work without
+      // a real file.
+      const existingPrimary = state.mediaPool[PRIMARY_MEDIA_REF_ID];
+      const primary: MediaRef = existingPrimary
+        ? { ...existingPrimary, duration }
+        : {
+            id: PRIMARY_MEDIA_REF_ID,
+            hash: PRIMARY_MEDIA_REF_ID,
+            kind: 'video',
+            path: '',
+            duration,
+            width: 0,
+            height: 0,
+          };
+      return {
+        mediaPool: { ...state.mediaPool, [PRIMARY_MEDIA_REF_ID]: primary },
+        primaryMediaRefId: PRIMARY_MEDIA_REF_ID,
+        clips: [{
+          id: crypto.randomUUID(),
+          mediaRefId: PRIMARY_MEDIA_REF_ID,
+          sourceStart: 0,
+          sourceEnd: duration,
+          speed: 1.0,
+          skipFrames: false,
+          fpsOverride: null,
+        }],
+        effects: [],
+        selectedClipIndex: 0,
+        selectedEffectId: null,
+        editedVideoPath: null,
+        editedVideoPlanHash: null,
+        sourceDuration: duration,
+        undoStack: [],
+        redoStack: [],
+      };
     }),
 
   splitAt: (outputTime) =>
@@ -295,14 +429,58 @@ export const useEditStore = create<EditStore>((set, get) => ({
       return { ...undo, clips, selectedClipIndex: toIndex };
     }),
 
-  addClip: (_sourceFile, sourceStart, sourceEnd) =>
+  addClip: (mediaRefId, sourceStart, sourceEnd) =>
     set((state) => {
       const undo = pushUndo(state);
       return {
         ...undo,
-        clips: [...state.clips, { id: crypto.randomUUID(), sourceStart, sourceEnd, speed: 1.0, skipFrames: false, fpsOverride: null }],
+        clips: [
+          ...state.clips,
+          {
+            id: crypto.randomUUID(),
+            mediaRefId,
+            sourceStart,
+            sourceEnd,
+            speed: 1.0,
+            skipFrames: false,
+            fpsOverride: null,
+          },
+        ],
         selectedClipIndex: state.clips.length,
       };
+    }),
+
+  addImageClip: (mediaRefId, duration = 3.0) =>
+    set((state) => {
+      const undo = pushUndo(state);
+      return {
+        ...undo,
+        clips: [
+          ...state.clips,
+          {
+            id: crypto.randomUUID(),
+            mediaRefId,
+            sourceStart: 0,
+            sourceEnd: 0,
+            speed: 1.0,
+            skipFrames: false,
+            fpsOverride: null,
+            type: 'image',
+            imageDuration: Math.max(0.1, duration),
+          },
+        ],
+        selectedClipIndex: state.clips.length,
+      };
+    }),
+
+  setImageDuration: (index, duration) =>
+    set((state) => {
+      const clip = state.clips[index];
+      if (clip?.type !== 'image') return state;
+      const undo = pushUndo(state);
+      const clips = [...state.clips];
+      clips[index] = { ...clips[index], imageDuration: Math.max(0.1, duration) };
+      return { ...undo, clips };
     }),
 
   selectClip: (index) => set({ selectedClipIndex: index, selectedEffectId: null }),
@@ -320,18 +498,54 @@ export const useEditStore = create<EditStore>((set, get) => ({
     return start;
   },
 
-  outputTimeToSource: (outputTime) => {
-    const clips = get().clips;
+  resolveAtOutputTime: (outputTime) => {
+    const state = get();
+    const clips = state.clips;
+    if (clips.length === 0) return null;
+    const total = clips.reduce((s, c) => s + clipOutputDuration(c), 0);
+    // Clamp first so the last clip is reachable even when the caller passes
+    // a slightly-past-end outputTime (rAF drift, float accumulation).
+    const t = Math.max(0, Math.min(total, outputTime));
     let cumulative = 0;
-    for (const clip of clips) {
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
       const dur = clipOutputDuration(clip);
-      if (outputTime <= cumulative + dur) {
-        if (clip.type === 'freeze') return clip.freezeSourceTime ?? clip.sourceStart;
-        return clip.sourceStart + (outputTime - cumulative) * clip.speed;
+      const end = cumulative + dur;
+      // Use `<` for the upper bound except on the last clip, where we include
+      // the endpoint so the playhead at exactly `total` still resolves.
+      const inside = i === clips.length - 1 ? t <= end : t < end;
+      if (inside) {
+        const localOutputTime = Math.max(0, Math.min(dur, t - cumulative));
+        let sourceTime: number;
+        if (clip.type === 'freeze') {
+          sourceTime = clip.freezeSourceTime ?? clip.sourceStart;
+        } else if (clip.type === 'image') {
+          sourceTime = 0;
+        } else {
+          // Per-clip mapping — scoped to this clip's own source range, so
+          // overlapping ranges from different MediaRefs never collide.
+          sourceTime = clip.sourceStart + localOutputTime * clip.speed;
+        }
+        const refId = clip.mediaRefId ?? state.primaryMediaRefId;
+        const mediaRef = refId ? state.mediaPool[refId] ?? null : null;
+        return {
+          clipIndex: i,
+          clip,
+          mediaRef,
+          localOutputTime,
+          sourceTime,
+          clipOutputStart: cumulative,
+          clipOutputDuration: dur,
+        };
       }
-      cumulative += dur;
+      cumulative = end;
     }
-    return clips.length > 0 ? clips[clips.length - 1].sourceEnd : 0;
+    return null;
+  },
+
+  outputTimeToSource: (outputTime) => {
+    const r = get().resolveAtOutputTime(outputTime);
+    return r ? r.sourceTime : 0;
   },
 
   // ── Freeze Frame ──
@@ -350,6 +564,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
 
           const freezeClip: EditClip = {
             id: crypto.randomUUID(),
+            mediaRefId: clip.mediaRefId,
             sourceStart: sourceTime,
             sourceEnd: sourceTime,
             speed: 1.0,
@@ -383,6 +598,7 @@ export const useEditStore = create<EditStore>((set, get) => ({
         const sourceTime = lastClip.type === 'freeze' ? (lastClip.freezeSourceTime ?? lastClip.sourceEnd) : lastClip.sourceEnd;
         const freezeClip: EditClip = {
           id: crypto.randomUUID(),
+          mediaRefId: lastClip.mediaRefId,
           sourceStart: sourceTime,
           sourceEnd: sourceTime,
           speed: 1.0,
@@ -510,5 +726,5 @@ export const useEditStore = create<EditStore>((set, get) => ({
   // Half-open interval [start, end) — avoids double-triggering at seams between adjacent effects
   getEffectsAtTime: (outputTime) => get().effects.filter((e) => outputTime >= e.startTime && outputTime < e.endTime),
 
-  reset: () => set({ clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, editedVideoPlanHash: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
+  reset: () => set({ mediaPool: {}, primaryMediaRefId: null, clips: [], effects: [], selectedClipIndex: null, selectedEffectId: null, editedVideoPath: null, editedVideoPlanHash: null, sourceDuration: 0, undoStack: [], redoStack: [], _preSpeedSnapshot: null, _preZoomPanSnapshot: null, _preEffectSnapshot: null }),
 }));

@@ -56,6 +56,10 @@ const sections = [
         a: "Hold a single still frame for a fixed duration — handy for emphasizing a state before the video continues. Pick a source time and a duration in the clip panel; freeze clips add to output length without consuming source audio.",
       },
       {
+        q: "Adding more clips — videos or images",
+        a: "Click the \"+\" tile at the right end of the timeline to append another video or image (JPG/PNG/WebP/GIF). Each source is imported once and deduped by content hash; re-importing the same file reuses the existing entry. Image clips get a Duration slider (default 3s) instead of a Speed slider. Zoom, spotlight, blur, text, and fade effects work identically on image clips.",
+      },
+      {
         q: "Effects overview",
         a: "Add effects on the FX track below the timeline. Five types: Zoom (animate between two regions of the frame), Spotlight (dim everything except a circular area), Blur (Gaussian blur of a rectangular region, or the inverse — blur everything except the rect), Text (overlay text with font/colour/background), and Fade (blend a solid colour over the whole frame). Effects compose on top of speed-changed sections and multi-clip cuts — they time on the output timeline, not the source.",
       },

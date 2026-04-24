@@ -19,6 +19,12 @@ import type { VideoEditPlan } from "./tauri/commands";
 export function buildEditPlan(
   clips: EditClip[],
   effects: TimelineEffect[],
+  /** Resolve a clip's source file path from its mediaRefId. Callers pass
+   *  `useEditStore.getState().resolveClipMedia`. When omitted, we emit no
+   *  `input_path` field, matching the legacy single-source behavior and
+   *  letting the Rust side fall back to the default `input_path` arg. */
+  resolveClipMedia?: (clip: EditClip) => { path: string; id: string } | null,
+  primaryMediaRefId?: string | null,
 ): VideoEditPlan {
   const effectsTrack = effects || [];
   const planClips = clips.map((c) => {
@@ -27,6 +33,14 @@ export function buildEditPlan(
     // time range (mirrors OpenShot's Timeline::apply_effects pattern).
     // We still honor `c.zoomPan` for backward compat with old saved projects
     // that used the legacy per-clip zoom field.
+    const media = resolveClipMedia ? resolveClipMedia(c) : null;
+    // Only send `input_path` when the clip points at a NON-primary source —
+    // primary clips stay `null` so the Rust `input_path` fallback path is
+    // exercised (and old cached edits keep hashing the same).
+    const isPrimary =
+      !c.mediaRefId ||
+      c.mediaRefId === primaryMediaRefId ||
+      (media && media.id === primaryMediaRefId);
     return {
       start_seconds: c.sourceStart,
       end_seconds: c.sourceEnd,
@@ -35,6 +49,8 @@ export function buildEditPlan(
       clip_type: c.type ?? "normal",
       freeze_source_time: c.freezeSourceTime,
       freeze_duration: c.freezeDuration,
+      image_duration: c.imageDuration,
+      input_path: !isPrimary && media ? media.path : undefined,
       zoom_pan: c.zoomPan
         ? {
             startRegion: c.zoomPan.startRegion,

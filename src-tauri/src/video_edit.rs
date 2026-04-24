@@ -55,7 +55,9 @@ fn validate_path(p: &str) -> Result<PathBuf, NarratorError> {
     Ok(path)
 }
 
-/// Validate clip parameters (S2: DoS, F4: bounds).
+/// Validate clip parameters (S2: DoS, F4: bounds). `duration` is the
+/// effective duration of the clip's source file (its own `input_path` when
+/// set, else the default passed to `apply_edits`).
 fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), NarratorError> {
     let err = |msg: &str| NarratorError::ExportError(format!("Clip {index}: {msg}"));
     // Reject NaN / Infinity — they produce invalid ffmpeg args and cause hangs or crashes.
@@ -65,26 +67,36 @@ fn validate_clip(clip: &EditClip, duration: f64, index: usize) -> Result<(), Nar
     if clip.speed <= 0.0 || clip.speed > 100.0 {
         return Err(err(&format!("speed {} out of range (0, 100]", clip.speed)));
     }
-    if clip.start_seconds < -0.1 {
-        return Err(err("start_seconds is negative"));
-    }
-    if clip.end_seconds < clip.start_seconds {
-        return Err(err("end_seconds < start_seconds"));
-    }
-    // Reject zero/near-zero duration clips except freeze (which sets its own duration).
-    let source_dur = clip.end_seconds - clip.start_seconds;
     let is_freeze = clip.clip_type.as_deref() == Some("freeze");
-    if !is_freeze && source_dur < 0.05 {
-        return Err(err(&format!(
-            "clip duration {:.3}s too short (min 0.05s)",
-            source_dur
-        )));
-    }
-    if clip.end_seconds > duration + 5.0 {
-        return Err(err(&format!(
-            "end_seconds {:.1} exceeds video duration {:.1}",
-            clip.end_seconds, duration
-        )));
+    let is_image = clip.clip_type.as_deref() == Some("image");
+    if is_image {
+        // Image clips ignore source trim (there's no time axis). They need
+        // a positive image_duration — validate that and skip the start/end
+        // range checks below.
+        let id = clip.image_duration.unwrap_or(0.0);
+        if !id.is_finite() || id <= 0.0 || id > 600.0 {
+            return Err(err(&format!("image_duration {id} out of range (0, 600]")));
+        }
+    } else {
+        if clip.start_seconds < -0.1 {
+            return Err(err("start_seconds is negative"));
+        }
+        if clip.end_seconds < clip.start_seconds {
+            return Err(err("end_seconds < start_seconds"));
+        }
+        let source_dur = clip.end_seconds - clip.start_seconds;
+        if !is_freeze && source_dur < 0.05 {
+            return Err(err(&format!(
+                "clip duration {:.3}s too short (min 0.05s)",
+                source_dur
+            )));
+        }
+        if clip.end_seconds > duration + 5.0 {
+            return Err(err(&format!(
+                "end_seconds {:.1} exceeds source duration {:.1}",
+                clip.end_seconds, duration
+            )));
+        }
     }
     if let Some(fps) = clip.fps_override {
         if !fps.is_finite() || fps <= 0.0 || fps > 240.0 {
@@ -228,6 +240,16 @@ pub struct EditClip {
     pub freeze_source_time: Option<f64>,
     #[serde(default)]
     pub freeze_duration: Option<f64>,
+    /// Output-timeline duration for `clip_type == "image"` clips. Ignored
+    /// for video/freeze.
+    #[serde(default)]
+    pub image_duration: Option<f64>,
+    /// Per-clip source file. When `None`, the clip is decoded from the
+    /// default `input_path` passed to `apply_edits` (matches legacy
+    /// single-source behavior). Clips appended via the "+" button carry
+    /// their own path; the primary clip leaves this `None`.
+    #[serde(default)]
+    pub input_path: Option<String>,
     #[serde(default)]
     pub zoom_pan: Option<ZoomPanEffect>,
 }
@@ -384,7 +406,7 @@ pub async fn apply_edits(
     }
 
     on_progress(0.0, Some("Preparing edit plan".to_string()));
-    let meta = video_engine::probe_video(Path::new(input_path)).await?;
+    let default_meta = video_engine::probe_video(Path::new(input_path)).await?;
 
     let out_dir = Path::new(output_path).parent().unwrap_or(Path::new("/tmp"));
     tokio::fs::create_dir_all(out_dir).await.map_err(|e| {
@@ -394,11 +416,29 @@ pub async fn apply_edits(
         ))
     })?;
 
+    // Validate every clip against its OWN source duration. For videos we
+    // probe once per unique path and cache; images get a sentinel since
+    // they have no time axis to bound against.
+    let mut probe_cache: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    probe_cache.insert(input_path.to_string(), default_meta.duration_seconds);
     for (i, clip) in plan.clips.iter().enumerate() {
-        validate_clip(clip, meta.duration_seconds, i)?;
         if let Some(ref zp) = clip.zoom_pan {
             validate_zoom(zp)?;
         }
+        if clip.clip_type.as_deref() == Some("image") {
+            validate_clip(clip, 0.0, i)?;
+            continue;
+        }
+        let clip_src = clip.input_path.as_deref().unwrap_or(input_path);
+        let dur = if let Some(d) = probe_cache.get(clip_src) {
+            *d
+        } else {
+            validate_path(clip_src)?;
+            let m = video_engine::probe_video(Path::new(clip_src)).await?;
+            probe_cache.insert(clip_src.to_string(), m.duration_seconds);
+            m.duration_seconds
+        };
+        validate_clip(clip, dur, i)?;
     }
 
     // Two ffmpeg fast paths for the trivial single-clip cases — these
@@ -406,6 +446,11 @@ pub async fn apply_edits(
     // copy or stream-trim the source. They cover the common "preview /
     // review" case where the user has not edited anything yet.
     let first = &plan.clips[0];
+    // Fast paths below assume a single clip sourced from the default input.
+    // If the clip carries its own `input_path` or is an image we skip them
+    // and let the compositor handle it.
+    let uses_default_only =
+        first.input_path.is_none() && first.clip_type.as_deref() != Some("image");
     let has_clip_fx = first.clip_type.as_deref() == Some("freeze") || first.zoom_pan.is_some();
     let has_overlay_fx = plan
         .effects
@@ -422,12 +467,13 @@ pub async fn apply_edits(
     let trivial_single = total == 1
         && first.speed == 1.0
         && first.fps_override.is_none()
+        && uses_default_only
         && !has_clip_fx
         && !has_overlay_fx;
 
     if trivial_single {
-        let covers_full =
-            first.start_seconds < 0.5 && (first.end_seconds - meta.duration_seconds).abs() < 0.5;
+        let covers_full = first.start_seconds < 0.5
+            && (first.end_seconds - default_meta.duration_seconds).abs() < 0.5;
         if covers_full {
             on_progress(0.0, Some("Copying source video".to_string()));
             if input_path != output_path {
@@ -1406,6 +1452,8 @@ mod tests {
             clip_type: None,
             freeze_source_time: None,
             freeze_duration: None,
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(&clip, 60.0, 0).is_ok());
@@ -1437,6 +1485,8 @@ mod tests {
             clip_type: None,
             freeze_source_time: None,
             freeze_duration: None,
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(
@@ -1488,6 +1538,8 @@ mod tests {
             clip_type: None,
             freeze_source_time: None,
             freeze_duration: None,
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(&clip, 60.0, 0).is_err());
@@ -1505,6 +1557,8 @@ mod tests {
             clip_type: Some("freeze".into()),
             freeze_source_time: Some(5.0),
             freeze_duration: Some(3.0),
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(&clip, 60.0, 0).is_ok());
@@ -1521,6 +1575,8 @@ mod tests {
             clip_type: None,
             freeze_source_time: None,
             freeze_duration: None,
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(&base, 60.0, 0).is_err());
@@ -1543,9 +1599,91 @@ mod tests {
             clip_type: Some("freeze".into()),
             freeze_source_time: Some(999.0),
             freeze_duration: Some(3.0),
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         };
         assert!(validate_clip(&clip, 60.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_accepts_image_type() {
+        // Image clips ignore start/end (no time axis); they just need a
+        // sensible image_duration. The source-duration bound isn't applied.
+        let clip = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("image".into()),
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: Some(5.0),
+            input_path: Some("/tmp/photo.png".into()),
+            zoom_pan: None,
+        };
+        // `duration` arg is irrelevant for image clips — even 0 passes.
+        assert!(validate_clip(&clip, 0.0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_image_with_no_duration() {
+        let clip = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("image".into()),
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: None, // missing!
+            input_path: Some("/tmp/photo.png".into()),
+            zoom_pan: None,
+        };
+        assert!(validate_clip(&clip, 0.0, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_clip_rejects_image_with_bad_duration() {
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0, 1000.0] {
+            let clip = EditClip {
+                start_seconds: 0.0,
+                end_seconds: 0.0,
+                speed: 1.0,
+                skip_frames: false,
+                fps_override: None,
+                clip_type: Some("image".into()),
+                freeze_source_time: None,
+                freeze_duration: None,
+                image_duration: Some(bad),
+                input_path: Some("/tmp/photo.png".into()),
+                zoom_pan: None,
+            };
+            assert!(
+                validate_clip(&clip, 0.0, 0).is_err(),
+                "expected error for image_duration={bad}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_clip_input_path_field_is_optional() {
+        // Deserializing a plan without the new `input_path` field should
+        // still work — old saved plans (and the common single-source case)
+        // leave it `None`.
+        let json = r#"{
+            "start_seconds": 0.0,
+            "end_seconds": 10.0,
+            "speed": 1.0,
+            "skip_frames": false,
+            "fps_override": null
+        }"#;
+        let clip: EditClip = serde_json::from_str(json).expect("parse");
+        assert!(clip.input_path.is_none());
+        assert!(clip.image_duration.is_none());
+        assert_eq!(clip.clip_type, None);
     }
 
     #[test]
@@ -1681,6 +1819,8 @@ mod tests {
             clip_type: None,
             freeze_source_time: None,
             freeze_duration: None,
+            image_duration: None,
+            input_path: None,
             zoom_pan: None,
         }
     }
@@ -1721,6 +1861,310 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
         Ok((meta.duration_seconds, meta.width, meta.height))
+    }
+
+    #[tokio::test]
+    async fn integration_image_clip_end_to_end() {
+        // Image clip: decode the still once, repeat for `image_duration`,
+        // run it through the encoder. Verifies the image branch in
+        // `compositor::run_pipeline` and the image validation path in
+        // `apply_edits`.
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src_video = dir.path().join("base.mp4");
+        let img_path = dir.path().join("still.png");
+        let out = dir.path().join("out.mp4");
+        make_test_video(&src_video, 4.0).await.unwrap();
+        // Generate a single-frame PNG via ffmpeg so the test doesn't need
+        // a binary fixture.
+        let ffmpeg = video_engine::detect_ffmpeg().unwrap();
+        let status = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:size=320x240:duration=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&img_path)
+            .output()
+            .await
+            .unwrap();
+        assert!(status.status.success(), "make test image failed");
+
+        let clip_video = simple_clip(0.0, 2.0, 1.0);
+        let clip_image = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("image".into()),
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: Some(3.0),
+            input_path: Some(img_path.to_str().unwrap().to_string()),
+            zoom_pan: None,
+        };
+        let plan = VideoEditPlan {
+            clips: vec![clip_video, clip_image],
+            effects: None,
+        };
+        apply_edits(
+            src_video.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &plan,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let meta = video_engine::probe_video(&out).await.unwrap();
+        // 2s of video + 3s of still = ~5s output.
+        assert!(
+            (meta.duration_seconds - 5.0).abs() < 0.5,
+            "expected ~5s (2s video + 3s image), got {}s",
+            meta.duration_seconds
+        );
+    }
+
+    /// Reproduction of the user's original bug scenario:
+    ///   - 9 clips across 3 different source videos + 1 image
+    ///   - clip 2 sped up 20×
+    ///   - clip 3 sped up 2×
+    ///   - rest at 1× from mixed sources
+    /// Before the fix, seeking past clip 2/3 would stick; rendering blended
+    /// overlapping source ranges. After the fix, apply_edits finishes and
+    /// the output duration matches the sum of per-clip output durations.
+    #[tokio::test]
+    async fn integration_reported_bug_scenario_nine_clips_multi_source() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.mp4");
+        let second = dir.path().join("second.mp4");
+        let third = dir.path().join("third.mp4");
+        let still = dir.path().join("still.png");
+        let out = dir.path().join("out.mp4");
+        make_test_video(&primary, 8.0).await.unwrap();
+        make_test_video(&second, 8.0).await.unwrap();
+        make_test_video(&third, 8.0).await.unwrap();
+        let ffmpeg = video_engine::detect_ffmpeg().unwrap();
+        let r = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=magenta:size=320x240:duration=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&still)
+            .output()
+            .await
+            .unwrap();
+        assert!(r.status.success());
+
+        // 9 clips, mixing sources exactly like the bug screenshot.
+        let mk = |from: Option<&Path>, start: f64, end: f64, speed: f64| EditClip {
+            start_seconds: start,
+            end_seconds: end,
+            speed,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: None,
+            input_path: from.map(|p| p.to_str().unwrap().to_string()),
+            zoom_pan: None,
+        };
+        let image_clip = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("image".into()),
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: Some(2.0),
+            input_path: Some(still.to_str().unwrap().to_string()),
+            zoom_pan: None,
+        };
+
+        let clips = vec![
+            // 1) primary 0-1s at 1x → 1s out
+            mk(None, 0.0, 1.0, 1.0),
+            // 2) second 0-6s at 20x → 0.3s out (THE short clip from the bug)
+            mk(Some(&second), 0.0, 6.0, 20.0),
+            // 3) second 6-8s at 2x → 1s out
+            mk(Some(&second), 6.0, 8.0, 2.0),
+            // 4) third 0-2s at 1x → 2s out
+            mk(Some(&third), 0.0, 2.0, 1.0),
+            // 5) third 2-4s at 1x → 2s out
+            mk(Some(&third), 2.0, 4.0, 1.0),
+            // 6) primary 1-3s at 1x → 2s out
+            mk(None, 1.0, 3.0, 1.0),
+            // 7) primary 3-5s at 1x → 2s out
+            mk(None, 3.0, 5.0, 1.0),
+            // 8) image 2s  → 2s out
+            image_clip,
+            // 9) primary 5-7s at 1x → 2s out
+            mk(None, 5.0, 7.0, 1.0),
+        ];
+        let expected_out = 1.0 + 0.3 + 1.0 + 2.0 + 2.0 + 2.0 + 2.0 + 2.0 + 2.0;
+
+        let plan = VideoEditPlan {
+            clips,
+            effects: None,
+        };
+        apply_edits(
+            primary.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &plan,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        let meta = video_engine::probe_video(&out).await.unwrap();
+        assert!(
+            (meta.duration_seconds - expected_out).abs() < 0.7,
+            "expected ~{expected_out:.2}s total, got {}s",
+            meta.duration_seconds,
+        );
+        let has_audio = video_engine::probe_has_audio_stream(&out).await.unwrap();
+        assert!(has_audio, "expected multi-source render to carry audio");
+    }
+
+    #[tokio::test]
+    async fn integration_multi_source_audio_preserves_length() {
+        // Proves: audio track of a multi-source render matches the video
+        // length (no drift from missing silence). Also proves: image +
+        // secondary-video clips produce the expected anullsrc / [N:a] chain.
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("a.mp4");
+        let src_b = dir.path().join("b.mp4");
+        let img = dir.path().join("c.png");
+        let out = dir.path().join("out.mp4");
+        make_test_video(&src_a, 4.0).await.unwrap();
+        make_test_video(&src_b, 4.0).await.unwrap();
+        // single-frame PNG for the image clip
+        let ffmpeg = video_engine::detect_ffmpeg().unwrap();
+        let r = Command::new(&ffmpeg)
+            .no_window()
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:size=320x240:duration=1",
+                "-frames:v",
+                "1",
+            ])
+            .arg(&img)
+            .output()
+            .await
+            .unwrap();
+        assert!(r.status.success());
+
+        let clip_a = simple_clip(0.0, 2.0, 1.0);
+        let mut clip_b = simple_clip(0.0, 2.0, 1.0);
+        clip_b.input_path = Some(src_b.to_str().unwrap().to_string());
+        let clip_img = EditClip {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: Some("image".into()),
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: Some(2.0),
+            input_path: Some(img.to_str().unwrap().to_string()),
+            zoom_pan: None,
+        };
+        let plan = VideoEditPlan {
+            clips: vec![clip_a, clip_b, clip_img],
+            effects: None,
+        };
+        apply_edits(
+            src_a.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &plan,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let meta = video_engine::probe_video(&out).await.unwrap();
+        // Expected total: 2 + 2 + 2 = 6s. Reaching this line at all proves
+        // the multi-source filter graph was valid: previously `[1:a]` (the
+        // second video's audio) would have been referenced without a
+        // matching `-i` and apply_edits would have failed.
+        assert!(
+            (meta.duration_seconds - 6.0).abs() < 0.5,
+            "expected ~6s total, got {}s",
+            meta.duration_seconds
+        );
+        // Verify an audio stream made it into the final MP4.
+        let has_audio = video_engine::probe_has_audio_stream(&out).await.unwrap();
+        assert!(has_audio, "expected audio track in multi-source render");
+    }
+
+    #[tokio::test]
+    async fn integration_multi_source_two_videos() {
+        // End-to-end test for the multi-source fix: two clips from DIFFERENT
+        // source videos, each 3s at 1x speed → 6s output. Proves:
+        //   1. apply_edits probes per-clip source durations (not just default).
+        //   2. The compositor uses the clip's own input_path when present.
+        //   3. The resulting duration is the SUM of output durations, i.e.
+        //      the "second source gets played too" invariant holds.
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = dir.path().join("a.mp4");
+        let src_b = dir.path().join("b.mp4");
+        let out = dir.path().join("out.mp4");
+        make_test_video(&src_a, 4.0).await.unwrap();
+        make_test_video(&src_b, 4.0).await.unwrap();
+
+        let clip_a = simple_clip(0.0, 3.0, 1.0);
+        let mut clip_b = simple_clip(0.0, 3.0, 1.0);
+        // Same source range as clip_a — this is the case that used to make
+        // the frontend resolver collide; the backend needs to honor the
+        // per-clip input_path regardless of overlapping time ranges.
+        clip_b.input_path = Some(src_b.to_str().unwrap().to_string());
+
+        let plan = VideoEditPlan {
+            clips: vec![clip_a, clip_b],
+            effects: None,
+        };
+        apply_edits(
+            src_a.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &plan,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+        let meta = video_engine::probe_video(&out).await.unwrap();
+        assert!(
+            (meta.duration_seconds - 6.0).abs() < 0.5,
+            "expected ~6s (3s + 3s) from two sources, got {}s",
+            meta.duration_seconds
+        );
     }
 
     #[tokio::test]

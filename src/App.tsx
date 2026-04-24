@@ -217,12 +217,26 @@ export default function App() {
       clip_type: c.type ?? 'normal',
       freeze_source_time: c.freezeSourceTime,
       freeze_duration: c.freezeDuration,
+      media_ref_id: c.mediaRefId ?? undefined,
+      image_duration: c.imageDuration,
       zoom_pan: c.zoomPan ? {
         startRegion: c.zoomPan.startRegion,
         endRegion: c.zoomPan.endRegion,
         easing: c.zoomPan.easing,
       } : null,
     })) : null;
+    // Persist the MediaRef pool so clips from additional sources ("+") survive
+    // reload. Skip "primary" — it's reconstructed from video_metadata on load.
+    const mediaPool: Record<string, { hash: string; kind: "video" | "image"; path: string; duration: number; width: number; height: number; fps?: number }> = {};
+    for (const [id, ref] of Object.entries(es.mediaPool)) {
+      if (id === "primary") continue;
+      mediaPool[id] = {
+        hash: ref.hash, kind: ref.kind, path: ref.path,
+        duration: ref.duration, width: ref.width, height: ref.height,
+        fps: ref.fps,
+      };
+    }
+    const mediaPoolPayload = Object.keys(mediaPool).length > 0 ? mediaPool : null;
     return {
       id: ps.projectId || crypto.randomUUID(),
       title: ps.title || "Untitled Project",
@@ -245,6 +259,7 @@ export default function App() {
       created_at: ps.createdAt || now,
       updated_at: now,
       edit_clips: editClips,
+      media_pool: mediaPoolPayload,
       timeline_effects: es.effects.length > 0 ? es.effects : null,
       video_metadata: ps.videoFile ? {
         path: ps.videoFile.path,
@@ -292,6 +307,24 @@ export default function App() {
   const configModel = useConfigStore((s) => s.model);
   const editClips = useEditStore((s) => s.clips);
   const editEffects = useEditStore((s) => s.effects);
+
+  // Keep the edit store's primary MediaRef in sync with the project's video
+  // file. Every timeline clip that has no explicit mediaRefId resolves to
+  // this primary — so setting it is what lets legacy clips and the first
+  // clip of a fresh project actually find a source to play from.
+  useEffect(() => {
+    if (!videoFile) return;
+    useEditStore.getState().setPrimaryMediaRef({
+      id: "primary",
+      hash: videoFile.path,
+      kind: "video",
+      path: videoFile.path,
+      duration: videoFile.duration,
+      width: videoFile.resolution.width,
+      height: videoFile.resolution.height,
+      fps: videoFile.fps,
+    });
+  }, [videoFile]);
 
   useEffect(() => {
     // Only auto-save when in editor view with a video file (same guard as manual save)
@@ -533,6 +566,29 @@ export default function App() {
       // Restore video edit clips if saved
       const es = useEditStore.getState();
       es.reset();
+      // Reset wipes the mediaPool, so re-seed the primary MediaRef from the
+      // project's videoFile synchronously before restoring clips. The
+      // [videoFile] effect will also run but only after the current tick.
+      {
+        const vf = useProjectStore.getState().videoFile;
+        if (vf) {
+          useEditStore.getState().setPrimaryMediaRef({
+            id: "primary", hash: vf.path, kind: "video", path: vf.path,
+            duration: vf.duration, width: vf.resolution.width,
+            height: vf.resolution.height, fps: vf.fps,
+          });
+        }
+      }
+      // Hydrate any MediaRefs saved with the project (added clips from +).
+      if (cfg.media_pool && typeof cfg.media_pool === "object") {
+        for (const [id, m] of Object.entries(cfg.media_pool as Record<string, { hash: string; kind: "video" | "image"; path: string; duration: number; width: number; height: number; fps?: number }>)) {
+          if (id === "primary") continue; // primary is seeded from videoFile above
+          useEditStore.getState().registerMedia({
+            id, hash: m.hash, kind: m.kind, path: m.path, duration: m.duration,
+            width: m.width, height: m.height, fps: m.fps,
+          });
+        }
+      }
       // Migration helper: older projects stored free-form zoom-pan regions
       // that could be non-square. The editor now locks regions to the source
       // aspect (see lockRegionAspect / ZoomPanOverlay), and the compositor
@@ -546,16 +602,20 @@ export default function App() {
         const duration = useProjectStore.getState().videoFile?.duration || 0;
         es.initFromVideo(duration);
         // Replace the default single clip with saved clips
-        const restored = cfg.edit_clips.map((c: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null; clip_type?: string; freeze_source_time?: number; freeze_duration?: number; zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null }) => ({
+        const restored = cfg.edit_clips.map((c: { source_start: number; source_end: number; speed: number; skip_frames: boolean; fps_override: number | null; clip_type?: string; freeze_source_time?: number; freeze_duration?: number; media_ref_id?: string; image_duration?: number; zoom_pan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string } | null }) => ({
           id: crypto.randomUUID(),
+          // Legacy projects (no media_ref_id) resolve to the primary MediaRef;
+          // projects saved after the multi-source rewrite carry their own.
+          mediaRefId: c.media_ref_id ?? useEditStore.getState().primaryMediaRefId ?? "primary",
           sourceStart: c.source_start,
           sourceEnd: c.source_end,
           speed: c.speed,
           skipFrames: c.skip_frames,
           fpsOverride: c.fps_override,
-          type: (c.clip_type === 'freeze' ? 'freeze' : undefined) as 'normal' | 'freeze' | undefined,
+          type: (c.clip_type === 'freeze' ? 'freeze' : c.clip_type === 'image' ? 'image' : undefined) as 'normal' | 'freeze' | 'image' | undefined,
           freezeSourceTime: c.freeze_source_time,
           freezeDuration: c.freeze_duration,
+          imageDuration: c.image_duration,
           zoomPan: c.zoom_pan ? {
             startRegion: lockRegionAspect(c.zoom_pan.startRegion),
             endRegion: lockRegionAspect(c.zoom_pan.endRegion),

@@ -33,43 +33,116 @@ use crate::process_utils::CommandNoWindow;
 use crate::video_edit::EditClip;
 use crate::video_engine;
 
+/// Per-clip output duration (mirrors the compositor's `clip_output_duration`).
+fn clip_output_duration(c: &EditClip) -> f64 {
+    match c.clip_type.as_deref() {
+        Some("freeze") => c.freeze_duration.unwrap_or(3.0).max(0.001),
+        Some("image") => c.image_duration.unwrap_or(3.0).max(0.001),
+        _ => {
+            let src = (c.end_seconds - c.start_seconds).max(0.001);
+            src / c.speed.max(0.01)
+        }
+    }
+}
+
 /// Build the per-clip audio segments and concat them into `out_path` as PCM
-/// stereo s16 at 48kHz. Returns `Ok(None)` when the plan has no audible
-/// content (all freeze, or all skip_frames).
+/// stereo s16 at 48kHz. Handles multi-source plans: each unique source file
+/// becomes a separate ffmpeg `-i` input, clip chains reference `[N:a]` for
+/// the matching input, and image/freeze/skip/no-audio-source clips inject
+/// `anullsrc` silence of the right output duration — so the audio track is
+/// the same length as the video (no drift).
+///
+/// Returns `Ok(None)` only when EVERY clip is silent AND no input has audio
+/// (i.e. genuinely nothing to render).
 pub async fn render_timeline_audio(
     source: &Path,
     clips: &[EditClip],
     out_path: &Path,
 ) -> Result<Option<PathBuf>, NarratorError> {
-    let segs: Vec<(usize, &EditClip)> = clips
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| c.clip_type.as_deref() != Some("freeze") && !c.skip_frames)
-        .collect();
-
-    if segs.is_empty() {
+    if clips.is_empty() {
         return Ok(None);
     }
 
-    let ffmpeg = video_engine::detect_ffmpeg()?;
-
-    // Build per-clip filter chains, e.g.
-    //   [0:a]atrim=start=1.0:end=3.0,asetpts=PTS-STARTPTS,atempo=2.0[a0]
-    let mut filters: Vec<String> = Vec::with_capacity(segs.len());
-    let mut labels: Vec<String> = Vec::with_capacity(segs.len());
-    for (idx, clip) in &segs {
-        let label = format!("a{idx}");
-        let mut chain = format!(
-            "[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS",
-            s = clip.start_seconds,
-            e = clip.end_seconds
-        );
-        for tempo in atempo_factors(clip.speed) {
-            chain.push_str(&format!(",atempo={tempo}"));
+    // Enumerate unique input files in declaration order. The default
+    // `source` is always index 0 — even if no clip references it —
+    // because having a single known `-i` simplifies the "no audible
+    // content at all" fallback path below.
+    let mut unique_paths: Vec<PathBuf> = vec![source.to_path_buf()];
+    let mut path_index: std::collections::HashMap<PathBuf, usize> =
+        std::collections::HashMap::new();
+    path_index.insert(source.to_path_buf(), 0);
+    for clip in clips {
+        let Some(ref p) = clip.input_path else {
+            continue;
+        };
+        let pb = PathBuf::from(p);
+        if !path_index.contains_key(&pb) {
+            path_index.insert(pb.clone(), unique_paths.len());
+            unique_paths.push(pb);
         }
-        chain.push_str(&format!("[{label}]"));
-        filters.push(chain);
+    }
+
+    // Probe each unique video source for an audio stream. Inputs without
+    // audio (images, silent MP4s) get routed through anullsrc so a clip
+    // that references them still produces silence of the right length.
+    let mut has_audio: Vec<bool> = Vec::with_capacity(unique_paths.len());
+    for p in &unique_paths {
+        let ok = video_engine::probe_has_audio_stream(p)
+            .await
+            .unwrap_or(false);
+        has_audio.push(ok);
+    }
+
+    // Build per-clip filter chains. Every clip produces a labeled stream
+    // so the concat filter has a 1:1 match with the video timeline — no
+    // desync between audio and video when there are silent segments.
+    let mut filters: Vec<String> = Vec::with_capacity(clips.len());
+    let mut labels: Vec<String> = Vec::with_capacity(clips.len());
+    let mut any_real_audio = false;
+
+    for (idx, clip) in clips.iter().enumerate() {
+        let label = format!("a{idx}");
+        let out_dur = clip_output_duration(clip);
+        let kind = clip.clip_type.as_deref();
+        let is_silent_clip = matches!(kind, Some("freeze") | Some("image")) || clip.skip_frames;
+
+        // Which input (if any) contributes audio to this clip.
+        let clip_path = clip
+            .input_path
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| source.to_path_buf());
+        let input_idx = *path_index.get(&clip_path).unwrap_or(&0);
+        let input_has_audio = has_audio.get(input_idx).copied().unwrap_or(false);
+
+        if is_silent_clip || !input_has_audio {
+            // anullsrc generates unbounded silence; `atrim=0:DUR` bounds it
+            // to the clip's output duration so concat sees a finite stream.
+            filters.push(format!(
+                "anullsrc=r=48000:cl=stereo,atrim=0:{dur:.6},asetpts=PTS-STARTPTS[{label}]",
+                dur = out_dur
+            ));
+        } else {
+            let mut chain = format!(
+                "[{idx}:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS",
+                idx = input_idx,
+                s = clip.start_seconds,
+                e = clip.end_seconds
+            );
+            for tempo in atempo_factors(clip.speed) {
+                chain.push_str(&format!(",atempo={tempo}"));
+            }
+            chain.push_str(&format!("[{label}]"));
+            filters.push(chain);
+            any_real_audio = true;
+        }
         labels.push(label);
+    }
+
+    if !any_real_audio {
+        // Nothing audible to render — skip the WAV entirely so the encoder
+        // emits video-only. Callers already handle `None` this way.
+        return Ok(None);
     }
 
     let concat_inputs: String = labels.iter().map(|l| format!("[{l}]")).collect();
@@ -77,34 +150,36 @@ pub async fn render_timeline_audio(
         "{concat_inputs}concat=n={n}:v=0:a=1[aout]",
         n = labels.len()
     );
-
     let filter_complex = format!("{};{}", filters.join(";"), concat_filter);
 
-    let output = Command::new(ffmpeg.as_os_str())
-        .no_window()
-        .args(["-y", "-hide_banner", "-loglevel", "error", "-i"])
-        .arg(source.as_os_str())
-        .args([
-            "-filter_complex",
-            &filter_complex,
-            "-map",
-            "[aout]",
-            "-c:a",
-            "pcm_s16le",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-        ])
-        .arg(out_path.as_os_str())
+    let ffmpeg = video_engine::detect_ffmpeg()?;
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window()
+        .args(["-y", "-hide_banner", "-loglevel", "error"]);
+    for p in &unique_paths {
+        cmd.arg("-i").arg(p.as_os_str());
+    }
+    cmd.args([
+        "-filter_complex",
+        &filter_complex,
+        "-map",
+        "[aout]",
+        "-c:a",
+        "pcm_s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+    ])
+    .arg(out_path.as_os_str());
+
+    let output = cmd
         .output()
         .await
         .map_err(|e| NarratorError::FfmpegFailed(format!("audio render: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // If the source has no audio stream, ffmpeg fails — return None so
-        // the encoder runs video-only without this being a hard error.
         if crate::video_edit::looks_like_no_audio_stream(&stderr) {
             return Ok(None);
         }

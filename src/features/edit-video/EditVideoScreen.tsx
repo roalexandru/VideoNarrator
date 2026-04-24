@@ -17,6 +17,7 @@ import { ZoomPanOverlay } from "./ZoomPanOverlay";
 import { EffectsOverlay } from "./EffectsOverlay";
 import { EffectInspector } from "./EffectInspector";
 import { NumericInput } from "./NumericInput";
+import { usePlaybackEngine } from "./usePlaybackEngine";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
 
@@ -31,18 +32,18 @@ export function EditVideoScreen() {
   const videoAccessError = useProjectStore((s) => s.videoAccessError);
   const projectId = useProjectStore((s) => s.projectId);
   const store = useEditStore();
-  const { clips, effects, selectedClipIndex, selectedEffectId, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSpeedLive, commitSpeedChange, setClipSkipFrames, moveClip, selectClip, undo, redo, canUndo, canRedo, insertFreezeFrame, setFreezeDuration, setClipZoomPanLive, commitZoomPanChange, addEffect, removeEffect, updateEffect, updateEffectLive, commitEffectChange, selectEffect } = store;
+  const { clips, effects, selectedClipIndex, selectedEffectId, initFromVideo, splitAt, deleteClip, setClipSpeed, setClipSpeedLive, commitSpeedChange, setClipSkipFrames, moveClip, selectClip, undo, redo, canUndo, canRedo, insertFreezeFrame, setFreezeDuration, setImageDuration, setClipZoomPanLive, commitZoomPanChange, addEffect, removeEffect, updateEffect, updateEffectLive, commitEffectChange, selectEffect } = store;
 
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const dragHandlersRef = useRef<{ onMove: (e: MouseEvent) => void; onUp: () => void } | null>(null);
-  const rafRef = useRef<number>(0);
-  const outputTimeRef = useRef(0); // mirrors outputTime for use in rAF tick without stale closures
-  const isUserPlayingRef = useRef(false); // true when user wants playback (survives freeze pauses)
+  const outputTimeRef = useRef(0); // mirrors outputTime for use in callbacks without stale closures
   const [videoDuration, setVideoDuration] = useState(0); // actual source video duration
   const [isPlaying, setIsPlaying] = useState(false);
   const [outputTime, setOutputTime] = useState(0); // position on the OUTPUT timeline
-  const [thumbs, setThumbs] = useState<string[]>([]);
+  // Thumbnails are now keyed by MediaRef.id — every unique video source gets
+  // its own strip so clips from "+"-added files show their own frames.
+  const [thumbsByMedia, setThumbsByMedia] = useState<Record<string, string[]>>({});
   const [zoom, setZoom] = useState(0);
   const [dragging, setDragging] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(() => {
@@ -76,7 +77,6 @@ export function EditVideoScreen() {
   const [debugPanel, setDebugPanel] = useState(() => {
     try { return localStorage.getItem("narrator_debug_panel") === "1"; } catch { return false; }
   });
-  const [videoDiag, setVideoDiag] = useState<{ readyState: number; networkState: number; videoWidth: number; videoHeight: number; currentSrc: string; error: string | null; paused: boolean } | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === "d" && (e.ctrlKey || e.metaKey) && e.shiftKey) {
@@ -91,23 +91,6 @@ export function EditVideoScreen() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
-  useEffect(() => {
-    if (!debugPanel) return;
-    const id = setInterval(() => {
-      const v = videoRef.current;
-      if (!v) return;
-      setVideoDiag({
-        readyState: v.readyState,
-        networkState: v.networkState,
-        videoWidth: v.videoWidth,
-        videoHeight: v.videoHeight,
-        currentSrc: v.currentSrc || "",
-        error: v.error ? `code=${v.error.code} ${v.error.message}` : null,
-        paused: v.paused,
-      });
-    }, 250);
-    return () => clearInterval(id);
-  }, [debugPanel]);
 
   // Init clips only when no edits exist — preserves edits on navigation
   useEffect(() => {
@@ -116,43 +99,28 @@ export function EditVideoScreen() {
     }
   }, [videoDuration]);
 
-  // Load video
-  useEffect(() => { const v = videoRef.current; if (v && src) { v.src = src; v.load(); } }, [src]);
-
+  // Seed videoDuration from the projectStore's videoFile as soon as it's known.
+  // Previously this came from <video>.loadedmetadata — we now own playback
+  // directly, so we read the probed duration from projectStore instead.
   useEffect(() => {
-    const v = videoRef.current; if (!v) return;
-    const onMeta = () => setVideoDuration(v.duration || 0);
-    const onTime = () => {
-      if (dragging) return;
-      // Convert source time back to output time
-      const sourceT = v.currentTime;
-      let cumOut = 0;
-      for (const clip of clips) {
-        const dur = clipOutputDuration(clip);
-        if (clip.type === 'freeze') {
-          // Freeze clips are driven by outputTime state, not video time
-          cumOut += dur;
-          continue;
-        }
-        if (sourceT >= clip.sourceStart && sourceT <= clip.sourceEnd) {
-          cumOut += (sourceT - clip.sourceStart) / clip.speed;
-          setOutputTime(cumOut);
-          return;
-        }
-        cumOut += dur;
-      }
-      setOutputTime(cumOut);
-    };
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => {
-      // Only set isPlaying=false if the user actually stopped playback.
-      // During freeze clips, we pause the video but keep the rAF loop running.
-      if (!isUserPlayingRef.current) setIsPlaying(false);
-    };
-    v.addEventListener("loadedmetadata", onMeta); v.addEventListener("timeupdate", onTime);
-    v.addEventListener("play", onPlay); v.addEventListener("pause", onPause);
-    return () => { v.removeEventListener("loadedmetadata", onMeta); v.removeEventListener("timeupdate", onTime); v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause); };
-  }, [dragging, clips]);
+    if (videoFile?.duration && videoFile.duration > 0) {
+      setVideoDuration(videoFile.duration);
+    }
+  }, [videoFile?.duration]);
+
+  // Playback engine — owns the canvas, the element pool, and the rAF loop.
+  // Replaces the old <video> element + timeupdate + two custom rAF loops.
+  const handlePlaybackEnd = useCallback(() => {
+    setIsPlaying(false);
+  }, []);
+  const { activeSourceSize } = usePlaybackEngine({
+    canvasRef,
+    isPlaying,
+    outputTime,
+    setOutputTime,
+    onPlaybackEnd: handlePlaybackEnd,
+    dragging,
+  });
 
   const [thumbsLoading, setThumbsLoading] = useState(false);
 
@@ -170,7 +138,10 @@ export function EditVideoScreen() {
     if (!outPath) return;
 
     const es = useEditStore.getState();
-    const plan = buildEditPlan(es.clips, es.effects);
+    const plan = buildEditPlan(es.clips, es.effects, (c) => {
+      const m = es.resolveClipMedia(c);
+      return m ? { path: m.path, id: m.id } : null;
+    }, es.primaryMediaRefId);
     const ch = new Channel<ProgressEvent>();
     ch.onmessage = (e: ProgressEvent) => {
       if (e.kind === "progress") setRenderProgress(e.percent);
@@ -199,39 +170,83 @@ export function EditVideoScreen() {
   const canRender = !!videoFile?.path && (planRequiresRender(clips, effects) ||
     (clips[0] && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) > 0.5));
 
-  // Extract thumbnails
+  // Extract one thumbnail strip per unique video MediaRef in the pool. Ran
+  // once when the pool first has a real path, then re-runs incrementally as
+  // "+"-added videos are registered. Already-extracted strips are kept.
+  const mediaPoolForThumbs = useEditStore((s) => s.mediaPool);
   useEffect(() => {
-    if (!videoFile?.path) return;
+    const videoRefs = Object.values(mediaPoolForThumbs).filter(
+      (m) => m.kind === "video" && m.path && !(m.id in thumbsByMedia),
+    );
+    if (videoRefs.length === 0) return;
     setThumbsLoading(true);
-    const dur = videoFile.duration || 120;
-    const thumbCount = dur > 600 ? 30 : dur > 300 ? 40 : 60;
-    extractEditThumbnails(videoFile.path, `/tmp/narrator_edit_thumbs_${projectId || crypto.randomUUID()}`, thumbCount)
-      .then((paths) => setThumbs(paths.map((p) => convertFileSrc(p))))
-      .catch(() => {})
-      .finally(() => setThumbsLoading(false));
-  }, [videoFile?.path, projectId]);
+    let cancelled = false;
+    (async () => {
+      for (const ref of videoRefs) {
+        if (cancelled) return;
+        try {
+          const dur = ref.duration || 120;
+          const count = dur > 600 ? 30 : dur > 300 ? 40 : 60;
+          const outDir = `/tmp/narrator_edit_thumbs_${projectId || "anon"}_${ref.id}`;
+          const paths = await extractEditThumbnails(ref.path, outDir, count);
+          if (cancelled) return;
+          setThumbsByMedia((prev) => ({
+            ...prev,
+            [ref.id]: paths.map((p) => convertFileSrc(p)),
+          }));
+        } catch (err) {
+          // Non-critical — clip renders without thumbnails. Log + continue.
+          console.warn(`thumbnail extract failed for ${ref.path}:`, err);
+        }
+      }
+      if (!cancelled) setThumbsLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mediaPoolForThumbs, projectId, thumbsByMedia]);
 
-  // Track video container size for zoom/pan overlay
-  // Compute the actual rendered video rect within the container (objectFit: "contain" causes letterboxing)
+  // Match the canvas backing buffer to its displayed size so the engine's
+  // drawImage letterbox math maps 1:1 to screen pixels. Uses devicePixelRatio
+  // so the preview stays crisp on retina displays. Without this, the canvas
+  // would default to 300x150 and drawImage would upscale blurrily.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.round(rect.width * dpr));
+      const h = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+    };
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  // Compute the actual rendered video rect within the container
+  // (object-fit:contain → letterbox/pillarbox). The effect overlay components
+  // position their hit-targets in these coordinates, so we need to update
+  // whenever the container resizes OR the active source's aspect changes
+  // (switching to an image clip from a different video, etc.).
   useEffect(() => {
     const el = videoContainerRef.current;
     if (!el) return;
     const update = () => {
       const containerRect = el.getBoundingClientRect();
-      const v = videoRef.current;
-      const videoW = v?.videoWidth || videoFile?.resolution?.width || 0;
-      const videoH = v?.videoHeight || videoFile?.resolution?.height || 0;
+      const videoW = activeSourceSize.width || videoFile?.resolution?.width || 0;
+      const videoH = activeSourceSize.height || videoFile?.resolution?.height || 0;
       if (videoW > 0 && videoH > 0 && containerRect.width > 0 && containerRect.height > 0) {
-        // Compute the actual rendered video area within the container (objectFit: "contain")
         const containerAspect = containerRect.width / containerRect.height;
         const videoAspect = videoW / videoH;
         let renderedW: number, renderedH: number;
         if (videoAspect > containerAspect) {
-          // Video is wider — letterboxed top/bottom
           renderedW = containerRect.width;
           renderedH = containerRect.width / videoAspect;
         } else {
-          // Video is taller — pillarboxed left/right
           renderedH = containerRect.height;
           renderedW = containerRect.height * videoAspect;
         }
@@ -240,13 +255,11 @@ export function EditVideoScreen() {
         setVideoContainerRect({ width: containerRect.width, height: containerRect.height, left: containerRect.left, top: containerRect.top });
       }
     };
+    update();
     const observer = new ResizeObserver(update);
     observer.observe(el);
-    // Also update when video metadata loads
-    const v = videoRef.current;
-    if (v) v.addEventListener("loadedmetadata", update);
-    return () => { observer.disconnect(); if (v) v.removeEventListener("loadedmetadata", update); };
-  }, [videoFile?.resolution?.width, videoFile?.resolution?.height]);
+    return () => { observer.disconnect(); };
+  }, [activeSourceSize.width, activeSourceSize.height, videoFile?.resolution?.width, videoFile?.resolution?.height]);
 
   // Auto-show zoom regions when a zoom effect is selected, hide otherwise
   useEffect(() => {
@@ -281,30 +294,12 @@ export function EditVideoScreen() {
     return { scale: 1, tx: 0, ty: 0 };
   })();
 
-  // Seek video to an output timeline position + set correct playback rate
+  // Seek is now a single-line operation — the playback engine reacts to
+  // outputTime changes and re-syncs elements + redraws on its next tick.
   const seekToOutput = useCallback((t: number) => {
     const clamped = Math.max(0, Math.min(outputDuration, t));
     setOutputTime(clamped);
-    const sourceT = store.outputTimeToSource(clamped);
-    if (videoRef.current) {
-      videoRef.current.currentTime = sourceT;
-      // Find which clip we're in and set playback rate
-      let cum = 0;
-      for (const clip of clips) {
-        const d = clipOutputDuration(clip);
-        if (clamped < cum + d) {
-          if (clip.type === 'freeze') {
-            // Don't set playbackRate=0 (unsupported in many browsers). Tick handler pauses video for freeze clips.
-            videoRef.current.playbackRate = 1;
-          } else {
-            videoRef.current.playbackRate = clip.speed;
-          }
-          break;
-        }
-        cum += d;
-      }
-    }
-  }, [outputDuration, store, clips]);
+  }, [outputDuration]);
 
   // When the user selects a non-zoom overlay effect (spotlight / blur / text /
   // fade) while the playhead sits OUTSIDE its time window, snap the playhead
@@ -340,89 +335,9 @@ export function EditVideoScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTimingInfo, isPlaying, seekToOutput]);
 
-  // During playback: handle clip transitions (skip gaps, change speed at boundaries, freeze clips)
-  // Uses isUserPlayingRef + outputTimeRef to avoid stale closures.
-  // The rAF loop runs as long as isUserPlayingRef is true, even when the video is paused for freeze clips.
-  useEffect(() => {
-    if (!isPlaying || !videoRef.current) return;
-    const v = videoRef.current;
-    const tick = () => {
-      if (!isUserPlayingRef.current) return; // user stopped playback
-      const curOutputTime = outputTimeRef.current;
-      let cum = 0;
-      for (let i = 0; i < clips.length; i++) {
-        const clip = clips[i];
-        const dur = clipOutputDuration(clip);
-
-        if (curOutputTime >= cum && curOutputTime < cum + dur) {
-          if (clip.type === 'freeze') {
-            // Freeze clips: pause the video element, hold at freezeSourceTime, advance output time manually
-            const freezeT = clip.freezeSourceTime ?? clip.sourceStart;
-            if (!v.paused) v.pause();
-            if (Math.abs(v.currentTime - freezeT) > 0.1) {
-              v.currentTime = freezeT;
-            }
-            setOutputTime((prev) => {
-              const next = prev + (1 / 60);
-              if (next >= cum + dur) {
-                // Transition to next clip
-                if (i < clips.length - 1) {
-                  const nextClip = clips[i + 1];
-                  if (nextClip.type === 'freeze') {
-                    v.currentTime = nextClip.freezeSourceTime ?? nextClip.sourceStart;
-                  } else {
-                    v.currentTime = nextClip.sourceStart;
-                    v.playbackRate = nextClip.speed;
-                    v.play(); // resume video playback after freeze
-                  }
-                } else {
-                  isUserPlayingRef.current = false;
-                  setIsPlaying(false);
-                }
-                return Math.min(next, cum + dur);
-              }
-              return next;
-            });
-          } else {
-            // Normal clip: ensure video is playing and at correct speed
-            if (v.paused && isUserPlayingRef.current) v.play();
-            if (Math.abs(v.playbackRate - clip.speed) > 0.01) {
-              v.playbackRate = clip.speed;
-            }
-            // If we've reached the end of this clip, jump to next
-            const sourceT = v.currentTime;
-            if (sourceT >= clip.sourceEnd - 0.05 && i < clips.length - 1) {
-              const nextClip = clips[i + 1];
-              if (nextClip.type === 'freeze') {
-                v.pause(); // pause for incoming freeze
-                v.currentTime = nextClip.freezeSourceTime ?? nextClip.sourceStart;
-              } else {
-                v.currentTime = nextClip.sourceStart;
-                v.playbackRate = nextClip.speed;
-              }
-            }
-          }
-          break;
-        }
-        cum += dur;
-      }
-      // If past the last clip, stop
-      if (clips.length > 0) {
-        const totalDur = store.getOutputDuration();
-        if (curOutputTime >= totalDur - 0.05) {
-          isUserPlayingRef.current = false;
-          setIsPlaying(false);
-          v.pause();
-          return; // don't schedule next tick
-        }
-      }
-      if (isUserPlayingRef.current) {
-        rafRef.current = requestAnimationFrame(tick);
-      }
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [isPlaying, clips, store]);
+  // Playback transitions are now handled inside usePlaybackEngine — the old
+  // rAF tick that drove a single shared <video> element is gone. This is
+  // where the multi-source "playhead-stuck" bug lived.
 
   // Keyboard
   useEffect(() => {
@@ -454,44 +369,18 @@ export function EditVideoScreen() {
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
   }, [isPlaying, selectedClipIndex, selectedEffectId, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo, insertFreezeFrame, isEditingZoomPan, showAddEffectMenu, selectEffect, removeEffect]);
 
+  // Play/pause just flips the flag — the playback engine reacts to it.
+  // If we're at (or past) the end, rewind to the start before playing so
+  // pressing Space on a finished clip restarts the preview.
   const togglePlay = () => {
-    const v = videoRef.current; if (!v) return;
-    if (isPlaying || isUserPlayingRef.current) {
-      // User stops playback
-      isUserPlayingRef.current = false;
+    if (isPlaying) {
       setIsPlaying(false);
-      v.pause();
-    } else {
-      // User starts playback
-      isUserPlayingRef.current = true;
-      setIsPlaying(true);
-      // Check if we're in a freeze clip — don't start video playback if so
-      let cum = 0;
-      for (const clip of clips) {
-        const d = clipOutputDuration(clip);
-        if (outputTime >= cum && outputTime < cum + d) {
-          if (clip.type === 'freeze') {
-            // Don't call v.play() — the rAF tick will handle freeze advancement
-            return;
-          }
-          v.playbackRate = clip.speed;
-          break;
-        }
-        cum += d;
-      }
-      v.play().then(() => {
-        // Re-enforce playbackRate after play resolves (some browsers reset it)
-        let c2 = 0;
-        for (const clip of clips) {
-          const d2 = clipOutputDuration(clip);
-          if (outputTime >= c2 && outputTime < c2 + d2 && clip.type !== 'freeze') {
-            v.playbackRate = clip.speed;
-            break;
-          }
-          c2 += d2;
-        }
-      }).catch(() => {});
+      return;
     }
+    if (outputTime >= outputDuration - 0.05 && outputDuration > 0) {
+      setOutputTime(0);
+    }
+    setIsPlaying(true);
   };
 
   // Timeline layout: clips are contiguous, no gaps
@@ -623,7 +512,17 @@ export function EditVideoScreen() {
           willChange: selClip?.zoomPan || effects.length > 0 ? "transform" : undefined,
           transition: isPlaying ? "none" : "transform 0.15s ease-out",
         }}>
-          <video ref={videoRef} playsInline style={{ width: "100%", height: "100%", objectFit: "contain", display: src ? "block" : "none" }} />
+          {/* Canvas backing buffer is sized to the container (devicePixelRatio-aware)
+              by the effect below so drawImage's letterbox math works in the
+              actual rendered pixel space. */}
+          <canvas
+            ref={canvasRef}
+            style={{
+              width: "100%",
+              height: "100%",
+              display: "block",
+            }}
+          />
         </div>
         {debugPanel && (
           <div style={{
@@ -637,18 +536,11 @@ export function EditVideoScreen() {
             <div style={{ color: "#ff0", fontWeight: 700, marginBottom: 4 }}>
               VIDEO DEBUG (⌘⇧D to toggle)
             </div>
-            <div>src: <span style={{ color: "#9ff" }}>{src?.slice(0, 80) || "(none)"}</span></div>
             <div>videoFile.path: <span style={{ color: "#9ff" }}>{videoFile?.path?.slice(0, 80) || "(none)"}</span></div>
-            {videoDiag && (
-              <>
-                <div>readyState: <span style={{ color: videoDiag.readyState >= 2 ? "#0f0" : "#f55" }}>{videoDiag.readyState}</span> (want ≥2)</div>
-                <div>networkState: {videoDiag.networkState}</div>
-                <div>videoWidth × videoHeight: <span style={{ color: videoDiag.videoWidth > 0 ? "#0f0" : "#f55" }}>{videoDiag.videoWidth} × {videoDiag.videoHeight}</span></div>
-                <div>paused: {String(videoDiag.paused)}</div>
-                <div>currentSrc: <span style={{ color: "#9ff" }}>{videoDiag.currentSrc.slice(0, 80) || "(none)"}</span></div>
-                {videoDiag.error && <div style={{ color: "#f55" }}>ERROR: {videoDiag.error}</div>}
-              </>
-            )}
+            <div>mediaPool size: {Object.keys(store.mediaPool).length}</div>
+            <div>activeSource: <span style={{ color: activeSourceSize.width > 0 ? "#0f0" : "#f55" }}>{activeSourceSize.width} × {activeSourceSize.height}</span></div>
+            <div>outputTime: {outputTime.toFixed(3)} / {outputDuration.toFixed(3)}</div>
+            <div>isPlaying: {String(isPlaying)}</div>
             <div style={{ marginTop: 6, borderTop: "1px dashed #0f0", paddingTop: 6 }}>
               transform.scale: {zoomTransform.scale.toFixed(3)}
             </div>
@@ -817,11 +709,27 @@ export function EditVideoScreen() {
                   const isDragging = dragClipIdx === i;
 
                   const isFreeze = clip.type === 'freeze';
+                  const isImage = clip.type === 'image';
                   const hasZoom = !!clip.zoomPan;
-                  const freezeThumbIdx = isFreeze ? Math.floor(((clip.freezeSourceTime ?? 0) / videoDuration) * thumbs.length) : 0;
-                  const startIdx = isFreeze ? freezeThumbIdx : Math.floor((clip.sourceStart / videoDuration) * thumbs.length);
-                  const endIdx = isFreeze ? freezeThumbIdx + 1 : Math.ceil((clip.sourceEnd / videoDuration) * thumbs.length);
-                  const clipThumbs = thumbs.slice(startIdx, Math.max(startIdx + 1, endIdx));
+                  const clipMedia = store.resolveClipMedia(clip);
+                  // Image clips use their own source file as the thumbnail;
+                  // video / freeze clips read from the per-media strip.
+                  const imageClipThumbSrc = isImage && clipMedia?.path ? convertFileSrc(clipMedia.path) : null;
+                  // Resolve the strip for THIS clip's MediaRef. Legacy clips
+                  // (mediaRefId null) fall back to the primary's strip.
+                  const thumbKey = clipMedia?.id ?? store.primaryMediaRefId ?? null;
+                  const mediaThumbs = thumbKey ? thumbsByMedia[thumbKey] ?? [] : [];
+                  const refDuration = clipMedia?.duration ?? videoDuration ?? 0;
+                  const freezeThumbIdx = isFreeze && refDuration > 0
+                    ? Math.floor(((clip.freezeSourceTime ?? 0) / refDuration) * mediaThumbs.length)
+                    : 0;
+                  const startIdx = !isImage && refDuration > 0
+                    ? (isFreeze ? freezeThumbIdx : Math.floor((clip.sourceStart / refDuration) * mediaThumbs.length))
+                    : 0;
+                  const endIdx = !isImage && refDuration > 0
+                    ? (isFreeze ? freezeThumbIdx + 1 : Math.ceil((clip.sourceEnd / refDuration) * mediaThumbs.length))
+                    : 0;
+                  const clipThumbs = !isImage ? mediaThumbs.slice(startIdx, Math.max(startIdx + 1, endIdx)) : [];
 
                   return (
                     <div key={clip.id}
@@ -834,11 +742,20 @@ export function EditVideoScreen() {
                         position: "absolute", top: 2, height: 60, left, width: Math.max(clipPx, 3),
                         borderRadius: 4, overflow: "hidden",
                         pointerEvents: "auto", cursor: "grab",
-                        border: isSel ? `2px solid ${isFreeze ? "#38bdf8" : "#6366f1"}` : isDragging ? "2px dashed #6366f1" : isFreeze ? "1px solid rgba(56,189,248,0.3)" : "1px solid rgba(255,255,255,0.1)",
+                        border: isSel
+                          ? `2px solid ${isFreeze ? "#38bdf8" : isImage ? "#10b981" : "#6366f1"}`
+                          : isDragging ? "2px dashed #6366f1"
+                          : isFreeze ? "1px solid rgba(56,189,248,0.3)"
+                          : isImage ? "1px solid rgba(16,185,129,0.3)"
+                          : "1px solid rgba(255,255,255,0.1)",
                         opacity: isDragging ? 0.5 : 1,
                         display: "flex", transition: "opacity 0.15s",
+                        background: isImage ? "rgba(16,185,129,0.08)" : undefined,
                       }}>
-                      {clipThumbs.map((t, j) => (
+                      {isImage && imageClipThumbSrc && (
+                        <div style={{ flex: 1, backgroundImage: `url(${imageClipThumbSrc})`, backgroundSize: "cover", backgroundPosition: "center", minWidth: 1, pointerEvents: "none" }} />
+                      )}
+                      {!isImage && clipThumbs.map((t, j) => (
                         <div key={j} style={{ flex: 1, backgroundImage: `url(${t})`, backgroundSize: "cover", backgroundPosition: "center", minWidth: 1, pointerEvents: "none" }} />
                       ))}
                       {clip.speed !== 1.0 && !isFreeze && (
@@ -864,11 +781,24 @@ export function EditVideoScreen() {
                           </svg>
                         </div>
                       )}
-                      {/* Clip number / freeze icon */}
-                      <div style={{ position: "absolute", top: 2, left: 4, fontSize: 9, color: "rgba(255,255,255,0.6)", fontWeight: 600, pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: 3 }}>
+                      {/* Image duration badge */}
+                      {isImage && (
+                        <div style={{ position: "absolute", bottom: 2, left: 4, pointerEvents: "none" }}>
+                          <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: "rgba(16,185,129,0.85)", color: "#fff", fontWeight: 700 }}>
+                            {(clip.imageDuration ?? 3).toFixed(2)}s
+                          </span>
+                        </div>
+                      )}
+                      {/* Clip number + kind icon */}
+                      <div style={{ position: "absolute", top: 2, left: 4, fontSize: 9, color: "rgba(255,255,255,0.75)", fontWeight: 600, pointerEvents: "none", textShadow: "0 1px 2px rgba(0,0,0,0.5)", display: "flex", alignItems: "center", gap: 3 }}>
                         {isFreeze && (
                           <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                             <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+                          </svg>
+                        )}
+                        {isImage && (
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
                           </svg>
                         )}
                         {i + 1}
@@ -884,19 +814,20 @@ export function EditVideoScreen() {
                 clips.forEach((c) => { endPx += clipOutputDuration(c) * pxPerSec; });
                 return (
                   <div
+                    title="Add video or image clip"
                     onClick={async (e) => {
                       e.stopPropagation();
                       const { open } = await import("@tauri-apps/plugin-dialog");
-                      const file = await open({ multiple: false, filters: [{ name: "Media", extensions: ["mp4", "mov", "avi", "mkv", "webm", "jpg", "jpeg", "png", "gif"] }] });
+                      const file = await open({ multiple: false, filters: [{ name: "Media", extensions: ["mp4", "mov", "avi", "mkv", "webm", "m4v", "jpg", "jpeg", "png", "gif", "webp", "bmp"] }] });
                       if (!file) return;
                       try {
-                        const { probeVideo } = await import("../../lib/tauri/commands");
-                        const m = await probeVideo(file as string);
-                        // For now, add as a clip from the same source video at the end
-                        // TODO: multi-source support requires backend changes
-                        // For images, this won't work yet - just videos from same source
-                        useEditStore.getState().addClip(file as string, 0, m.duration_seconds);
-                      } catch (err) { console.error("Failed to add media:", err); trackError("edit_add_media", err); }
+                        const { importAndAddMedia } = await import("./addMedia");
+                        await importAndAddMedia(file as string);
+                      } catch (err) {
+                        console.error("Failed to add media:", err);
+                        trackError("edit_add_media", err);
+                        await showMessage(String(err).replace(/^(Error: )?/, ""), { title: "Couldn't add clip", kind: "error" });
+                      }
                     }}
                     style={{
                       position: "absolute", top: 2, height: 60, left: endPx, width: 48,
@@ -991,8 +922,8 @@ export function EditVideoScreen() {
             <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
               {selClip ? (
                 <>
-                  <span style={{ fontSize: 11, color: selClip.type === 'freeze' ? "#38bdf8" : C.dim, fontWeight: 600, flexShrink: 0 }}>
-                    {selClip.type === 'freeze' ? 'Freeze' : 'Clip'} {(selectedClipIndex ?? 0) + 1}/{clips.length}
+                  <span style={{ fontSize: 11, color: selClip.type === 'freeze' ? "#38bdf8" : selClip.type === 'image' ? "#10b981" : C.dim, fontWeight: 600, flexShrink: 0 }}>
+                    {selClip.type === 'freeze' ? 'Freeze' : selClip.type === 'image' ? 'Image' : 'Clip'} {(selectedClipIndex ?? 0) + 1}/{clips.length}
                   </span>
                   {selClip.type === 'freeze' ? (
                     <>
@@ -1000,6 +931,16 @@ export function EditVideoScreen() {
                       <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>Duration</span>
                       <NumericInput value={selClip.freezeDuration ?? 3} min={0.1} max={30} width={44} color="#38bdf8"
                         onChange={(v) => setFreezeDuration(selectedClipIndex!, v)} />
+                      <span style={{ fontSize: 10, color: C.muted }}>s</span>
+                    </>
+                  ) : selClip.type === 'image' ? (
+                    <>
+                      <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>
+                        {store.resolveClipMedia(selClip)?.path.split('/').pop() ?? 'image'}
+                      </span>
+                      <span style={{ fontSize: 10, color: C.muted, flexShrink: 0 }}>Duration</span>
+                      <NumericInput value={selClip.imageDuration ?? 3} min={0.1} max={60} width={44} color="#10b981"
+                        onChange={(v) => setImageDuration(selectedClipIndex!, v)} />
                       <span style={{ fontSize: 10, color: C.muted }}>s</span>
                     </>
                   ) : (

@@ -447,6 +447,60 @@ pub async fn check_file_readable(path: String) -> Result<bool, NarratorError> {
     }
 }
 
+/// Fast, content-aware fingerprint for a media file. Used by the edit
+/// store's media-pool dedupe so re-importing the same file (or the same
+/// content at a different path) reuses the existing MediaRef.
+///
+/// Strategy: blake3 over `(size_le || first_N_bytes || last_N_bytes)` for
+/// some small N. Reading the whole file would be wasteful for
+/// multi-gigabyte videos; size + both ends catch practically every
+/// real-world collision (content differs → hash differs; identical files
+/// → identical hash). Returns a lowercase hex digest.
+#[tauri::command]
+pub async fn compute_media_hash(path: String) -> Result<String, NarratorError> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+
+    const WINDOW: u64 = 1 << 20; // 1 MiB per end — enough to fingerprint header + trailing metadata.
+
+    let p = Path::new(&path);
+    let mut f = tokio::fs::File::open(p)
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(format!("open {path}: {e}")))?;
+    let size = f
+        .metadata()
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(format!("stat {path}: {e}")))?
+        .len();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&size.to_le_bytes());
+
+    let head_len = WINDOW.min(size) as usize;
+    if head_len > 0 {
+        let mut buf = vec![0u8; head_len];
+        f.read_exact(&mut buf)
+            .await
+            .map_err(|e| NarratorError::VideoProbeError(format!("read head {path}: {e}")))?;
+        hasher.update(&buf);
+    }
+
+    if size > WINDOW * 2 {
+        // Only sample the tail when the file is bigger than both windows;
+        // otherwise the head read already covered it.
+        let tail_start = size - WINDOW;
+        f.seek(SeekFrom::Start(tail_start))
+            .await
+            .map_err(|e| NarratorError::VideoProbeError(format!("seek {path}: {e}")))?;
+        let mut buf = vec![0u8; WINDOW as usize];
+        f.read_exact(&mut buf)
+            .await
+            .map_err(|e| NarratorError::VideoProbeError(format!("read tail {path}: {e}")))?;
+        hasher.update(&buf);
+    }
+
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 // ── Document commands ──
 
 #[tauri::command]
@@ -855,6 +909,7 @@ pub async fn generate_narration(
         updated_at: chrono::Utc::now().to_rfc3339(),
         // Preserve existing edits — never wipe them during generation
         edit_clips: existing_config.as_ref().and_then(|c| c.edit_clips.clone()),
+        media_pool: existing_config.as_ref().and_then(|c| c.media_pool.clone()),
         timeline_effects: existing_config
             .as_ref()
             .and_then(|c| c.timeline_effects.clone()),
@@ -2332,6 +2387,70 @@ mod tests {
             tts_cache_key(&provider1, "Hello"),
             tts_cache_key(&provider2, "Hello")
         );
+    }
+
+    #[tokio::test]
+    async fn compute_media_hash_is_deterministic_and_sensitive() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        // Same contents → same hash.
+        let data = b"hello world".repeat(4096);
+        std::fs::File::create(&a).unwrap().write_all(&data).unwrap();
+        std::fs::File::create(&b).unwrap().write_all(&data).unwrap();
+        let h_a = compute_media_hash(a.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        let h_b = compute_media_hash(b.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(h_a, h_b, "same contents should produce same hash");
+
+        // Different contents (even same length) → different hash.
+        let c = dir.path().join("c.bin");
+        let mut diff = data.clone();
+        diff[0] ^= 0xff;
+        std::fs::File::create(&c).unwrap().write_all(&diff).unwrap();
+        let h_c = compute_media_hash(c.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_ne!(
+            h_a, h_c,
+            "different contents should produce different hashes"
+        );
+
+        // Different length → different hash.
+        let d = dir.path().join("d.bin");
+        std::fs::File::create(&d)
+            .unwrap()
+            .write_all(&data[..data.len() - 1])
+            .unwrap();
+        let h_d = compute_media_hash(d.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_ne!(h_a, h_d, "different sizes should produce different hashes");
+
+        // Hash is lowercase hex and fixed length (blake3 = 32 bytes = 64 hex chars).
+        assert_eq!(h_a.len(), 64);
+        assert!(h_a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[tokio::test]
+    async fn compute_media_hash_handles_large_files() {
+        // Exercises the head + tail sampling path: file bigger than 2 * 1 MiB.
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.bin");
+        let mut f = std::fs::File::create(&p).unwrap();
+        // 3 MiB of repeating byte.
+        f.write_all(&vec![0x42u8; 3 * 1024 * 1024]).unwrap();
+        let h = compute_media_hash(p.to_string_lossy().into_owned())
+            .await
+            .unwrap();
+        assert_eq!(h.len(), 64);
     }
 
     #[test]
