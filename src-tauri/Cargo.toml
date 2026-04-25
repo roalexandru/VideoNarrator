@@ -46,7 +46,7 @@ toml = "1"
 tempfile = "3"
 blake3 = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-rayon = "1.10"
+rayon = "1.12"
 directories = "6"
 thiserror = "2"
 tracing = "0.1"
