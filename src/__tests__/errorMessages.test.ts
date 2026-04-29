@@ -248,6 +248,33 @@ describe("toUserMessage", () => {
     });
   });
 
+  // ── Backend validation messages must NOT match status-code patterns ──
+
+  describe("backend validation messages with embedded digits", () => {
+    // Regression: "5000 characters" used to match `lower.includes("500")` and
+    // get rewritten to "API server is temporarily unavailable", hiding the
+    // real reason from the user.
+    it("does not misclassify 'Description must be 5000 characters or fewer' as 5xx", () => {
+      const msg = "Description must be 5000 characters or fewer";
+      const result = toUserMessage(msg);
+      expect(result).not.toContain("temporarily unavailable");
+      expect(result).toBe(msg);
+    });
+
+    it("does not misclassify 'Title must be 500 characters or fewer' as 5xx", () => {
+      const msg = "Title must be 500 characters or fewer";
+      const result = toUserMessage(msg);
+      expect(result).not.toContain("temporarily unavailable");
+      expect(result).toBe(msg);
+    });
+
+    it("does not misclassify '5029 frames' or similar as rate limited", () => {
+      const msg = "extracted 5029 frames";
+      const result = toUserMessage(msg);
+      expect(result).not.toContain("rate limiting");
+    });
+  });
+
   // ── Unknown / fallback ──
 
   describe("unknown errors", () => {

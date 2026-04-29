@@ -7,6 +7,7 @@ import { getProviderStatus, getElevenLabsConfig, getAzureTtsConfig } from "../..
 import { trackEvent } from "../telemetry/analytics";
 import { useOpenSettings } from "../../contexts/SettingsContext";
 import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
+import { CUSTOM_PROMPT_MAX_CHARS } from "../../lib/inputLimits";
 import type { ProviderKeyStatus } from "../../types/config";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)", accent: "#818cf8" };
@@ -182,12 +183,18 @@ export function ConfigurationScreen() {
 
       {/* Custom Prompt — inline right after Languages */}
       <section style={{ marginBottom: 28 }}>
-        <div style={label}>Custom Prompt</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+          <div style={{ ...label, marginBottom: 0 }}>Custom Prompt</div>
+          <span style={{ fontSize: 11, color: config.customPrompt.length > CUSTOM_PROMPT_MAX_CHARS * 0.9 ? "#f87171" : C.muted, fontVariantNumeric: "tabular-nums" }}>
+            {config.customPrompt.length.toLocaleString()} / {CUSTOM_PROMPT_MAX_CHARS.toLocaleString()}
+          </span>
+        </div>
         <textarea
           value={config.customPrompt}
           onChange={(e) => config.setCustomPrompt(e.target.value)}
           placeholder="Extra instructions for the AI (optional)…"
           rows={2}
+          maxLength={CUSTOM_PROMPT_MAX_CHARS}
           style={{
             width: "100%", padding: "9px 12px", border: `1px solid ${C.border}`, borderRadius: 8,
             fontSize: 13, background: "rgba(255,255,255,0.04)", color: C.text,
