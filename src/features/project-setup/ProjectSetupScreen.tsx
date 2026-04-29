@@ -3,6 +3,7 @@ import { open, message } from "@tauri-apps/plugin-dialog";
 import { useProjectStore } from "../../stores/projectStore";
 import { probeVideo, checkFileReadable, recordScreenNative, startScreenRecording } from "../../lib/tauri/commands";
 import { fileNameFromPath } from "../../lib/formatters";
+import { TITLE_MAX_CHARS, DESCRIPTION_MAX_CHARS } from "../../lib/inputLimits";
 import { trackEvent, trackError } from "../telemetry/analytics";
 import { Button } from "../../components/ui/Button";
 import { formatFileSize, formatDuration } from "../../lib/formatters";
@@ -278,6 +279,7 @@ export function ProjectSetupScreen() {
           <div>
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>Title *</label>
             <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g., UiPath Studio Walkthrough"
+              maxLength={TITLE_MAX_CHARS}
               style={{ ...inputStyle, borderColor: titleTouched && !title.trim() ? "rgba(239,68,68,0.5)" : inputStyle.borderColor }}
               onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"}
               onBlur={(e) => { setTitleTouched(true); e.target.style.borderColor = !title.trim() ? "rgba(239,68,68,0.5)" : C.border; }} />
@@ -286,10 +288,21 @@ export function ProjectSetupScreen() {
             )}
           </div>
           <div>
-            <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>Description</label>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 }}>
+              <label style={{ fontSize: 12, fontWeight: 600, color: C.textDim }}>Description</label>
+              <span style={{ fontSize: 11, color: description.length > DESCRIPTION_MAX_CHARS * 0.9 ? "#f87171" : C.textMuted, fontVariantNumeric: "tabular-nums" }}>
+                {description.length.toLocaleString()} / {DESCRIPTION_MAX_CHARS.toLocaleString()}
+              </span>
+            </div>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What should the viewer learn?" rows={3}
+              maxLength={DESCRIPTION_MAX_CHARS}
               style={{ ...inputStyle, resize: "none" as const }}
               onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"} onBlur={(e) => e.target.style.borderColor = C.border} />
+            {description.length >= DESCRIPTION_MAX_CHARS && (
+              <p style={{ fontSize: 11, color: "#f87171", marginTop: 4 }}>
+                Description cap reached. For longer content, upload it as a Context Document above.
+              </p>
+            )}
           </div>
         </div>
       </section>

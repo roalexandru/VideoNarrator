@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, type CSSProperties } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { trackError } from "../telemetry/analytics";
+import { pauseRecording, resumeRecording, stopScreenRecording } from "../../lib/tauri/commands";
 
 export function RecorderOverlay() {
   const [initializing, setInitializing] = useState(true);
@@ -26,7 +26,7 @@ export function RecorderOverlay() {
     if (busy) return;
     setBusy(true);
     try {
-      await invoke("pause_recording");
+      await pauseRecording();
       setPaused(true);
     } catch (e) {
       console.error("Pause failed:", e);
@@ -39,7 +39,7 @@ export function RecorderOverlay() {
     if (busy) return;
     setBusy(true);
     try {
-      await invoke("resume_recording");
+      await resumeRecording();
       setPaused(false);
     } catch (e) {
       console.error("Resume failed:", e);
@@ -52,7 +52,7 @@ export function RecorderOverlay() {
     if (busy) return;
     setBusy(true);
     try {
-      await invoke("stop_screen_recording");
+      await stopScreenRecording();
       // Overlay will be closed by the backend
     } catch (e) {
       console.error("Stop failed:", e);

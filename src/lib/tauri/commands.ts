@@ -207,6 +207,8 @@ export const listProjectFrames = (projectId: string) =>
 
 // System
 export const getHomeDir = () => invoke<string>("get_home_dir");
+export const setMenuContext = (hasProject: boolean) =>
+  invoke<void>("set_menu_context", { hasProject });
 
 // Screen recording
 export const recordScreenNative = (projectId: string) => invoke<string>("record_screen_native", { projectId });

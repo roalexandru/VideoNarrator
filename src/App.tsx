@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WizardLayout } from "./components/layout/WizardLayout";
 import { useWizardStore } from "./hooks/useWizardNavigation";
@@ -24,7 +23,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ToastContainer, showToast } from "./components/ui/Toast";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
-import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsProvider } from "./lib/tauri/commands";
+import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsProvider, setMenuContext } from "./lib/tauri/commands";
 import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import { AppMenuBar } from "./components/layout/AppMenuBar";
@@ -125,7 +124,7 @@ export default function App() {
 
   // ── Sync menu enabled states whenever the view changes ──
   useEffect(() => {
-    invoke("set_menu_context", { hasProject: view === "editor" }).catch(() => {});
+    setMenuContext(view === "editor").catch(() => {});
   }, [view]);
 
   // ── Init telemetry + TTS provider preference on mount ──

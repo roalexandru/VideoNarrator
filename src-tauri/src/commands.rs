@@ -585,14 +585,17 @@ pub async fn generate_narration(
     } else {
         params.project_id.clone()
     };
-    // Validate frame config bounds
+    // Validate frame config bounds. Mirrors the frontend's recommended ceiling
+    // in `src/lib/frameBudget.ts::recommendedMaxFrames` (300). Both sides must
+    // agree — silently capping below the frontend's intent results in sparser
+    // narration than the user asked for, with no surfaced reason.
     let mut frame_config = params.frame_config.clone();
-    if frame_config.max_frames > 100 {
+    if frame_config.max_frames > 300 {
         tracing::warn!(
-            "max_frames {} exceeds limit, capping to 100",
+            "max_frames {} exceeds limit, capping to 300",
             frame_config.max_frames
         );
-        frame_config.max_frames = 100;
+        frame_config.max_frames = 300;
     }
 
     let frames_dir = project_store::get_project_frames_dir(&project_id);
@@ -838,15 +841,35 @@ pub async fn generate_narration(
                         .ok();
                 }
             });
-        script = ai_client::self_critique_and_refine(
-            provider.as_ref(),
-            script,
-            &frames,
-            Some(strict_on_segment),
-            Some(strict_on_progress),
-            Some(state.cancel_flag.clone()),
+        // Bound the critique pass: up to 2 iterations × ~10 refines, each
+        // going through the AI retry pyramid, can otherwise pin the bar at
+        // 99% for many minutes (same failure mode polish had before its
+        // timeout was added). Critique is best-effort — on timeout, fall
+        // back to the pre-critique script so generation still completes.
+        const CRITIQUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+        let pre_critique = script.clone();
+        script = match tokio::time::timeout(
+            CRITIQUE_TIMEOUT,
+            ai_client::self_critique_and_refine(
+                provider.as_ref(),
+                script,
+                &frames,
+                Some(strict_on_segment),
+                Some(strict_on_progress),
+                Some(state.cancel_flag.clone()),
+            ),
         )
-        .await;
+        .await
+        {
+            Ok(s) => s,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "Self-critique exceeded {}s, returning pre-critique script",
+                    CRITIQUE_TIMEOUT.as_secs()
+                );
+                pre_critique
+            }
+        };
         // Critique rewrites can change segment text length, which makes the
         // speech_rate_report stale (Review UI reads it to predict overflow).
         // Recompute against the post-critique text so the prediction stays
