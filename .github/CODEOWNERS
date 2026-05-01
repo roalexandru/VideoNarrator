@@ -1,0 +1,3 @@
+# Default owner — required by the main-branch ruleset's
+# `require_code_owner_review` rule.
+* @roalexandru
