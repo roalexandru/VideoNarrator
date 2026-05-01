@@ -72,61 +72,55 @@ impl AiProvider for ClaudeProvider {
             }]
         });
 
-        let mut retries = 0;
-        let max_retries = 3;
+        // Single attempt — retries on 429/529 are handled exactly once,
+        // upstream in `generate_with_retry`. Looping here too compounded
+        // backoffs (provider-level 2/4s on top of wrapper 5/15/30/60s)
+        // and could pin a single AI call in retry-wait for 100s+.
+        let resp = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
 
-        loop {
-            let resp = client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+        let status = resp.status();
 
-            let status = resp.status();
-
-            if status.is_success() {
-                let response_json: serde_json::Value = resp.json().await?;
-                let text = response_json["content"]
-                    .as_array()
-                    .and_then(|blocks| {
-                        blocks.iter().find_map(|b| {
-                            if b["type"] == "text" {
-                                b["text"].as_str().map(|s| s.to_string())
-                            } else {
-                                None
-                            }
-                        })
+        if status.is_success() {
+            let response_json: serde_json::Value = resp.json().await?;
+            let text = response_json["content"]
+                .as_array()
+                .and_then(|blocks| {
+                    blocks.iter().find_map(|b| {
+                        if b["type"] == "text" {
+                            b["text"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
                     })
-                    .unwrap_or_default();
-                return Ok(text);
-            } else if status.as_u16() == 429 || status.as_u16() == 529 {
-                retries += 1;
-                if retries >= max_retries {
-                    return Err(NarratorError::RateLimited);
-                }
-                let delay = std::time::Duration::from_secs(2u64.pow(retries));
-                tokio::time::sleep(delay).await;
+                })
+                .unwrap_or_default();
+            Ok(text)
+        } else if status.as_u16() == 429 || status.as_u16() == 529 {
+            Err(NarratorError::RateLimited)
+        } else {
+            let error_text = resp.text().await.unwrap_or_default();
+            tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+            let api_msg = parse_api_error_message(&error_text);
+            let hint = match status.as_u16() {
+                401 | 403 => "Check that your Anthropic API key is valid.",
+                400 => "The request was rejected — usually a model or parameter mismatch.",
+                _ => "See the details below.",
+            };
+            let detail: String = if api_msg.is_empty() {
+                truncate_chars(&error_text, 240).into_owned()
             } else {
-                let error_text = resp.text().await.unwrap_or_default();
-                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-                let api_msg = parse_api_error_message(&error_text);
-                let hint = match status.as_u16() {
-                    401 | 403 => "Check that your Anthropic API key is valid.",
-                    400 => "The request was rejected — usually a model or parameter mismatch.",
-                    _ => "See the details below.",
-                };
-                let detail: String = if api_msg.is_empty() {
-                    truncate_chars(&error_text, 240).into_owned()
-                } else {
-                    api_msg
-                };
-                return Err(NarratorError::ApiError(format!(
-                    "Claude API error (HTTP {status}). {hint}\n\n{detail}"
-                )));
-            }
+                api_msg
+            };
+            Err(NarratorError::ApiError(format!(
+                "Claude API error (HTTP {status}). {hint}\n\n{detail}"
+            )))
         }
     }
 
@@ -237,55 +231,47 @@ impl AiProvider for OpenAiProvider {
             body["temperature"] = json!(self.temperature);
         }
 
-        let mut retries = 0;
-        let max_retries = 3;
+        // Retries handled by `generate_with_retry`; see ClaudeProvider for the
+        // rationale on collapsing the inner loop.
+        let resp = client
+            .post("https://api.openai.com/v1/chat/completions")
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
 
-        loop {
-            let resp = client
-                .post("https://api.openai.com/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+        let status = resp.status();
 
-            let status = resp.status();
-
-            if status.is_success() {
-                let response_json: serde_json::Value = resp.json().await?;
-                let text = response_json["choices"][0]["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                return Ok(text);
-            } else if status.as_u16() == 429 {
-                retries += 1;
-                if retries >= max_retries {
-                    return Err(NarratorError::RateLimited);
-                }
-                let delay = std::time::Duration::from_secs(2u64.pow(retries));
-                tokio::time::sleep(delay).await;
+        if status.is_success() {
+            let response_json: serde_json::Value = resp.json().await?;
+            let text = response_json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            Ok(text)
+        } else if status.as_u16() == 429 {
+            Err(NarratorError::RateLimited)
+        } else {
+            let error_text = resp.text().await.unwrap_or_default();
+            tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+            let api_msg = parse_api_error_message(&error_text);
+            // 401/403 really is auth; 400 etc. is usually a malformed
+            // request (model, temperature, etc.) — don't say "check
+            // your key" when it's actually a shape problem.
+            let hint = match status.as_u16() {
+                401 | 403 => "Check that your OpenAI API key is valid.",
+                400 => "The request was rejected — usually a model or parameter mismatch.",
+                _ => "See the details below.",
+            };
+            let detail: String = if api_msg.is_empty() {
+                truncate_chars(&error_text, 240).into_owned()
             } else {
-                let error_text = resp.text().await.unwrap_or_default();
-                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-                let api_msg = parse_api_error_message(&error_text);
-                // 401/403 really is auth; 400 etc. is usually a malformed
-                // request (model, temperature, etc.) — don't say "check
-                // your key" when it's actually a shape problem.
-                let hint = match status.as_u16() {
-                    401 | 403 => "Check that your OpenAI API key is valid.",
-                    400 => "The request was rejected — usually a model or parameter mismatch.",
-                    _ => "See the details below.",
-                };
-                let detail: String = if api_msg.is_empty() {
-                    truncate_chars(&error_text, 240).into_owned()
-                } else {
-                    api_msg
-                };
-                return Err(NarratorError::ApiError(format!(
-                    "OpenAI API error (HTTP {status}). {hint}\n\n{detail}"
-                )));
-            }
+                api_msg
+            };
+            Err(NarratorError::ApiError(format!(
+                "OpenAI API error (HTTP {status}). {hint}\n\n{detail}"
+            )))
         }
     }
 
@@ -357,56 +343,52 @@ impl AiProvider for GeminiProvider {
             "systemInstruction": { "parts": [{ "text": system_prompt }] },
             "generationConfig": {
                 "temperature": self.temperature,
-                "maxOutputTokens": 8192
+                "maxOutputTokens": 8192,
+                // Force strict JSON output. Without this, Gemini occasionally
+                // emits Python-dict-style responses (single-quoted keys),
+                // which fail the strict serde_json parse downstream.
+                "responseMimeType": "application/json"
             }
         });
 
-        let mut retries = 0;
-        let max_retries = 3;
+        // Retries handled by `generate_with_retry`; see ClaudeProvider for the
+        // rationale on collapsing the inner loop.
+        let resp = client
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
 
-        loop {
-            let resp = client
-                .post(&url)
-                .header("x-goog-api-key", &self.api_key)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await?;
+        let status = resp.status();
 
-            let status = resp.status();
-
-            if status.is_success() {
-                let response_json: serde_json::Value = resp.json().await?;
-                let text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                return Ok(text);
-            } else if status.as_u16() == 429 {
-                retries += 1;
-                if retries >= max_retries {
-                    return Err(NarratorError::RateLimited);
-                }
-                let delay = std::time::Duration::from_secs(2u64.pow(retries));
-                tokio::time::sleep(delay).await;
+        if status.is_success() {
+            let response_json: serde_json::Value = resp.json().await?;
+            let text = response_json["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            Ok(text)
+        } else if status.as_u16() == 429 {
+            Err(NarratorError::RateLimited)
+        } else {
+            let error_text = resp.text().await.unwrap_or_default();
+            tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
+            let api_msg = parse_api_error_message(&error_text);
+            let hint = match status.as_u16() {
+                401 | 403 => "Check that your Google API key is valid.",
+                400 => "The request was rejected — usually a model or parameter mismatch.",
+                _ => "See the details below.",
+            };
+            let detail: String = if api_msg.is_empty() {
+                truncate_chars(&error_text, 240).into_owned()
             } else {
-                let error_text = resp.text().await.unwrap_or_default();
-                tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-                let api_msg = parse_api_error_message(&error_text);
-                let hint = match status.as_u16() {
-                    401 | 403 => "Check that your Google API key is valid.",
-                    400 => "The request was rejected — usually a model or parameter mismatch.",
-                    _ => "See the details below.",
-                };
-                let detail: String = if api_msg.is_empty() {
-                    truncate_chars(&error_text, 240).into_owned()
-                } else {
-                    api_msg
-                };
-                return Err(NarratorError::ApiError(format!(
-                    "Gemini API error (HTTP {status}). {hint}\n\n{detail}"
-                )));
-            }
+                api_msg
+            };
+            Err(NarratorError::ApiError(format!(
+                "Gemini API error (HTTP {status}). {hint}\n\n{detail}"
+            )))
         }
     }
 
@@ -1199,13 +1181,46 @@ pub fn merge_short_segments(segments: Vec<Segment>, min_duration: f64) -> Vec<Se
     out
 }
 
-/// Check if an error is a rate limit (429) that should be retried.
+/// True when `code` appears in `msg` as an isolated number — i.e. with no
+/// digit on either side. Without this, an error string that happened to
+/// contain "429" anywhere (e.g. "request 429 of 1000") would falsely
+/// trigger the rate-limit retry path. Mirrors the frontend's
+/// `hasHttpStatus` helper in `src/lib/errorMessages.ts`.
+fn contains_status_code(msg: &str, code: u16) -> bool {
+    let needle = code.to_string();
+    let bytes = msg.as_bytes();
+    let nlen = needle.len();
+    if bytes.len() < nlen {
+        return false;
+    }
+    let needle_bytes = needle.as_bytes();
+    for i in 0..=bytes.len() - nlen {
+        if &bytes[i..i + nlen] != needle_bytes {
+            continue;
+        }
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
+        let after_ok = i + nlen == bytes.len() || !bytes[i + nlen].is_ascii_digit();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if an error is a rate limit (429) or overloaded (529) that should
+/// be retried. Matches `NarratorError::RateLimited` (the explicit signal),
+/// status codes 429/529 as isolated numbers, and the textual variants
+/// providers use.
 fn is_rate_limit_error(err: &NarratorError) -> bool {
+    if matches!(err, NarratorError::RateLimited) {
+        return true;
+    }
     let msg = err.to_string().to_lowercase();
-    msg.contains("429")
+    contains_status_code(&msg, 429)
+        || contains_status_code(&msg, 529)
         || msg.contains("rate limit")
-        || msg.contains("too many requests")
         || msg.contains("rate_limit")
+        || msg.contains("too many requests")
         || msg.contains("overloaded")
 }
 
@@ -1469,23 +1484,26 @@ async fn generate_narration_once(
     // Chunked generation is prone to producing a choppy, fragmented script
     // because each chunk only sees a 10-frame window. A single polish pass
     // gives the AI the whole script at once to dedupe, merge, and smooth.
-    // Best-effort: if the polish call fails or returns unparseable output we
-    // keep the unpolished script rather than breaking generation entirely.
+    // Best-effort: if the polish call fails, returns unparseable output, or
+    // exceeds POLISH_TIMEOUT we keep the unpolished script rather than
+    // breaking generation entirely.
     if was_chunked && script.segments.len() > 3 {
+        // The polish path stacks two retry layers (provider-level for 429/529
+        // and generate_with_retry's 5/15/30/60s backoff) on top of a 120s
+        // HTTP timeout, so a single struggling call could pin the bar at 99%
+        // for several minutes. Bound the whole pass — polish is best-effort,
+        // not worth that wait.
+        const POLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
         // Wrap the polish call in a heartbeat — it can take 10-30s on a long
         // script and is the silent tail right before the final "Complete"
         // label. Anchor at fraction 0.98 so the bar sits near the end while
         // ticking; real completion bumps it to 1.0 via the caller.
         let polish_label = "Polishing narration".to_string();
-        match with_heartbeat(
-            &on_progress,
-            0.98,
-            polish_label,
-            polish_script(provider, &script, 2.5),
-        )
-        .await
-        {
-            Ok(polished) => {
+        let polish_with_deadline =
+            tokio::time::timeout(POLISH_TIMEOUT, polish_script(provider, &script, 2.5));
+        match with_heartbeat(&on_progress, 0.98, polish_label, polish_with_deadline).await {
+            Ok(Ok(polished)) => {
                 tracing::info!(
                     "AI polish: {} → {} segments",
                     script.segments.len(),
@@ -1500,8 +1518,14 @@ async fn generate_narration_once(
                     merge_short_segments(std::mem::take(&mut polished.segments), 2.5);
                 script = polished;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!("AI polish pass failed, keeping unpolished script: {e}");
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "AI polish pass exceeded {}s, keeping unpolished script",
+                    POLISH_TIMEOUT.as_secs()
+                );
             }
         }
     }
@@ -2019,7 +2043,10 @@ async fn run_critique(
     }
 
     let user_message = serde_json::Value::Array(content);
-    let response = provider.generate(system_prompt, user_message).await?;
+    // Goes through the same retry layer as every other AI call. Without this,
+    // critique would skip the rate-limit backoff and surface a transient 429
+    // as "self-critique skipped".
+    let response = generate_with_retry(provider, system_prompt, user_message).await?;
     parse_critique_response(&response)
 }
 
@@ -3337,6 +3364,108 @@ mod tests {
         assert_eq!(truncate_chars("", 10), "");
         assert_eq!(truncate_chars("a", 0), "");
         assert_eq!(truncate_chars("abc", 3), "abc");
+    }
+
+    // ── contains_status_code: precision-matched HTTP status code detection ─
+    // Regression: a naive `msg.contains("429")` matched things like
+    // "request 429 of 1000" or "5000 characters", which could spuriously
+    // trigger retry or rewrite an error message. The mirror frontend bug
+    // surfaced as "API server is temporarily unavailable" on a description
+    // length validation. These tests pin the boundary behavior.
+
+    #[test]
+    fn test_contains_status_code_isolated_match() {
+        assert!(contains_status_code("HTTP 429 too many requests", 429));
+        assert!(contains_status_code("status: 429", 429));
+        assert!(contains_status_code("429", 429));
+        assert!(contains_status_code("(429)", 429));
+    }
+
+    #[test]
+    fn test_contains_status_code_rejects_digit_neighbors() {
+        // The whole point of the helper: don't match digit substrings.
+        assert!(!contains_status_code("processed 4290 frames", 429));
+        assert!(!contains_status_code("request 1429 failed", 429));
+        assert!(!contains_status_code("1429", 429));
+        assert!(!contains_status_code("4290", 429));
+    }
+
+    #[test]
+    fn test_contains_status_code_500_does_not_match_5000() {
+        // The original frontend bug was that "Description must be 5000 chars"
+        // matched `lower.includes("500")`. The boundary check rejects this.
+        assert!(!contains_status_code("description must be 5000 chars", 500));
+        // "500 chars" still matches because 500 IS an isolated number — the
+        // helper is intentionally pure. The frontend layer handles the
+        // validation-message case by pass-through-matching "characters or
+        // fewer" before any digit-based check.
+        assert!(contains_status_code("title must be 500 characters", 500));
+    }
+
+    #[test]
+    fn test_contains_status_code_short_input() {
+        assert!(!contains_status_code("", 429));
+        assert!(!contains_status_code("42", 429));
+        assert!(!contains_status_code("hi", 500));
+    }
+
+    #[test]
+    fn test_contains_status_code_at_string_boundaries() {
+        // Match at start and end of string (no neighbor to fail the check).
+        assert!(contains_status_code("429 ", 429));
+        assert!(contains_status_code(" 429", 429));
+        assert!(contains_status_code("429", 429));
+    }
+
+    // ── is_rate_limit_error ────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_rate_limit_error_explicit_variant() {
+        // The cleanest signal: every provider now returns this on 429/529.
+        assert!(is_rate_limit_error(&NarratorError::RateLimited));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_status_codes() {
+        let err = NarratorError::ApiError("Claude API error (HTTP 429). ...".into());
+        assert!(is_rate_limit_error(&err));
+        let err = NarratorError::ApiError("Claude API error (HTTP 529). ...".into());
+        assert!(is_rate_limit_error(&err));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_text_variants() {
+        assert!(is_rate_limit_error(&NarratorError::ApiError(
+            "rate limit exceeded".into()
+        )));
+        assert!(is_rate_limit_error(&NarratorError::ApiError(
+            "TOO MANY REQUESTS".into()
+        )));
+        assert!(is_rate_limit_error(&NarratorError::ApiError(
+            "model is overloaded".into()
+        )));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_does_not_match_unrelated_digits() {
+        // Regression: "processed 4290 frames" no longer matches.
+        assert!(!is_rate_limit_error(&NarratorError::ApiError(
+            "processed 4290 frames".into()
+        )));
+        assert!(!is_rate_limit_error(&NarratorError::ApiError(
+            "video has 5290 frames".into()
+        )));
+        assert!(!is_rate_limit_error(&NarratorError::ApiError(
+            "ffmpeg returned exit code 0".into()
+        )));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_does_not_match_other_status_codes() {
+        let err = NarratorError::ApiError("HTTP 500 internal server error".into());
+        assert!(!is_rate_limit_error(&err));
+        let err = NarratorError::ApiError("HTTP 401 unauthorized".into());
+        assert!(!is_rate_limit_error(&err));
     }
 
     // ── Chunked generation: more edge cases ─────────────────────────────

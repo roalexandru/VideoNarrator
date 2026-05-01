@@ -23,10 +23,20 @@ export function isContextOverflowError(raw: unknown): boolean {
     lower.includes("tokens_exceed") ||
     lower.includes("overloaded_token_input") ||
     lower.includes("payload too large") ||
-    lower.includes("413 ") ||
-    lower.includes(" 413") ||
+    /(?<!\d)413(?!\d)/.test(lower) ||
     lower.includes("request entity too large")
   );
+}
+
+/**
+ * True when `lower` contains any of the given HTTP status codes as an
+ * isolated number — i.e. with non-digit boundaries on either side. Without
+ * this, a backend message like "Description must be 5000 characters or fewer"
+ * would match `"500"` and get misclassified as a 5xx server error, and "1500"
+ * would match too.
+ */
+function hasHttpStatus(lower: string, codes: number[]): boolean {
+  return codes.some((code) => new RegExp(`(?<!\\d)${code}(?!\\d)`).test(lower));
 }
 
 /**
@@ -42,6 +52,14 @@ export function toUserMessage(raw: unknown): string {
     return "Request exceeds the model's context window. Try lowering Frame Extraction density, removing context documents, or switching to a larger-context model in Settings.";
   }
 
+  // ── Backend input-validation messages ──
+  // These contain digits (e.g. "5000 characters") that would otherwise be
+  // misclassified by the status-code branches below as 5xx server errors.
+  // The backend message is already specific and actionable, so pass through.
+  if (lower.includes("characters or fewer") || lower.includes("size exceeds")) {
+    return msg;
+  }
+
   // ── API key / auth errors ──
   if (lower.includes("no api key") || lower.includes("noapikey")) {
     if (lower.includes("elevenlabs"))
@@ -51,7 +69,7 @@ export function toUserMessage(raw: unknown): string {
     return "No API key configured. Go to Settings and add your API key for the selected provider.";
   }
 
-  if (lower.includes("401") || lower.includes("unauthorized") || lower.includes("invalid.*key")) {
+  if (hasHttpStatus(lower, [401]) || lower.includes("unauthorized")) {
     if (lower.includes("azure"))
       return "Azure TTS authentication failed. Check your API key and region in Settings → Voice → Azure TTS.";
     if (lower.includes("elevenlabs"))
@@ -66,12 +84,12 @@ export function toUserMessage(raw: unknown): string {
   }
 
   // ── Rate limiting ──
-  if (lower.includes("429") || lower.includes("rate limit") || lower.includes("too many requests")) {
+  if (hasHttpStatus(lower, [429]) || lower.includes("rate limit") || lower.includes("too many requests")) {
     return "Too many requests — the API provider is rate limiting you. Wait a moment and try again.";
   }
 
   // ── Quota / billing ──
-  if (lower.includes("402") || lower.includes("quota") || lower.includes("insufficient") || lower.includes("billing")) {
+  if (hasHttpStatus(lower, [402]) || lower.includes("quota") || lower.includes("insufficient") || lower.includes("billing")) {
     return "API quota exceeded or billing issue. Check your account balance with the provider.";
   }
 
@@ -81,7 +99,7 @@ export function toUserMessage(raw: unknown): string {
   }
 
   // ── Server errors ──
-  if (lower.includes("500") || lower.includes("502") || lower.includes("503") || lower.includes("server error")) {
+  if (hasHttpStatus(lower, [500, 502, 503, 504]) || lower.includes("server error") || lower.includes("bad gateway") || lower.includes("service unavailable") || lower.includes("gateway timeout")) {
     return "The API server is temporarily unavailable. Try again in a few seconds, or switch to a different provider in Settings.";
   }
 
