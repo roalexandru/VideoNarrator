@@ -60,6 +60,28 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v6
+
+      # Exclude build paths and toolchain processes from Defender. On Windows
+      # runners this typically saves 20-30% of build I/O. Best-effort: a
+      # failure here should not fail the build.
+      - name: Tune Windows Defender for build paths
+        if: matrix.platform == 'windows-latest'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE\src-tauri\target"
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE\node_modules"
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE\website\node_modules"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.rustup"
+          Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\pnpm"
+          Add-MpPreference -ExclusionProcess "rustc.exe"
+          Add-MpPreference -ExclusionProcess "cargo.exe"
+          Add-MpPreference -ExclusionProcess "link.exe"
+          Add-MpPreference -ExclusionProcess "lld-link.exe"
+          Add-MpPreference -ExclusionProcess "node.exe"
+          Add-MpPreference -ExclusionProcess "pnpm.exe"
+
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v6
         with:
