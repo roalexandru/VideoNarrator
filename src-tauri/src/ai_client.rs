@@ -343,7 +343,11 @@ impl AiProvider for GeminiProvider {
             "systemInstruction": { "parts": [{ "text": system_prompt }] },
             "generationConfig": {
                 "temperature": self.temperature,
-                "maxOutputTokens": 8192
+                "maxOutputTokens": 8192,
+                // Force strict JSON output. Without this, Gemini occasionally
+                // emits Python-dict-style responses (single-quoted keys),
+                // which fail the strict serde_json parse downstream.
+                "responseMimeType": "application/json"
             }
         });
 
