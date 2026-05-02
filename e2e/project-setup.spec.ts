@@ -11,7 +11,7 @@ test.describe("Project Setup Screen", () => {
   });
 
   test("title input is visible and editable", async ({ page }) => {
-    const titleInput = page.getByPlaceholder("e.g., UiPath Studio Walkthrough");
+    const titleInput = page.getByPlaceholder("e.g., Product Demo Walkthrough");
     await expect(titleInput).toBeVisible();
     await titleInput.fill("My Test Project");
     await expect(titleInput).toHaveValue("My Test Project");
@@ -45,7 +45,7 @@ test.describe("Project Setup Screen", () => {
   });
 
   test("title field shows validation error when blurred empty", async ({ page }) => {
-    const titleInput = page.getByPlaceholder("e.g., UiPath Studio Walkthrough");
+    const titleInput = page.getByPlaceholder("e.g., Product Demo Walkthrough");
     await titleInput.click();
     await titleInput.blur();
     await expect(page.getByText("Title is required")).toBeVisible();
