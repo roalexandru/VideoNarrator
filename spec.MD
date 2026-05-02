@@ -165,7 +165,7 @@ The app follows a **wizard-style flow** with a persistent sidebar showing projec
 
 ### 3.2 Narration Styles (5)
 
-Given your context (UiPath, enterprise software, developer tooling, customer demos):
+Given the target context (enterprise software, developer tooling, customer demos):
 
 | Style | Label | System Prompt Personality | Use Case |
 |-------|-------|--------------------------|----------|
@@ -195,12 +195,12 @@ pause_markers = true     # insert [pause] hints for TTS
 
 ### 3.3 Languages (Top 5 + Extensible)
 
-Primary set — chosen for UiPath's market footprint and global enterprise reach:
+Primary set — chosen for global enterprise reach:
 
 | Language | Code | Why |
 |----------|------|-----|
 | English | `en` | Default. Global business standard. |
-| Japanese | `ja` | Major UiPath market (Japan is UiPath's #2 market). |
+| Japanese | `ja` | Major enterprise software market. |
 | German | `de` | Strong enterprise automation market in DACH region. |
 | French | `fr` | EU institutional + African francophone markets. |
 | Portuguese (BR) | `pt-BR` | Large Latin American RPA market. |
@@ -252,9 +252,9 @@ Claude is instructed to return strict JSON:
       "index": 0,
       "start_seconds": 0.0,
       "end_seconds": 8.5,
-      "text": "Welcome to UiPath Studio...",
+      "text": "Welcome to Acme Studio...",
       "visual_description": "IDE launching, splash screen visible",
-      "emphasis": ["UiPath Studio"],
+      "emphasis": ["Acme Studio"],
       "pace": "slow",
       "pause_after_ms": 500,
       "frame_refs": [0, 1]
@@ -336,7 +336,7 @@ Use Claude's SSE streaming to show generation progress in real-time:
 │   ├── teaser.toml
 │   └── training.toml
 ├── context_library/             # reusable context documents
-│   ├── uipath_messaging_guide.md
+│   ├── product_messaging_guide.md
 │   └── product_glossary.md
 └── projects/
     └── <uuid>/
@@ -390,7 +390,7 @@ Standard subtitle formats. Useful for:
 
 ```
 [0:00 - 0:08]
-Welcome to UiPath Studio. In this walkthrough, we'll build an
+Welcome to Acme Studio. In this walkthrough, we'll build an
 email automation from scratch in under five minutes.
 
 [0:08 - 0:15]
@@ -405,7 +405,7 @@ Human-readable. Paste into ElevenLabs, Descript, or hand to a voice actor.
 ```xml
 <speak version="1.1" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
   <prosody rate="slow">
-    Welcome to <emphasis level="moderate">UiPath Studio</emphasis>.
+    Welcome to <emphasis level="moderate">Acme Studio</emphasis>.
   </prosody>
   <break time="500ms"/>
   <prosody rate="medium">
@@ -509,7 +509,7 @@ When regenerating a script:
 ### 8.6 Template System
 
 Save a combination of (style + context docs + language set + advanced settings) as a named template:
-- "UiPath Customer Demo — EN+JA" 
+- "Customer Demo — EN+JA" 
 - "Internal Training — Technical — All Languages"
 - One-click apply to new projects
 

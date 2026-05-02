@@ -4086,7 +4086,7 @@ mod tests {
             &sample_script(),
             "Refine",
             "style",
-            Some("Always use UiPath product voice"),
+            Some("Always use formal product voice"),
         )
         .await;
         assert!(result.is_ok());

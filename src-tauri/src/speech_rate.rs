@@ -103,7 +103,7 @@ fn normalize_lang(lang: &str) -> String {
 }
 
 /// Word count for non-CJK text. Splits on unicode whitespace and discards
-/// empty tokens. Punctuation attached to words ("don't", "UiPath.") counts as
+/// empty tokens. Punctuation attached to words ("don't", "Acme.") counts as
 /// one word — same as a human reader.
 fn count_words(text: &str) -> usize {
     text.split_whitespace()
@@ -264,8 +264,8 @@ mod tests {
 
     #[test]
     fn counts_punctuated_words_as_one() {
-        // "UiPath." and "don't" each count as one word.
-        assert_eq!(count_words("UiPath. don't stop."), 3);
+        // "Acme." and "don't" each count as one word.
+        assert_eq!(count_words("Acme. don't stop."), 3);
     }
 
     #[test]

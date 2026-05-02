@@ -278,7 +278,7 @@ export function ProjectSetupScreen() {
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <div>
             <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: C.textDim, marginBottom: 5 }}>Title *</label>
-            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g., UiPath Studio Walkthrough"
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g., Product Demo Walkthrough"
               maxLength={TITLE_MAX_CHARS}
               style={{ ...inputStyle, borderColor: titleTouched && !title.trim() ? "rgba(239,68,68,0.5)" : inputStyle.borderColor }}
               onFocus={(e) => e.target.style.borderColor = "rgba(99,102,241,0.4)"}
