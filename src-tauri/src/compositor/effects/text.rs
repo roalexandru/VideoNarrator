@@ -211,7 +211,12 @@ fn build_drawtext_filter(text: &TextData, canvas_w: u32, canvas_h: u32) -> Strin
     let opacity = text.opacity.unwrap_or(1.0).clamp(0.0, 1.0) * (a as f64 / 255.0);
     let color = format!("0x{:02X}{:02X}{:02X}@{:.3}", r, g, b, opacity);
 
-    // Position: TextData.x/y are normalized 0..1 of canvas.
+    // Position: TextData.x/y are normalized 0..1 of the canvas and mark the
+    // CENTER of the text box (matching the preview, which anchors the box with
+    // translate(-50%,-50%)). drawtext places its box top-left at (x,y) by
+    // default, so subtract half the rendered text box via its `text_w`/`text_h`
+    // runtime variables. Without this the export was shifted down-right by half
+    // the text size relative to the preview.
     let x_px = (text.x.clamp(0.0, 1.0) * canvas_w as f64).round() as i32;
     let y_px = (text.y.clamp(0.0, 1.0) * canvas_h as f64).round() as i32;
 
@@ -222,8 +227,8 @@ fn build_drawtext_filter(text: &TextData, canvas_w: u32, canvas_h: u32) -> Strin
         format!("text='{escaped}'"),
         format!("fontsize={font_px}"),
         format!("fontcolor={color}"),
-        format!("x={x_px}"),
-        format!("y={y_px}"),
+        format!("x={x_px}-text_w/2"),
+        format!("y={y_px}-text_h/2"),
         format!("borderw={borderw}"),
         "bordercolor=black@0.6".to_string(),
     ];
@@ -245,4 +250,50 @@ fn build_drawtext_filter(text: &TextData, canvas_w: u32, canvas_h: u32) -> Strin
     }
 
     format!("drawtext={}", parts.join(":"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn td(content: &str) -> TextData {
+        TextData {
+            content: content.to_string(),
+            x: 0.5,
+            y: 0.5,
+            font_size: 10.0,
+            color: "#ffffff".to_string(),
+            font_family: None,
+            bold: None,
+            italic: None,
+            underline: None,
+            background: None,
+            align: None,
+            opacity: None,
+        }
+    }
+
+    #[test]
+    fn drawtext_centers_the_box_on_the_anchor() {
+        // x=0.5,y=0.5 on 1920x1080 → center at 960,540, offset by half the box.
+        let f = build_drawtext_filter(&td("Hi"), 1920, 1080);
+        assert!(f.contains("x=960-text_w/2"), "filter: {f}");
+        assert!(f.contains("y=540-text_h/2"), "filter: {f}");
+    }
+
+    #[test]
+    fn drawtext_collapses_newlines_to_space() {
+        let f = build_drawtext_filter(&td("line one\nline two"), 640, 360);
+        assert!(f.contains("line one line two"), "filter: {f}");
+        assert!(!f.contains('\n'));
+    }
+
+    #[test]
+    fn drawtext_bold_widens_border() {
+        let mut t = td("B");
+        t.bold = Some(true);
+        assert!(build_drawtext_filter(&t, 640, 360).contains("borderw=2"));
+        let plain = build_drawtext_filter(&td("B"), 640, 360);
+        assert!(plain.contains("borderw=1"));
+    }
 }

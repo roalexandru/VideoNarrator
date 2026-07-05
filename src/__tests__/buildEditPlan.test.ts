@@ -130,6 +130,31 @@ describe("buildEditPlan — skip_frames serialization", () => {
   });
 });
 
+describe("buildEditPlan — transitionIn defaults", () => {
+  it("fills an unset zoom-pan transitionIn with the window length", () => {
+    const zp = mkEffect("zoom-pan", {
+      startTime: 2, endTime: 7,
+      zoomPan: { startRegion: { x: 0, y: 0, width: 1, height: 1 }, endRegion: { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, easing: "ease-out" },
+    });
+    const plan = buildEditPlan([mkClip()], [zp]);
+    expect(plan.effects?.[0].transitionIn).toBe(5);
+  });
+
+  it("does not fill transitionIn for non-zoom effects", () => {
+    const plan = buildEditPlan([mkClip()], [mkEffect("blur", { startTime: 1, endTime: 4 })]);
+    expect(plan.effects?.[0].transitionIn).toBeUndefined();
+  });
+
+  it("leaves an explicit zoom-pan transitionIn untouched", () => {
+    const zp = mkEffect("zoom-pan", {
+      startTime: 0, endTime: 5, transitionIn: 1,
+      zoomPan: { startRegion: { x: 0, y: 0, width: 1, height: 1 }, endRegion: { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, easing: "ease-out" },
+    });
+    const plan = buildEditPlan([mkClip()], [zp]);
+    expect(plan.effects?.[0].transitionIn).toBe(1);
+  });
+});
+
 describe("editsRequireRender", () => {
   it("is false for empty clips", () => {
     expect(editsRequireRender([], [], 10)).toBe(false);

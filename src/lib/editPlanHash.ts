@@ -53,7 +53,10 @@ function canonicalizeEffect(e: TimelineEffect): string {
     `type=${e.type}`,
     `st=${e.startTime.toFixed(4)}`,
     `et=${e.endTime.toFixed(4)}`,
-    `ti=${e.transitionIn ?? "_"}`,
+    // Mirror buildEditPlan's zoom-pan transitionIn default so the hash reflects
+    // what's actually sent (unset ≡ full-window for zoom-pan). Format both the
+    // explicit and the filled value identically so they can't diverge.
+    `ti=${(e.transitionIn ?? (e.type === "zoom-pan" ? e.endTime - e.startTime : undefined))?.toFixed(4) ?? "_"}`,
     `to=${e.transitionOut ?? "_"}`,
     `rev=${e.reverse ? 1 : 0}`,
   ];
@@ -63,7 +66,9 @@ function canonicalizeEffect(e: TimelineEffect): string {
   }
   if (e.blur) {
     const b = e.blur;
-    base.push(`bl=${b.x.toFixed(4)},${b.y.toFixed(4)},${b.width.toFixed(4)},${b.height.toFixed(4)},${b.radius.toFixed(2)},${b.invert ? 1 : 0}`);
+    // 4-decimal radius: it's now normalized (0,1] (fraction of width), so
+    // 2 decimals would collide neighbouring strengths (e.g. 0.025 vs 0.034).
+    base.push(`bl=${b.x.toFixed(4)},${b.y.toFixed(4)},${b.width.toFixed(4)},${b.height.toFixed(4)},${b.radius.toFixed(4)},${b.invert ? 1 : 0}`);
   }
   if (e.text) {
     const t = e.text;
@@ -104,5 +109,9 @@ export function computeEditPlanHash(
   // Canonicalize effects in array order (matches what buildEditPlan sends
   // and what the compositor iterates).
   const effectPart = effects.map(canonicalizeEffect).join(";");
-  return hash32(`C:${clipPart}||E:${effectPart}`);
+  // Version salt: bumped to v2 when the compositor's render OUTPUT changed
+  // without the plan data changing — text now centers on its anchor and
+  // overlay-effect fades are eased (not linear). Salting forces a one-time
+  // re-render so warm caches don't keep serving the old (shifted/linear) output.
+  return hash32(`v2|C:${clipPart}||E:${effectPart}`);
 }

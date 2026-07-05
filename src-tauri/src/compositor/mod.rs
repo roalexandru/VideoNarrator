@@ -91,7 +91,13 @@ fn compose_frame(
         let Some(progress) = active_progress(effect, time) else {
             continue;
         };
-        let effect_alpha = progress;
+        // Ease the overlay-effect alpha to match the preview, which applies a
+        // hard-coded ease-out to spotlight/blur/text/fade opacity (easing.ts
+        // effectOpacity). `window_progress` returns a linear ramp by design
+        // (zoom-pan eases downstream in apply_zoom_pan); this overlay pass is
+        // the one consumer that must ease here or fades look different in the
+        // export than in the preview.
+        let effect_alpha = keyframe::ease(progress, keyframe::Interp::EaseOut);
 
         match effect.effect_type.as_str() {
             "spotlight" => {

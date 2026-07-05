@@ -74,7 +74,13 @@ export function buildEditPlan(
     type: e.type,
     startTime: e.startTime,
     endTime: e.endTime,
-    transitionIn: e.transitionIn,
+    // Fill the zoom-pan transitionIn default explicitly. The preview defaults
+    // an unset transitionIn to the full window (easing.ts computeZoomAtTime),
+    // but the Rust side defaults it to 0.0 — which only diverges for
+    // reverse:true zoom-pans with no transitions. Sending the value keeps both
+    // sides identical. (Overlay effects agree on `?? 0` already, so leave them.)
+    transitionIn:
+      e.type === "zoom-pan" ? (e.transitionIn ?? e.endTime - e.startTime) : e.transitionIn,
     transitionOut: e.transitionOut,
     reverse: e.reverse,
     spotlight: e.spotlight

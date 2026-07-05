@@ -12,8 +12,12 @@ use tiny_skia::{BlendMode, IntRect, Pixmap, PixmapPaint, Transform};
 /// it when `invert=true`).
 ///
 /// All position params are normalized [0, 1] of the canvas dimensions.
-/// `radius_n` is the blur radius — accepted in either pixels (when > 1.0)
-/// or normalized to canvas width.
+/// `radius_n` is the blur strength. Values in (0, 1] are the CSS blur radius as
+/// a fraction of canvas width (the preview renders `backdropFilter: blur(r*W
+/// px)`); since a CSS `blur(R)` is a Gaussian with sigma = R/2 and
+/// `image::imageops::blur` takes sigma directly, we map `r*W/2`. Legacy values
+/// above 1.0 are treated as absolute output-resolution sigma pixels (old saved
+/// projects), passed through unchanged so their exports don't shift.
 ///
 /// `effect_alpha` is the per-frame transition alpha (0..1). Blur fades in /
 /// out smoothly by blending the blurred pixels on top of the original with
@@ -47,11 +51,12 @@ pub fn apply_blur(
     if w == 0 || h == 0 {
         return;
     }
-    // pixel radius
+    // Blur sigma in output pixels. Normalized CSS-radius fraction → sigma via
+    // sigma = (r * width) / 2; legacy >1.0 values are already sigma pixels.
     let radius = if radius_n > 1.0 {
         radius_n
     } else {
-        radius_n * cw
+        radius_n * cw / 2.0
     }
     .clamp(0.5, 200.0);
 

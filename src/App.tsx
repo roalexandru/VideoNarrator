@@ -24,6 +24,7 @@ import { ToastContainer, showToast } from "./components/ui/Toast";
 import { UpdateChecker } from "./components/UpdateChecker";
 import { ProjectLibrary } from "./features/projects/ProjectLibrary";
 import { loadProjectFull, probeVideo, saveProject, getTelemetryEnabled, getTtsProvider, setMenuContext } from "./lib/tauri/commands";
+import { migrateLegacyBlurRadius } from "./lib/migrateBlur";
 import { initTelemetry, trackEvent, trackError } from "./features/telemetry/analytics";
 import { SettingsProvider, type SettingsTab } from "./contexts/SettingsContext";
 import { AppMenuBar } from "./components/layout/AppMenuBar";
@@ -642,7 +643,16 @@ export default function App() {
           })
           .map((e) => e.type === 'zoom-pan' && e.zoomPan
             ? { ...e, zoomPan: { ...e.zoomPan, startRegion: lockRegionAspect(e.zoomPan.startRegion), endRegion: lockRegionAspect(e.zoomPan.endRegion) } }
-            : e);
+            : e)
+          // Migrate legacy pixel blur radii (> 1) to the new normalized unit so
+          // old projects keep their exported blur strength.
+          .map((e) => {
+            if (e.type === 'blur' && e.blur && e.blur.radius > 1) {
+              const outW = useProjectStore.getState().videoFile?.resolution?.width || 1920;
+              return { ...e, blur: { ...e.blur, radius: migrateLegacyBlurRadius(e.blur.radius, outW) } };
+            }
+            return e;
+          });
         useEditStore.setState({ effects: validated });
       }
 
