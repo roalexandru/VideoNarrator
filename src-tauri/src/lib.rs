@@ -3,6 +3,7 @@
 mod ai_client;
 mod azure_tts_client;
 mod builtin_tts;
+mod cancel;
 pub mod cli;
 mod commands;
 mod compositor;
@@ -121,6 +122,7 @@ pub fn run() {
             commands::refine_segment,
             commands::refine_script,
             commands::cancel_generation,
+            commands::cancel_video_operation,
             commands::save_project,
             commands::load_project,
             commands::load_project_full,

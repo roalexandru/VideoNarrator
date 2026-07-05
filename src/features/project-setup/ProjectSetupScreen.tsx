@@ -77,7 +77,20 @@ export function ProjectSetupScreen() {
         trackError("probe_recorded_video", e);
       }
     });
-    return () => { unlistenPromise.then((fn) => fn()); };
+    // Backend emits this when combining recording segments fails: the overlay
+    // is already closed and state reset, so the main window must leave
+    // "recording" mode and surface the error (otherwise it stays stuck).
+    const unlistenFailed = listen<string>("recording-failed", async (event) => {
+      setIsRecording(false);
+      await getCurrentWindow().unminimize();
+      await getCurrentWindow().setFocus();
+      trackError("screen_recording_failed", new Error(event.payload));
+      await message(event.payload, { title: "Recording failed", kind: "error" });
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+      unlistenFailed.then((fn) => fn());
+    };
   }, [setVideoFile]);
 
   const handleRecordScreen = useCallback(async () => {

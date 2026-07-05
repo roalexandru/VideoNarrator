@@ -72,7 +72,7 @@ pub async fn run(cmd: RenderCmd, progress: ProgressMode) -> Result<Value, Narrat
             output,
         } => {
             let plan: VideoEditPlan = read_json_arg(&plan)?;
-            let path = render::apply_edits(&input, &output, &plan, reporter).await?;
+            let path = render::apply_edits(&input, &output, &plan, reporter, None).await?;
             Ok(json!({ "output_path": path }))
         }
         RenderCmd::BurnSubs {
@@ -85,7 +85,8 @@ pub async fn run(cmd: RenderCmd, progress: ProgressMode) -> Result<Value, Narrat
                 Some(p) => read_json_arg(p)?,
                 None => SubtitleStyle::default(),
             };
-            let path = render::burn_subtitles(&input, &srt, &output, &style, reporter).await?;
+            let path =
+                render::burn_subtitles(&input, &srt, &output, &style, reporter, None).await?;
             Ok(json!({ "output_path": path }))
         }
         RenderCmd::MergeAudio {
@@ -95,7 +96,8 @@ pub async fn run(cmd: RenderCmd, progress: ProgressMode) -> Result<Value, Narrat
             replace,
         } => {
             let outcome =
-                render::merge_audio_video(&video, &audio, &output, replace, -8.0, reporter).await?;
+                render::merge_audio_video(&video, &audio, &output, replace, -8.0, reporter, None)
+                    .await?;
             Ok(json!({
                 "output_path": outcome.output_path,
                 "fell_back_to_narration_only": outcome.fell_back_to_narration_only,

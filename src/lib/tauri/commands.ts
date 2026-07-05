@@ -253,6 +253,9 @@ export interface VideoEditPlan {
 export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>
   invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel });
 
+/** Cancel an in-flight video operation (edit render / audio merge / subtitle burn). */
+export const cancelVideoOperation = () => invoke<void>("cancel_video_operation");
+
 export const extractEditThumbnails = (videoPath: string, outputDir: string, count: number) =>
   invoke<string[]>("extract_edit_thumbnails", { videoPath, outputDir, count });
 

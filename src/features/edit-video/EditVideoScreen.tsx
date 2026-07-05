@@ -2,7 +2,7 @@ import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
-import { extractEditThumbnails, applyVideoEdits, openFolder } from "../../lib/tauri/commands";
+import { extractEditThumbnails, applyVideoEdits, openFolder, cancelVideoOperation } from "../../lib/tauri/commands";
 import { buildEditPlan, editsRequireRender } from "../../lib/buildEditPlan";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { Channel } from "@tauri-apps/api/core";
@@ -161,9 +161,11 @@ export function EditVideoScreen() {
       } catch {/* non-critical */}
       await showMessage(`Rendered: ${outPath}`, { title: "Edited video saved", kind: "info" });
     } catch (err) {
+      setRenderProgress(null);
+      // A user-initiated cancel isn't an error — don't show the failure dialog.
+      if (String(err).toLowerCase().includes("cancel")) return;
       console.error("render video failed:", err);
       trackError("render_edited_video", err);
-      setRenderProgress(null);
       await showMessage(String(err).replace(/^(Error: )?/, ""), { title: "Render failed", kind: "error" });
     }
   }, [videoFile?.path, videoFile?.name]);
@@ -652,6 +654,16 @@ export function EditVideoScreen() {
             ? `Rendering… ${Math.round(renderProgress)}%`
             : "Render Video"}
         </Button>
+        {renderProgress !== null && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => { cancelVideoOperation(); }}
+            title="Cancel the in-progress render"
+          >
+            Cancel
+          </Button>
+        )}
       </div>
 
       {/* RESIZE HANDLE */}

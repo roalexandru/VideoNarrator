@@ -8,6 +8,7 @@
 //! that don't need the compositor (single-clip stream-copy trim,
 //! subtitle-burn pass-through, etc.).
 
+use crate::cancel::{check_cancelled, is_cancelled, kill_child_after_cancel, output_with_cancel};
 use crate::error::NarratorError;
 use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
 use crate::models::ZoomPanEffect;
@@ -15,8 +16,15 @@ use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+/// Shared alias for the optional cooperative-cancel flag threaded through the
+/// render/merge/burn entry points.
+pub type CancelFlag = Option<Arc<AtomicBool>>;
 
 // ── Validation helpers (S1–S5) ──
 
@@ -264,7 +272,9 @@ async fn run_ffmpeg_with_progress(
     args: &[&str],
     total_duration: f64,
     on_progress: &(impl Fn(f64, Option<String>) + ?Sized),
+    cancel: &CancelFlag,
 ) -> Result<(), NarratorError> {
+    check_cancelled(cancel)?;
     // `-progress pipe:2` emits structured, newline-terminated progress events
     // (`out_time=HH:MM:SS.xxx`) to stderr so our line reader can parse them.
     // Default `frame=... time=...` stats use `\r` between updates, which
@@ -275,6 +285,7 @@ async fn run_ffmpeg_with_progress(
     full_args.extend_from_slice(args);
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window()
+        .kill_on_drop(true)
         .args(&full_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
@@ -293,19 +304,42 @@ async fn run_ffmpeg_with_progress(
     if let Some(stderr) = child.stderr.take() {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(time_str) = extract_time_from_ffmpeg_line(&line) {
-                let seconds = parse_ffmpeg_time(&time_str);
-                if total_duration > 0.0 && seconds > 0.0 {
-                    let pct = (seconds / total_duration * 100.0).min(100.0);
-                    on_progress(pct, None);
+        // Interleave stderr reads with a 100ms cancel poll so a mistaken burn
+        // of a long video stops promptly instead of pegging the CPU to the end.
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Some(time_str) = extract_time_from_ffmpeg_line(&line) {
+                                let seconds = parse_ffmpeg_time(&time_str);
+                                if total_duration > 0.0 && seconds > 0.0 {
+                                    let pct = (seconds / total_duration * 100.0).min(100.0);
+                                    on_progress(pct, None);
+                                }
+                            }
+                            if recent_stderr.len() >= STDERR_TAIL {
+                                recent_stderr.pop_front();
+                            }
+                            recent_stderr.push_back(line);
+                        }
+                        Ok(None) => break,
+                        Err(_) => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if is_cancelled(cancel) {
+                        kill_child_after_cancel(&mut child).await;
+                        return Err(NarratorError::Cancelled);
+                    }
                 }
             }
-            if recent_stderr.len() >= STDERR_TAIL {
-                recent_stderr.pop_front();
-            }
-            recent_stderr.push_back(line);
         }
+    }
+
+    if is_cancelled(cancel) {
+        kill_child_after_cancel(&mut child).await;
+        return Err(NarratorError::Cancelled);
     }
 
     let status = child
@@ -391,12 +425,30 @@ pub async fn extract_single_frame(
 /// Render an edit plan (clips + overlay effects) to a single MP4 at
 /// `output_path`. Validation + a couple of single-clip ffmpeg fast paths
 /// live here; everything else hands off to the in-process compositor.
+/// Non-cancellable convenience wrapper (tests call this; production goes
+/// through [`apply_edits_with_cancel`] via the render/command layer).
+#[allow(dead_code)]
 pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
     on_progress: impl Fn(f64, Option<String>) + Send + Sync,
 ) -> Result<String, NarratorError> {
+    apply_edits_with_cancel(input_path, output_path, plan, on_progress, None).await
+}
+
+/// Cancellable variant of [`apply_edits`]. The GUI passes `AppState.cancel_flag`;
+/// the CLI and tests pass `None`.
+pub async fn apply_edits_with_cancel(
+    input_path: &str,
+    output_path: &str,
+    plan: &VideoEditPlan,
+    on_progress: impl Fn(f64, Option<String>) + Send + Sync,
+    cancel: CancelFlag,
+) -> Result<String, NarratorError> {
+    // Check before the probe so a pre-cancelled run returns immediately without
+    // needing ffprobe present.
+    check_cancelled(&cancel)?;
     validate_path(input_path)?;
     validate_path(output_path)?;
 
@@ -487,25 +539,22 @@ pub async fn apply_edits(
         on_progress(0.0, Some("Trimming video".to_string()));
         let ffmpeg = video_engine::detect_ffmpeg()?;
         let duration = first.end_seconds - first.start_seconds;
-        let output = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args([
-                "-y",
-                "-ss",
-                &format!("{:.3}", first.start_seconds),
-                "-i",
-                input_path,
-                "-t",
-                &format!("{:.3}", duration),
-                "-c",
-                "copy",
-                "-avoid_negative_ts",
-                "make_zero",
-                output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        let mut cmd = Command::new(ffmpeg.as_os_str());
+        cmd.no_window().args([
+            "-y",
+            "-ss",
+            &format!("{:.3}", first.start_seconds),
+            "-i",
+            input_path,
+            "-t",
+            &format!("{:.3}", duration),
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            output_path,
+        ]);
+        let output = output_with_cancel(&mut cmd, &cancel).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(NarratorError::FfmpegFailed(stderr.to_string()));
@@ -521,6 +570,7 @@ pub async fn apply_edits(
         Path::new(output_path),
         plan,
         &on_progress,
+        cancel,
     )
     .await?;
     on_progress(100.0, Some("Edit complete".to_string()));
@@ -550,6 +600,8 @@ pub(crate) fn looks_like_no_audio_stream(err_msg: &str) -> bool {
         || m.contains("no audio stream")
 }
 
+/// Non-cancellable convenience wrapper (see [`apply_edits`]).
+#[allow(dead_code)]
 pub async fn merge_audio_video(
     video_path: &str,
     audio_path: &str,
@@ -558,6 +610,30 @@ pub async fn merge_audio_video(
     duck_db: f32,
     on_progress: impl Fn(f64, Option<String>),
 ) -> Result<MergeOutcome, NarratorError> {
+    merge_audio_video_with_cancel(
+        video_path,
+        audio_path,
+        output_path,
+        replace_audio,
+        duck_db,
+        on_progress,
+        None,
+    )
+    .await
+}
+
+/// Cancellable variant of [`merge_audio_video`].
+#[allow(clippy::too_many_arguments)]
+pub async fn merge_audio_video_with_cancel(
+    video_path: &str,
+    audio_path: &str,
+    output_path: &str,
+    replace_audio: bool,
+    duck_db: f32,
+    on_progress: impl Fn(f64, Option<String>),
+    cancel: CancelFlag,
+) -> Result<MergeOutcome, NarratorError> {
+    check_cancelled(&cancel)?;
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
     // If narration audio runs longer than the source video (e.g. a segment
@@ -569,7 +645,7 @@ pub async fn merge_audio_video(
     // metadata reports the longer audio duration. That's the "video is twice
     // as long" bug users observed.
     let (effective_video_path, _pad_cleanup) =
-        pad_video_to_audio_length(&ffmpeg, video_path, audio_path).await?;
+        pad_video_to_audio_length(&ffmpeg, video_path, audio_path, &cancel).await?;
     let effective_video = effective_video_path.to_string_lossy();
 
     if replace_audio {
@@ -585,27 +661,24 @@ pub async fn merge_audio_video(
         // expects. Padding (above) already aligns things when narration is
         // LONGER than video; we don't need a second guardrail.
         on_progress(0.0, Some("Replacing audio track".to_string()));
-        let output = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args([
-                "-y",
-                "-i",
-                effective_video.as_ref(),
-                "-i",
-                audio_path,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        let mut cmd = Command::new(ffmpeg.as_os_str());
+        cmd.no_window().args([
+            "-y",
+            "-i",
+            effective_video.as_ref(),
+            "-i",
+            audio_path,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            output_path,
+        ]);
+        let output = output_with_cancel(&mut cmd, &cancel).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -633,30 +706,27 @@ pub async fn merge_audio_video(
     // stderr-string path below.
     if let Ok(false) = video_engine::probe_has_audio_stream(Path::new(video_path)).await {
         tracing::warn!("Source has no audio — falling back to narration-only mux");
-        let fallback = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args([
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                effective_video.as_ref(),
-                "-i",
-                audio_path,
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-map",
-                "0:v:0",
-                "-map",
-                "1:a:0",
-                output_path,
-            ])
-            .output()
-            .await
-            .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        let mut cmd = Command::new(ffmpeg.as_os_str());
+        cmd.no_window().args([
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            effective_video.as_ref(),
+            "-i",
+            audio_path,
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            output_path,
+        ]);
+        let fallback = output_with_cancel(&mut cmd, &cancel).await?;
         if !fallback.status.success() {
             let stderr = String::from_utf8_lossy(&fallback.stderr);
             return Err(NarratorError::FfmpegFailed(format!(
@@ -697,30 +767,27 @@ pub async fn merge_audio_video(
             // original" but there's nothing to mix — produce a narration-only
             // mux and signal it so the UI can warn the user.
             tracing::warn!("Source has no audio — falling back to narration-only mux");
-            let fallback = Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args([
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-i",
-                    video_path,
-                    "-i",
-                    audio_path,
-                    "-c:v",
-                    "copy",
-                    "-c:a",
-                    "aac",
-                    "-map",
-                    "0:v:0",
-                    "-map",
-                    "1:a:0",
-                    output_path,
-                ])
-                .output()
-                .await
-                .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+            let mut cmd = Command::new(ffmpeg.as_os_str());
+            cmd.no_window().args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                video_path,
+                "-i",
+                audio_path,
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                output_path,
+            ]);
+            let fallback = output_with_cancel(&mut cmd, &cancel).await?;
             if !fallback.status.success() {
                 let stderr = String::from_utf8_lossy(&fallback.stderr);
                 return Err(NarratorError::FfmpegFailed(format!(
@@ -744,8 +811,8 @@ pub async fn merge_audio_video(
     on_progress(70.0, Some("Encoding final audio".to_string()));
 
     // Mux: video stream copied through, audio = the mixed WAV → AAC.
-    let mux = Command::new(ffmpeg.as_os_str())
-        .no_window()
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window()
         .args([
             "-y",
             "-hide_banner",
@@ -770,10 +837,8 @@ pub async fn merge_audio_video(
             "-movflags",
             "+faststart",
             output_path,
-        ])
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(format!("mux: {e}")))?;
+        ]);
+    let mux = output_with_cancel(&mut cmd, &cancel).await?;
     if !mux.status.success() {
         let stderr = String::from_utf8_lossy(&mux.stderr);
         return Err(NarratorError::FfmpegFailed(format!(
@@ -820,6 +885,7 @@ async fn pad_video_to_audio_length(
     ffmpeg: &Path,
     video_path: &str,
     audio_path: &str,
+    cancel: &CancelFlag,
 ) -> Result<(PathBuf, Option<TempCleanup>), NarratorError> {
     let video_dur = match video_engine::probe_duration(Path::new(video_path)).await {
         Ok(d) => d,
@@ -880,8 +946,8 @@ async fn pad_video_to_audio_length(
     let padded_path =
         std::env::temp_dir().join(format!("_narrator_padded_{}.mp4", uuid::Uuid::new_v4()));
     let filter = format!("tpad=stop_mode=clone:stop_duration={delta:.3}");
-    let output = Command::new(ffmpeg)
-        .no_window()
+    let mut cmd = Command::new(ffmpeg);
+    cmd.no_window()
         .args([
             "-y",
             "-hide_banner",
@@ -905,10 +971,8 @@ async fn pad_video_to_audio_length(
             "yuv420p",
             "-an",
         ])
-        .arg(&padded_path)
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(format!("tpad: {e}")))?;
+        .arg(&padded_path);
+    let output = output_with_cancel(&mut cmd, cancel).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1093,6 +1157,8 @@ fn build_subtitles_filter(srt_path: &Path, style: &SubtitleStyle) -> String {
     )
 }
 
+/// Non-cancellable convenience wrapper (see [`apply_edits`]).
+#[allow(dead_code)]
 pub async fn burn_subtitles(
     video_path: &str,
     srt_path: &str,
@@ -1100,6 +1166,19 @@ pub async fn burn_subtitles(
     style: &SubtitleStyle,
     on_progress: impl Fn(f64, Option<String>),
 ) -> Result<String, NarratorError> {
+    burn_subtitles_with_cancel(video_path, srt_path, output_path, style, on_progress, None).await
+}
+
+/// Cancellable variant of [`burn_subtitles`].
+pub async fn burn_subtitles_with_cancel(
+    video_path: &str,
+    srt_path: &str,
+    output_path: &str,
+    style: &SubtitleStyle,
+    on_progress: impl Fn(f64, Option<String>),
+    cancel: CancelFlag,
+) -> Result<String, NarratorError> {
+    check_cancelled(&cancel)?;
     let ffmpeg = video_engine::detect_ffmpeg()?;
 
     // Preflight: libass must be compiled in, otherwise the `subtitles` filter
@@ -1158,6 +1237,7 @@ pub async fn burn_subtitles(
         ],
         total_duration,
         &on_progress,
+        &cancel,
     )
     .await;
 

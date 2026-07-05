@@ -370,6 +370,40 @@ pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
         .join("frames")
 }
 
+/// Atomically replace `final_dir` with the freshly-extracted `work_dir`.
+///
+/// Frame extraction writes into a temp `.frames-<uuid>.tmp` sibling; only once
+/// it succeeds do we swap it in. This means a failed/cancelled run leaves the
+/// PRIOR successful frames intact (the old code `remove_dir_all`'d them), and a
+/// lower-density re-run can't inherit stale higher-numbered frames from a
+/// denser previous run (they'd otherwise be scanned with fabricated
+/// `i * interval` timestamps).
+///
+/// Directory rename can't clobber an existing target, so this is remove-then-
+/// rename with a brief retry for Windows open-handle (asset-protocol) locks.
+pub fn promote_frames_dir(work_dir: &Path, final_dir: &Path) -> Result<(), NarratorError> {
+    let attempt = |final_dir: &Path| -> std::io::Result<()> {
+        match std::fs::remove_dir_all(final_dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        std::fs::rename(work_dir, final_dir)
+    };
+
+    if let Err(first) = attempt(final_dir) {
+        // A file handle (e.g. the webview asset protocol) can briefly hold a
+        // frame open on Windows; one short retry clears the common case.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        attempt(final_dir).map_err(|e| {
+            NarratorError::FrameExtractionError(format!(
+                "Failed to promote frames directory ({first}; retry: {e})"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 // ── Project templates ────────────────────────────────────────────────────────
 
 pub fn save_template(template: &ProjectTemplate) -> Result<(), NarratorError> {
@@ -1309,6 +1343,43 @@ mod tests {
         assert!(err.to_string().contains("script language"));
         assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
         drop(g);
+    }
+
+    #[test]
+    fn test_promote_frames_dir_replaces_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_dir = tmp.path().join("frames");
+        let work_dir = tmp.path().join(".frames-abc.tmp");
+
+        // A prior run's frames (denser) plus a fresh (sparser) work dir.
+        std::fs::create_dir_all(&final_dir).unwrap();
+        std::fs::write(final_dir.join("frame_0001.jpg"), b"old").unwrap();
+        std::fs::write(final_dir.join("frame_0002.jpg"), b"old").unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::write(work_dir.join("frame_0001.jpg"), b"new").unwrap();
+
+        promote_frames_dir(&work_dir, &final_dir).unwrap();
+
+        // Stale second frame is gone; the work dir is swapped in.
+        assert!(!final_dir.join("frame_0002.jpg").exists());
+        assert_eq!(
+            std::fs::read(final_dir.join("frame_0001.jpg")).unwrap(),
+            b"new"
+        );
+        assert!(!work_dir.exists());
+    }
+
+    #[test]
+    fn test_promote_frames_dir_when_no_prior_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let final_dir = tmp.path().join("frames");
+        let work_dir = tmp.path().join(".frames-xyz.tmp");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::write(work_dir.join("frame_0001.jpg"), b"new").unwrap();
+
+        // No existing final_dir — NotFound must be treated as success.
+        promote_frames_dir(&work_dir, &final_dir).unwrap();
+        assert!(final_dir.join("frame_0001.jpg").exists());
     }
 
     // ── Template CRUD ────────────────────────────────────────────────

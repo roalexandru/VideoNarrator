@@ -61,6 +61,9 @@ pub async fn decode_video_range(
 
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window();
+    // Reap the decoder ffmpeg if this Child is ever dropped without a clean
+    // finish (e.g. run_pipeline returns early on an encoder write failure).
+    cmd.kill_on_drop(true);
     cmd.args(["-hide_banner", "-loglevel", "error"]);
     if start_seconds > 0.0 {
         // -ss before -i: fast (keyframe) seek. Frame-accurate seek would be
@@ -87,7 +90,7 @@ pub async fn decode_video_range(
         .stdout
         .take()
         .ok_or_else(|| NarratorError::FfmpegFailed("decoder stdout".into()))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or_else(|| NarratorError::FfmpegFailed("decoder stderr".into()))?;
@@ -97,6 +100,11 @@ pub async fn decode_video_range(
 
     let handle = tokio::spawn(async move {
         let mut buf = vec![0u8; frame_bytes];
+        // Set when the consumer drops `rx` mid-stream. In that case ffmpeg is
+        // still trying to write frames into stdout; if we then blocked on
+        // `stderr.read_to_string` while ffmpeg blocked on a full (now-unread)
+        // stdout pipe, both would hang forever — the leak this guards against.
+        let mut receiver_gone = false;
         loop {
             // Read exactly one frame's worth, or EOF.
             match stdout.read_exact(&mut buf).await {
@@ -108,28 +116,39 @@ pub async fn decode_video_range(
                     };
                     if tx.send(frame).await.is_err() {
                         // Receiver dropped — caller is no longer interested.
+                        receiver_gone = true;
                         break;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => {
+                    // Kill before draining stderr: ffmpeg may be mid-write to
+                    // stdout, which we're no longer reading.
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
                     return Err(NarratorError::FfmpegFailed(format!("decoder read: {e}")));
                 }
             }
         }
-        // Drain stderr so we can include it in any error message.
+
+        if receiver_gone {
+            // Nobody will read further stdout, so kill ffmpeg first, then reap.
+            // A killed child's non-zero exit is expected, not an error.
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Ok(());
+        }
+
+        // Clean EOF path: bound the stderr drain so a pathological ffmpeg can't
+        // wedge the task, then collect the exit status.
         let mut err_msg = String::new();
-        let _ = stderr.read_to_string(&mut err_msg).await;
+        let _ = stderr.take(64 * 1024).read_to_string(&mut err_msg).await;
 
         let status = child
             .wait()
             .await
             .map_err(|e| NarratorError::FfmpegFailed(format!("decoder wait: {e}")))?;
         if !status.success() {
-            // Some success paths leave a non-zero status when stdout is
-            // closed early by the consumer. Only fail if we genuinely never
-            // produced a usable byte (caller already drained, so we just
-            // surface the message).
             let tail = err_msg.lines().rev().take(5).collect::<Vec<_>>().join("\n");
             return Err(NarratorError::FfmpegFailed(format!(
                 "decoder exited {:?}: {tail}",

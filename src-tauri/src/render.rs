@@ -24,11 +24,15 @@
 //! belongs in the underlying module.
 
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::error::NarratorError;
 use crate::models::{ProgressEvent, VideoMetadata};
 use crate::{video_edit, video_engine};
+
+/// Optional cooperative-cancel flag; `None` disables cancellation (CLI/tests).
+pub type CancelFlag = Option<Arc<AtomicBool>>;
 
 pub use video_edit::{MergeOutcome, SubtitleStyle, VideoEditPlan};
 
@@ -98,9 +102,10 @@ pub async fn apply_edits(
     output_path: &str,
     plan: &VideoEditPlan,
     reporter: Arc<dyn ProgressReporter>,
+    cancel: CancelFlag,
 ) -> Result<String, NarratorError> {
     let on_progress = forward_percent_msg(&reporter);
-    video_edit::apply_edits(input_path, output_path, plan, on_progress).await
+    video_edit::apply_edits_with_cancel(input_path, output_path, plan, on_progress, cancel).await
 }
 
 /// Mux narration audio into an existing video. `replace_audio = true` swaps
@@ -108,6 +113,7 @@ pub async fn apply_edits(
 /// auto-ducking (`duck_db` controls the dip, typical range -4..-15 dB).
 /// Returns a `MergeOutcome` so callers can detect the narration-only
 /// fallback (e.g. to warn the user the source had no audio).
+#[allow(clippy::too_many_arguments)]
 pub async fn merge_audio_video(
     video_path: &str,
     audio_path: &str,
@@ -115,15 +121,17 @@ pub async fn merge_audio_video(
     replace_audio: bool,
     duck_db: f32,
     reporter: Arc<dyn ProgressReporter>,
+    cancel: CancelFlag,
 ) -> Result<MergeOutcome, NarratorError> {
     let on_progress = forward_percent_msg(&reporter);
-    video_edit::merge_audio_video(
+    video_edit::merge_audio_video_with_cancel(
         video_path,
         audio_path,
         output_path,
         replace_audio,
         duck_db,
         on_progress,
+        cancel,
     )
     .await
 }
@@ -135,9 +143,18 @@ pub async fn burn_subtitles(
     output_path: &str,
     style: &SubtitleStyle,
     reporter: Arc<dyn ProgressReporter>,
+    cancel: CancelFlag,
 ) -> Result<String, NarratorError> {
     let on_progress = forward_percent_msg(&reporter);
-    video_edit::burn_subtitles(video_path, srt_path, output_path, style, on_progress).await
+    video_edit::burn_subtitles_with_cancel(
+        video_path,
+        srt_path,
+        output_path,
+        style,
+        on_progress,
+        cancel,
+    )
+    .await
 }
 
 /// Extract a single JPEG/PNG frame at `timestamp` (seconds).

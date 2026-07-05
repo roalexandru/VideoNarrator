@@ -456,7 +456,9 @@ pub async fn mix_narration(
 
 /// RAII guard that removes paths on drop. Used by the mixer to clean up
 /// temp WAVs even on early return.
-struct ScopedRemove(Vec<PathBuf>);
+/// RAII temp-file remover: deletes the listed paths when dropped, so early
+/// returns (errors, cancellation) don't leak intermediate files.
+pub(crate) struct ScopedRemove(pub(crate) Vec<PathBuf>);
 impl Drop for ScopedRemove {
     fn drop(&mut self) {
         for p in &self.0 {

@@ -1,12 +1,14 @@
 //! Video processing engine using ffmpeg for frame extraction and probing.
 
+use crate::cancel::{check_cancelled, is_cancelled, kill_child_after_cancel, output_with_cancel};
 use crate::error::NarratorError;
 use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
 use crate::models::{Frame, FrameConfig, VideoMetadata};
 use crate::process_utils::CommandNoWindow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -389,8 +391,15 @@ pub async fn extract_frames(
     // meaningful — fewer than that and the LLM can't tell scene structure
     // from a handful of samples.
     const MIN_ANCHORS: usize = 3;
-    if let Ok(anchors) =
-        detect_anchors(&ffmpeg, video_path, &metadata, config, on_tick.clone()).await
+    if let Ok(anchors) = detect_anchors(
+        &ffmpeg,
+        video_path,
+        &metadata,
+        config,
+        on_tick.clone(),
+        &cancel_flag,
+    )
+    .await
     {
         if anchors.len() >= MIN_ANCHORS {
             return extract_frames_at_anchors(
@@ -415,20 +424,24 @@ pub async fn extract_frames(
     }
 
     extract_frames_fixed_interval(
-        &ffmpeg, video_path, &metadata, config, output_dir, on_frame, on_tick,
+        &ffmpeg,
+        video_path,
+        &metadata,
+        config,
+        output_dir,
+        ExtractionControl {
+            on_frame,
+            on_tick,
+            cancel_flag,
+        },
     )
     .await
 }
 
-/// Check an optional cancel flag and return `Cancelled` if set. Kept as a
-/// small helper so the anchor loop doesn't sprout repeated `match` blocks.
-fn check_cancelled(cancel_flag: &Option<Arc<AtomicBool>>) -> Result<(), NarratorError> {
-    if let Some(flag) = cancel_flag.as_ref() {
-        if flag.load(Ordering::SeqCst) {
-            return Err(NarratorError::Cancelled);
-        }
-    }
-    Ok(())
+struct ExtractionControl {
+    on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
+    on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Parse `showinfo` stderr lines (`... pts_time:X.Y ...`) into timestamps.
@@ -538,7 +551,9 @@ async fn detect_anchors(
     metadata: &VideoMetadata,
     config: &FrameConfig,
     on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+    cancel: &Option<Arc<AtomicBool>>,
 ) -> Result<Vec<f64>, NarratorError> {
+    check_cancelled(cancel)?;
     // Emit a more informative label so the user knows what's happening
     // during the ffmpeg detect passes (which can each run for many seconds
     // on a long source — the progress bar would otherwise sit at 2% silently).
@@ -549,13 +564,14 @@ async fn detect_anchors(
             metadata.duration_seconds
         ),
     );
-    let scene = detect_scene_changes(ffmpeg, video_path, config.scene_threshold).await?;
+    let scene = detect_scene_changes(ffmpeg, video_path, config.scene_threshold, cancel).await?;
     on_tick(0.10, format!("Found {} scene changes", scene.len()));
+    check_cancelled(cancel)?;
 
     let silence = match probe_has_audio_stream(video_path).await {
         Ok(true) => {
             on_tick(0.12, "Detecting silence boundaries".to_string());
-            let found = detect_silence_boundaries(ffmpeg, video_path)
+            let found = detect_silence_boundaries(ffmpeg, video_path, cancel)
                 .await
                 .unwrap_or_default();
             on_tick(0.20, format!("Found {} silence boundaries", found.len()));
@@ -563,6 +579,9 @@ async fn detect_anchors(
         }
         _ => Vec::new(),
     };
+    // `detect_silence_boundaries` swallows its own errors via unwrap_or_default,
+    // so re-check here to make sure a cancel during that pass propagates.
+    check_cancelled(cancel)?;
 
     let anchors = merge_anchors(
         scene,
@@ -584,17 +603,16 @@ async fn detect_scene_changes(
     ffmpeg: &Path,
     video_path: &Path,
     threshold: f64,
+    cancel: &Option<Arc<AtomicBool>>,
 ) -> Result<Vec<f64>, NarratorError> {
     let threshold = threshold.clamp(0.05, 0.95);
     let filter = format!("select='gt(scene,{threshold:.3})',showinfo");
-    let output = Command::new(ffmpeg.as_os_str())
-        .no_window()
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window()
         .args(["-nostats", "-hide_banner", "-i"])
         .arg(video_path.as_os_str())
-        .args(["-vf", &filter, "-vsync", "vfr", "-f", "null", "-"])
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        .args(["-vf", &filter, "-vsync", "vfr", "-f", "null", "-"]);
+    let output = output_with_cancel(&mut cmd, cancel).await?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
         // showinfo pipes data on success; non-success here means the detect
@@ -609,15 +627,14 @@ async fn detect_scene_changes(
 async fn detect_silence_boundaries(
     ffmpeg: &Path,
     video_path: &Path,
+    cancel: &Option<Arc<AtomicBool>>,
 ) -> Result<Vec<f64>, NarratorError> {
-    let output = Command::new(ffmpeg.as_os_str())
-        .no_window()
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window()
         .args(["-nostats", "-hide_banner", "-i"])
         .arg(video_path.as_os_str())
-        .args(["-af", "silencedetect=n=-30dB:d=0.5", "-f", "null", "-"])
-        .output()
-        .await
-        .map_err(|e| NarratorError::FfmpegFailed(e.to_string()))?;
+        .args(["-af", "silencedetect=n=-30dB:d=0.5", "-f", "null", "-"]);
+    let output = output_with_cancel(&mut cmd, cancel).await?;
     // silencedetect writes detection lines to stderr even on success.
     let stderr = String::from_utf8_lossy(&output.stderr);
     Ok(parse_silence_midpoints(&stderr))
@@ -730,9 +747,16 @@ async fn extract_frames_fixed_interval(
     metadata: &VideoMetadata,
     config: &FrameConfig,
     output_dir: &Path,
-    on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
-    on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
+    control: ExtractionControl,
 ) -> Result<Vec<Frame>, NarratorError> {
+    let ExtractionControl {
+        on_frame,
+        on_tick,
+        cancel_flag,
+    } = control;
+
+    check_cancelled(&cancel_flag)?;
+
     let base_interval = config.density.interval_seconds();
 
     // Adaptive: ensure we don't extract more frames than max_frames
@@ -788,20 +812,41 @@ async fn extract_frames_fixed_interval(
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         let total_duration = metadata.duration_seconds.max(0.001);
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(time_str) = extract_time_from_ffmpeg_line(&line) {
-                let seconds = parse_ffmpeg_time(&time_str);
-                if seconds > 0.0 {
-                    let raw = (seconds / total_duration).clamp(0.0, 1.0);
-                    let fraction = raw * 0.80;
-                    on_tick(fraction, format!("Extracting frames ({:.0}%)", raw * 100.0));
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            if let Some(time_str) = extract_time_from_ffmpeg_line(&line) {
+                                let seconds = parse_ffmpeg_time(&time_str);
+                                if seconds > 0.0 {
+                                    let raw = (seconds / total_duration).clamp(0.0, 1.0);
+                                    let fraction = raw * 0.80;
+                                    on_tick(fraction, format!("Extracting frames ({:.0}%)", raw * 100.0));
+                                }
+                            }
+                            if recent_stderr.len() >= STDERR_TAIL {
+                                recent_stderr.pop_front();
+                            }
+                            recent_stderr.push_back(line);
+                        }
+                        Ok(None) => break,
+                        Err(e) => return Err(NarratorError::FfmpegFailed(e.to_string())),
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if is_cancelled(&cancel_flag) {
+                        kill_child_after_cancel(&mut child).await;
+                        return Err(NarratorError::Cancelled);
+                    }
                 }
             }
-            if recent_stderr.len() >= STDERR_TAIL {
-                recent_stderr.pop_front();
-            }
-            recent_stderr.push_back(line);
         }
+    }
+
+    if is_cancelled(&cancel_flag) {
+        kill_child_after_cancel(&mut child).await;
+        return Err(NarratorError::Cancelled);
     }
 
     let status = child
@@ -814,6 +859,7 @@ async fn extract_frames_fixed_interval(
     }
 
     on_tick(0.80, format!("Indexing frames (0 of ~{expected_frames})"));
+    check_cancelled(&cancel_flag)?;
 
     // Collect extracted frames — directory scan, image dimension reads, and blake3
     // hashing are CPU/IO-intensive, so run on the blocking thread pool.
@@ -822,7 +868,9 @@ async fn extract_frames_fixed_interval(
     let skip_dedup = config.skip_dedup;
     let duration = metadata.duration_seconds;
     let tick_for_blocking = on_tick.clone();
+    let cancel_for_blocking = cancel_flag.clone();
     let frames = tokio::task::spawn_blocking(move || {
+        check_cancelled(&cancel_for_blocking)?;
         let mut entries: Vec<_> = std::fs::read_dir(&output_dir_owned)
             .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
             .filter_map(|e| e.ok())
@@ -838,6 +886,7 @@ async fn extract_frames_fixed_interval(
         let total = entries.len().min(max_frames).max(1);
         let mut frames = Vec::new();
         for (i, entry) in entries.iter().enumerate() {
+            check_cancelled(&cancel_for_blocking)?;
             if i >= max_frames {
                 break;
             }
@@ -870,6 +919,7 @@ async fn extract_frames_fixed_interval(
         if skip_dedup {
             Ok::<_, NarratorError>(frames)
         } else {
+            check_cancelled(&cancel_for_blocking)?;
             let count_before = frames.len();
             let deduped = deduplicate_frames(frames);
             tick_for_blocking(
@@ -968,6 +1018,19 @@ pub fn frame_to_base64_scaled(path: &Path, max_width: u32) -> Result<String, Nar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn test_metadata() -> VideoMetadata {
+        VideoMetadata {
+            path: "test.mp4".to_string(),
+            duration_seconds: 10.0,
+            width: 640,
+            height: 360,
+            codec: "h264".to_string(),
+            fps: 30.0,
+            file_size: 1024,
+        }
+    }
 
     #[test]
     fn test_parse_frame_rate() {
@@ -1068,6 +1131,63 @@ mod tests {
     fn test_frame_to_base64_nonexistent() {
         let result = frame_to_base64(Path::new("/nonexistent/frame.jpg"));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn fixed_interval_respects_pre_cancelled_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = Arc::new(AtomicBool::new(true));
+        let err = extract_frames_fixed_interval(
+            Path::new("ffmpeg-not-needed"),
+            Path::new("video.mp4"),
+            &test_metadata(),
+            &FrameConfig::default(),
+            dir.path(),
+            ExtractionControl {
+                on_frame: Arc::new(|_| {}),
+                on_tick: Arc::new(|_, _| {}),
+                cancel_flag: Some(flag),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, NarratorError::Cancelled));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_interval_cancels_quiet_running_child() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let fake_ffmpeg = dir.path().join("fake-ffmpeg");
+        std::fs::write(&fake_ffmpeg, "#!/bin/sh\nsleep 30\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_ffmpeg).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_ffmpeg, perms).unwrap();
+
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_task = flag.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            flag_for_task.store(true, Ordering::SeqCst);
+        });
+
+        let err = extract_frames_fixed_interval(
+            &fake_ffmpeg,
+            Path::new("video.mp4"),
+            &test_metadata(),
+            &FrameConfig::default(),
+            dir.path(),
+            ExtractionControl {
+                on_frame: Arc::new(|_| {}),
+                on_tick: Arc::new(|_, _| {}),
+                cancel_flag: Some(flag),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, NarratorError::Cancelled));
     }
 
     #[test]
