@@ -8,30 +8,39 @@ import { NumericInput } from "./NumericInput";
 
 const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255,255,255,0.07)" };
 
-function NumInput({ label, value, onChange, min = 0, max = 100, width = 40, color = C.dim }: {
-  label: string; value: number; onChange: (v: number) => void;
+function NumInput({ label, value, onChange, onCommit, min = 0, max = 100, width = 40, color = C.dim }: {
+  label: string; value: number; onChange: (v: number) => void; onCommit?: () => void;
   min?: number; max?: number; width?: number; color?: string;
 }) {
   return (
     <>
       {label && <span style={{ fontSize: 10, color: C.muted }}>{label}</span>}
-      <NumericInput value={value} onChange={onChange} min={min} max={max} width={width} color={color}
+      <NumericInput value={value} onChange={onChange} onCommit={onCommit} min={min} max={max} width={width} color={color}
         style={{ fontSize: 10, padding: "2px 3px" }} />
     </>
   );
 }
 
 interface EffectInspectorProps {
+  /** One-shot committed update (its own undo entry). For discrete controls:
+   *  buttons, selects, toggles. */
   effect: TimelineEffect;
   onUpdate: (partial: Partial<TimelineEffect>) => void;
+  /** Continuous update during an interaction (color-picker drag, typing a
+   *  number) — does NOT push undo. Pair with onCommit at the interaction end.
+   *  Without this, each change event pushed a separate undo entry, so a single
+   *  color-picker drag flooded the 30-slot stack and wiped history. */
+  onLiveUpdate: (partial: Partial<TimelineEffect>) => void;
+  /** Ends a live interaction, pushing exactly one undo entry. */
+  onCommit: () => void;
 }
 
-export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
+export function EffectInspector({ effect, onUpdate, onLiveUpdate, onCommit }: EffectInspectorProps) {
   if (effect.type === 'spotlight' && effect.spotlight) {
     const s = effect.spotlight;
     return (
       <>
-        <NumInput label="Dim" value={Math.round(s.dimOpacity * 100)} onChange={(v) => onUpdate({ spotlight: { ...s, dimOpacity: v / 100 } })} max={100} />
+        <NumInput label="Dim" value={Math.round(s.dimOpacity * 100)} onChange={(v) => onLiveUpdate({ spotlight: { ...s, dimOpacity: v / 100 } })} onCommit={onCommit} max={100} />
         <span style={{ fontSize: 10, color: C.muted }}>%</span>
       </>
     );
@@ -44,7 +53,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
         {/* Strength is stored normalized (0,1] = blur radius as a fraction of
             video width, so the exported blur is as strong as the preview at any
             resolution. Displayed 1–100 = tenths of a percent of width. */}
-        <NumInput label="Strength" value={Math.round((b.radius <= 1 ? b.radius : 0.03) * 1000)} onChange={(v) => onUpdate({ blur: { ...b, radius: v / 1000 } })} min={1} max={100} width={36} />
+        <NumInput label="Strength" value={Math.round((b.radius <= 1 ? b.radius : 0.03) * 1000)} onChange={(v) => onLiveUpdate({ blur: { ...b, radius: v / 1000 } })} onCommit={onCommit} min={1} max={100} width={36} />
         <div style={{ width: 1, height: 20, background: C.border }} />
         <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
           <button onClick={() => onUpdate({ blur: { ...b, invert: false } })} style={{
@@ -88,7 +97,8 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
         <input
           type="text"
           value={t.content}
-          onChange={(e) => onUpdate({ text: { ...t, content: e.target.value } })}
+          onChange={(e) => onLiveUpdate({ text: { ...t, content: e.target.value } })}
+          onBlur={onCommit}
           placeholder="Enter text..."
           style={{
             width: 150, padding: "4px 8px", borderRadius: 4,
@@ -109,7 +119,7 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
           {fonts.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
         {/* Size */}
-        <NumInput label="Size %" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={1} max={20} width={36} />
+        <NumInput label="Size %" value={t.fontSize} onChange={(v) => onLiveUpdate({ text: { ...t, fontSize: v } })} onCommit={onCommit} min={1} max={20} width={36} />
         {/* Bold. Italic/underline/alignment are intentionally omitted: ffmpeg
             drawtext (the export path) has no underline or alignment option and
             ignores font-style on non-fontconfig builds, so exposing them would
@@ -121,14 +131,16 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
         {/* Text color */}
         <span style={{ fontSize: 9, color: C.muted }}>Text</span>
         <input type="color" value={t.color}
-          onChange={(e) => onUpdate({ text: { ...t, color: e.target.value } })}
+          onChange={(e) => onLiveUpdate({ text: { ...t, color: e.target.value } })}
+          onBlur={onCommit}
           title="Text color"
           style={{ width: 22, height: 22, padding: 0, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", background: "transparent" }}
         />
         {/* Background color */}
         <span style={{ fontSize: 9, color: C.muted }}>Bg</span>
         <input type="color" value={t.background || "#000000"}
-          onChange={(e) => onUpdate({ text: { ...t, background: e.target.value } })}
+          onChange={(e) => onLiveUpdate({ text: { ...t, background: e.target.value } })}
+          onBlur={onCommit}
           title="Background color"
           style={{ width: 22, height: 22, padding: 0, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", background: "transparent" }}
         />
@@ -153,10 +165,11 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
         <input
           type="color"
           value={f.color}
-          onChange={(e) => onUpdate({ fade: { ...f, color: e.target.value } })}
+          onChange={(e) => onLiveUpdate({ fade: { ...f, color: e.target.value } })}
+          onBlur={onCommit}
           style={{ width: 24, height: 24, padding: 0, border: `1px solid ${C.border}`, borderRadius: 4, cursor: "pointer", background: "transparent" }}
         />
-        <NumInput label="Opacity" value={Math.round(f.opacity * 100)} onChange={(v) => onUpdate({ fade: { ...f, opacity: v / 100 } })} max={100} />
+        <NumInput label="Opacity" value={Math.round(f.opacity * 100)} onChange={(v) => onLiveUpdate({ fade: { ...f, opacity: v / 100 } })} onCommit={onCommit} max={100} />
         <span style={{ fontSize: 10, color: C.muted }}>%</span>
         <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>Use In/Out transitions for smooth fades.</span>
       </>

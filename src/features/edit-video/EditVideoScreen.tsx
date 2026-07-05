@@ -348,6 +348,13 @@ export function EditVideoScreen() {
     const h = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // Undo/redo own Cmd/Ctrl+Z first.
+      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); return; }
+      // Let every other modified chord through to the browser/OS. Without this
+      // guard the plain bindings below fired on Cmd+S (splitting the clip and
+      // swallowing "save") and Cmd+F etc.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.code === "Space") { e.preventDefault(); togglePlay(); }
       if (e.code === "KeyS") { e.preventDefault(); splitAt(outputTime); }
       if (e.code === "KeyF") { e.preventDefault(); insertFreezeFrame(outputTime); }
@@ -367,8 +374,6 @@ export function EditVideoScreen() {
       }
       if (e.code === "ArrowLeft") { e.preventDefault(); seekToOutput(outputTime - 1); }
       if (e.code === "ArrowRight") { e.preventDefault(); seekToOutput(outputTime + 1); }
-      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && !e.shiftKey) { e.preventDefault(); undo(); }
-      if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ" && e.shiftKey) { e.preventDefault(); redo(); }
     };
     window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h);
   }, [isPlaying, selectedClipIndex, selectedEffectId, outputTime, clips, seekToOutput, splitAt, deleteClip, undo, redo, insertFreezeFrame, isEditingZoomPan, showAddEffectMenu, selectEffect, removeEffect]);
@@ -437,9 +442,13 @@ export function EditVideoScreen() {
     const onMove = (me: MouseEvent) => {
       const timeDelta = (me.clientX - startX) / pps;
       if (edge === 'move') {
-        const newStart = Math.max(0, origStart + timeDelta);
+        // Clamp the START into the valid window [0, outputDuration - dur] so the
+        // block keeps its duration when dragged past the end. Previously only
+        // endTime was clamped to outputDuration, leaving startTime past it — an
+        // inverted range the store then squashed to a 0.1s sliver.
         const dur = origEnd - origStart;
-        updateEffectLive(effectId, { startTime: newStart, endTime: Math.min(newStart + dur, outputDuration) });
+        const newStart = Math.min(Math.max(0, origStart + timeDelta), Math.max(0, outputDuration - dur));
+        updateEffectLive(effectId, { startTime: newStart, endTime: newStart + dur });
       } else if (edge === 'start') {
         const newStart = Math.max(0, Math.min(origEnd - 0.5, origStart + timeDelta));
         updateEffectLive(effectId, { startTime: newStart });
@@ -1031,9 +1040,15 @@ export function EditVideoScreen() {
                     {(Object.entries(EFFECT_META) as [EffectType, { label: string; color: string }][]).map(([type, meta]) => (
                       <div key={type}
                         onClick={() => {
-                          const start = outputTime;
-                          const end = Math.min(start + 5, outputDuration);
-                          if (end - start < 0.5) return;
+                          // Anchor a ~5s effect ending at (or before) the
+                          // timeline end, then shift its start back so it fits
+                          // even when the playhead is near the end. Previously
+                          // this bailed silently near the end AND left the menu
+                          // open; now it always adds (when there's ≥0.5s of
+                          // timeline) and always closes the menu.
+                          const end = Math.min(outputTime + 5, outputDuration);
+                          const start = Math.max(0, Math.min(outputTime, end - 0.5));
+                          if (end - start < 0.5) { setShowAddEffectMenu(false); return; }
                           const defaults: Record<string, Partial<Omit<TimelineEffect, 'id'>>> = {
                             'zoom-pan': { transitionIn: 1, transitionOut: 1, reverse: true, zoomPan: { ...DEFAULT_ZOOM_PAN } },
                             'spotlight': { transitionIn: 0.5, transitionOut: 0.5, reverse: true, spotlight: { x: 0.5, y: 0.5, radius: 0.15, dimOpacity: 0.7 } },
@@ -1109,7 +1124,12 @@ export function EditVideoScreen() {
                 </div>
               )}
               {selectedEffect && selectedEffect.type !== 'zoom-pan' && (
-                <EffectInspector effect={selectedEffect} onUpdate={(partial) => updateEffect(selectedEffect.id, partial)} />
+                <EffectInspector
+                  effect={selectedEffect}
+                  onUpdate={(partial) => updateEffect(selectedEffect.id, partial)}
+                  onLiveUpdate={(partial) => updateEffectLive(selectedEffect.id, partial)}
+                  onCommit={() => commitEffectChange()}
+                />
               )}
             </div>
           )}

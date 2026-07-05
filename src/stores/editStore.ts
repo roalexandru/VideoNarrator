@@ -354,11 +354,24 @@ export const useEditStore = create<EditStore>((set, get) => ({
         }
         if (outputTime > cumulative && outputTime < cumulative + dur) {
           const undo = pushUndo(state);
+          const clips = [...state.clips];
+          if (clip.type === 'image') {
+            // Image clips have no source time axis; they're measured purely by
+            // imageDuration. Split by DURATION so the two halves sum to the
+            // original — copying sourceStart/sourceEnd (and imageDuration) into
+            // both, as the generic path does, would double the on-timeline
+            // length and duplicate the still.
+            const leftDur = outputTime - cumulative;
+            const rightDur = dur - leftDur;
+            const left: EditClip = { ...clip, id: crypto.randomUUID(), imageDuration: leftDur };
+            const right: EditClip = { ...clip, id: crypto.randomUUID(), imageDuration: rightDur };
+            clips.splice(i, 1, left, right);
+            return { ...undo, clips, selectedClipIndex: i };
+          }
           const relativeTime = (outputTime - cumulative) * clip.speed;
           const sourceMiddle = clip.sourceStart + relativeTime;
           const left: EditClip = { ...clip, id: crypto.randomUUID(), sourceEnd: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
           const right: EditClip = { ...clip, id: crypto.randomUUID(), sourceStart: sourceMiddle, zoomPan: clip.zoomPan ? structuredClone(clip.zoomPan) : undefined };
-          const clips = [...state.clips];
           clips.splice(i, 1, left, right);
           return { ...undo, clips, selectedClipIndex: i };
         }
@@ -558,6 +571,12 @@ export const useEditStore = create<EditStore>((set, get) => ({
         const clip = state.clips[i];
         const dur = clipOutputDuration(clip);
         if (outputTime >= cumulative && outputTime <= cumulative + dur) {
+          // A freeze frame of a still image is meaningless: it has no source
+          // time axis, and the generic split path below would both duplicate
+          // the image and fabricate a bogus freezeSourceTime. No-op. Returning
+          // the original state discards the undo snapshot pushed above, so the
+          // no-op leaves the undo history untouched.
+          if (clip.type === 'image') return state;
           const sourceTime = clip.type === 'freeze'
             ? (clip.freezeSourceTime ?? clip.sourceStart)
             : clip.sourceStart + (outputTime - cumulative) * clip.speed;
