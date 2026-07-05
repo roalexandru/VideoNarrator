@@ -175,6 +175,12 @@ export function ProcessingScreen() {
           computeEditPlanHash(editSnapshot.clips, editSnapshot.effects),
         );
       } catch (err: unknown) {
+        // A user cancel during the edit render isn't an error — the Cancel
+        // button already moved the phase to "cancelled"; don't clobber it.
+        if (String(err).toLowerCase().includes("cancel")) {
+          proc.setPhase("cancelled");
+          return;
+        }
         console.error("apply_video_edits failed:", err);
         trackError("apply_video_edits", err);
         proc.setError(toUserMessage(err));
@@ -255,6 +261,11 @@ export function ProcessingScreen() {
         });
       }
     } catch (err: unknown) {
+      // User cancel → the Cancel button already set phase "cancelled"; keep it.
+      if (String(err).toLowerCase().includes("cancel")) {
+        proc.setPhase("cancelled");
+        return;
+      }
       trackError("generate_narration", err, { provider: config.aiProvider, model: config.model, style: config.style });
       const errMsg = toUserMessage(err);
       proc.setError(errMsg);

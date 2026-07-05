@@ -192,7 +192,12 @@ impl RecorderState {
     }
 
     async fn reset(&self) {
-        *self.ffmpeg_child.lock().await = None;
+        // Kill any lingering recorder child before dropping it. Previously this
+        // just set the handle to None, orphaning a gdigrab ffmpeg that kept
+        // recording the desktop forever on a second start / mid-record quit.
+        if let Some(mut child) = self.ffmpeg_child.lock().await.take() {
+            crate::cancel::kill_child_after_cancel(&mut child).await;
+        }
         self.segments.lock().await.clear();
         *self.phase.lock().await = RecordingPhase::Idle;
         *self.output_dir.lock().await = None;
@@ -650,17 +655,30 @@ pub async fn generate_narration(
     }
 
     let frames_dir = project_store::get_project_frames_dir(&project_id);
-    tokio::fs::create_dir_all(&frames_dir)
+    // Extract into a fresh temp dir and atomically swap it in on success. This
+    // (a) prevents stale frames from a denser prior run being scanned with
+    // fabricated timestamps, and (b) preserves a prior successful run's frames
+    // if this extraction fails or is cancelled.
+    let project_dir = frames_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| frames_dir.clone());
+    tokio::fs::create_dir_all(&project_dir)
+        .await
+        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
+    let work_dir = project_dir.join(format!(".frames-{}.tmp", uuid::Uuid::new_v4()));
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir)
         .await
         .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
     let channel_for_frames = channel.clone();
     let channel_for_ticks = channel.clone();
-    let frames_dir_cleanup = frames_dir.clone();
+    let work_dir_cleanup = work_dir.clone();
     let frames = match video_engine::extract_frames(
         Path::new(&params.video_path),
         &frame_config,
-        &frames_dir,
+        &work_dir,
         move |frame| {
             channel_for_frames
                 .send(ProgressEvent::FrameExtracted {
@@ -681,15 +699,40 @@ pub async fn generate_narration(
     {
         Ok(f) => f,
         Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&frames_dir_cleanup).await;
+            let _ = tokio::fs::remove_dir_all(&work_dir_cleanup).await;
             return Err(e);
         }
     };
 
     if state.cancel_flag.load(Ordering::SeqCst) {
-        let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
         return Err(NarratorError::Cancelled);
     }
+
+    // Extraction succeeded — swap the temp dir in for the real frames dir and
+    // remap each frame path from the temp dir to its final location.
+    {
+        let work = work_dir.clone();
+        let final_dir = frames_dir.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            project_store::promote_frames_dir(&work, &final_dir)
+        })
+        .await
+        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
+        {
+            let _ = tokio::fs::remove_dir_all(&work_dir).await;
+            return Err(e);
+        }
+    }
+    let frames: Vec<_> = frames
+        .into_iter()
+        .map(|mut fr| {
+            if let Ok(rel) = fr.path.strip_prefix(&work_dir) {
+                fr.path = frames_dir.join(rel);
+            }
+            fr
+        })
+        .collect();
 
     // Phase 2: Process documents — the 25%→30% slice of the global bar.
     channel
@@ -865,6 +908,14 @@ pub async fn generate_narration(
     }
 
     let mut script = script?;
+
+    // The main LLM call above isn't itself interruptible (aborting mid-flight
+    // would discard the streamed chunk the resume-retry path relies on), but a
+    // cancel pressed while it ran was previously ignored — generation completed
+    // and the UI flipped to "done". Honor it here before any further work.
+    if state.cancel_flag.load(Ordering::SeqCst) {
+        return Err(NarratorError::Cancelled);
+    }
 
     // Optional self-critique pass — gated behind strict_mode. The critique
     // uses the same frames + provider as the main generation; a handful of
@@ -1079,6 +1130,19 @@ pub async fn refine_script(
 
 #[tauri::command]
 pub async fn cancel_generation(state: tauri::State<'_, AppState>) -> Result<(), NarratorError> {
+    state.cancel_flag.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Cancel an in-flight video operation (edit render, audio merge, subtitle
+/// burn). Shares `AppState.cancel_flag` with generation — the app is a
+/// single-screen wizard, so at most one long operation runs at a time and each
+/// cancellable command resets the flag at entry. Named separately from
+/// `cancel_generation` so non-generation screens invoke something meaningful.
+#[tauri::command]
+pub async fn cancel_video_operation(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), NarratorError> {
     state.cancel_flag.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -1877,23 +1941,37 @@ pub async fn stop_screen_recording(
         .clone()
         .ok_or_else(|| NarratorError::FfmpegFailed("No output path set".into()))?;
 
-    // Concatenate all segments
-    let result_path = screen_recorder::concatenate_segments(&segments, &final_path).await?;
+    // Concatenate segments, then ALWAYS close the overlay and reset state so a
+    // concat failure can't wedge the recorder (phase stuck at Stopping, overlay
+    // window leaked → every later start fails on the duplicate window label).
+    let concat_result = screen_recorder::concatenate_segments(&segments, &final_path).await;
 
-    // Close the overlay window
     if let Some(overlay) = app.get_webview_window("recorder") {
         let _ = overlay.close();
     }
 
-    // Emit event for the main window
     use tauri::Emitter;
-    let _ = app.emit("recording-stopped", &result_path);
-
-    // Reset state
-    state.reset().await;
-
-    tracing::info!("Recording stopped → {result_path}");
-    Ok(result_path)
+    match concat_result {
+        Ok(result_path) => {
+            let _ = app.emit("recording-stopped", &result_path);
+            state.reset().await;
+            tracing::info!("Recording stopped → {result_path}");
+            Ok(result_path)
+        }
+        Err(e) => {
+            // Keep the segments on disk — they're unrecoverable user footage —
+            // and tell the main window to leave "recording" mode. reset() clears
+            // the segment list from state but does not delete the files.
+            let out_dir = state.output_dir.lock().await.clone();
+            let msg = format!("Combining recording segments failed: {e}");
+            let _ = app.emit("recording-failed", &msg);
+            state.reset().await;
+            let where_kept = out_dir
+                .map(|d| format!(" Segments kept in {d}"))
+                .unwrap_or_default();
+            Err(NarratorError::FfmpegFailed(format!("{msg}.{where_kept}")))
+        }
+    }
 }
 
 /// Get the directory where recordings are saved.
@@ -1919,7 +1997,11 @@ pub async fn apply_video_edits(
     output_path: String,
     edits: video_edit::VideoEditPlan,
     channel: Channel<ProgressEvent>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, NarratorError> {
+    // Fresh flag for this operation; the frontend Cancel button flips it via
+    // `cancel_video_operation`.
+    state.cancel_flag.store(false, Ordering::SeqCst);
     // Announce the phase BEFORE the first percent tick so the frontend can
     // light up the "Apply Edits" step card on the very first event. The
     // subsequent `ProgressEvent::Progress` stream (with optional messages)
@@ -1929,7 +2011,14 @@ pub async fn apply_video_edits(
             phase: "applying_edits".to_string(),
         })
         .ok();
-    render::apply_edits(&input_path, &output_path, &edits, channel_reporter(channel)).await
+    render::apply_edits(
+        &input_path,
+        &output_path,
+        &edits,
+        channel_reporter(channel),
+        Some(state.cancel_flag.clone()),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1967,7 +2056,9 @@ pub async fn merge_audio_video(
     replace_audio: bool,
     channel: Channel<ProgressEvent>,
     duck_db: Option<f32>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<render::MergeOutcome, NarratorError> {
+    state.cancel_flag.store(false, Ordering::SeqCst);
     render::merge_audio_video(
         &video_path,
         &audio_path,
@@ -1975,6 +2066,7 @@ pub async fn merge_audio_video(
         replace_audio,
         duck_db.unwrap_or(-8.0),
         channel_reporter(channel),
+        Some(state.cancel_flag.clone()),
     )
     .await
 }
@@ -2106,6 +2198,7 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
 /// that file is removed on success (typically the `_merged.mp4` the UI
 /// produces on the way to the burnt final).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn burn_subtitles(
     video_path: String,
     script: NarrationScript,
@@ -2114,7 +2207,9 @@ pub async fn burn_subtitles(
     style: Option<video_edit::SubtitleStyle>,
     audio_dir: Option<String>,
     cleanup_intermediate: Option<String>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, NarratorError> {
+    state.cancel_flag.store(false, Ordering::SeqCst);
     let style = style.unwrap_or_default();
 
     // Try to load the sidecar timings written by generate_tts (compact mode).
@@ -2154,6 +2249,7 @@ pub async fn burn_subtitles(
         &output_path,
         &style,
         channel_reporter(channel),
+        Some(state.cancel_flag.clone()),
     )
     .await;
 

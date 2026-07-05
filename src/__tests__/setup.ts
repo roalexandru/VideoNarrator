@@ -273,6 +273,9 @@ export function setupDefaultMocks() {
       case "apply_video_edits":
         return "/tmp/edited.mp4";
 
+      case "cancel_video_operation":
+        return null;
+
       case "file_exists":
         return true;
 

@@ -122,6 +122,10 @@ pub async fn start_segment(
 
     let mut cmd = tokio::process::Command::new(ffmpeg.as_os_str());
     cmd.no_window()
+        // Reap the gdigrab ffmpeg if the Child is dropped without stop_segment
+        // (e.g. RecorderState::reset on a second start, or quitting mid-record)
+        // — otherwise it keeps recording the desktop forever.
+        .kill_on_drop(true)
         .args([
             "-y",
             "-f",
@@ -187,6 +191,13 @@ pub async fn stop_segment(child: &mut tokio::process::Child) -> Result<(), Narra
     Ok(())
 }
 
+/// Escape a path for use inside a single-quoted ffmpeg concat-demuxer `file`
+/// directive. The demuxer's quoting rule: close the quote, emit an escaped
+/// literal quote, reopen — i.e. `'` becomes `'\''`.
+fn concat_escape(path: &str) -> String {
+    path.replace('\'', "'\\''")
+}
+
 /// Concatenate multiple recording segments into a single output file.
 /// If there's only one segment, just rename it.
 pub async fn concatenate_segments(
@@ -217,10 +228,13 @@ pub async fn concatenate_segments(
         .to_path_buf();
     let filelist_path = parent.join("concat_list.txt");
 
-    // Write the concat file list
+    // Write the concat file list. Paths are wrapped in single quotes for the
+    // ffmpeg concat demuxer; any single quote inside a path must be escaped as
+    // `'\''` or a path like `.../O'Brien/seg.mp4` breaks the parse (and every
+    // multi-segment recording under that directory would fail).
     let filelist_content: String = segments
         .iter()
-        .map(|s| format!("file '{s}'"))
+        .map(|s| format!("file '{}'", concat_escape(s)))
         .collect::<Vec<_>>()
         .join("\n");
     tokio::fs::write(&filelist_path, &filelist_content).await?;
@@ -292,4 +306,21 @@ pub fn set_window_display_affinity(hwnd: isize) {
 #[allow(dead_code)]
 pub fn set_window_display_affinity(_hwnd: isize) {
     // No-op on non-Windows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concat_escape_wraps_single_quotes() {
+        // A path with an apostrophe (e.g. a user named O'Brien) must produce a
+        // demuxer-safe entry when wrapped in single quotes by the caller.
+        assert_eq!(
+            concat_escape("/Users/O'Brien/seg.mp4"),
+            "/Users/O'\\''Brien/seg.mp4"
+        );
+        // Paths without quotes are unchanged.
+        assert_eq!(concat_escape("/tmp/segment_0.mp4"), "/tmp/segment_0.mp4");
+    }
 }

@@ -186,10 +186,12 @@ pub async fn run_pipeline(
     output_path: &Path,
     plan: &VideoEditPlan,
     on_progress: &(impl Fn(f64, Option<String>) + Send + Sync),
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(), NarratorError> {
     if plan.clips.is_empty() {
         return Err(NarratorError::ExportError("No clips to process".into()));
     }
+    crate::cancel::check_cancelled(&cancel)?;
 
     let meta = video_engine::probe_video(input_path).await?;
     let width = meta.width.max(2);
@@ -220,6 +222,9 @@ pub async fn run_pipeline(
         .join(format!("_audio_{}.wav", uuid::Uuid::new_v4()));
     let audio_path =
         audio::render_timeline_audio(input_path, &plan.clips, &temp_audio_path).await?;
+    // Ensure the timeline WAV is removed on ANY exit (error, cancel, success),
+    // not just the old success-only cleanup path below.
+    let _wav_guard = audio_path.clone().map(|p| audio::ScopedRemove(vec![p]));
 
     // Pre-render text overlays once.
     let mut text_cache = TextRenderCache::default();
@@ -256,6 +261,7 @@ pub async fn run_pipeline(
 
     let total_clips = plan.clips.len();
     for (clip_idx, clip) in plan.clips.iter().enumerate() {
+        crate::cancel::check_cancelled(&cancel)?;
         let clip_start = clip_starts[clip_idx];
         let out_dur = clip_output_duration(clip);
         let out_frames = (out_dur * fps).round().max(1.0) as u64;
@@ -378,6 +384,12 @@ pub async fn run_pipeline(
             .await?;
 
             for f in 0..out_frames {
+                // Mid-clip cancel check: returning here drops `rx`, so the
+                // decoder task kills its ffmpeg, and the encoder's Drop removes
+                // the partial output. Checked every 8 frames to stay cheap.
+                if f.is_multiple_of(8) {
+                    crate::cancel::check_cancelled(&cancel)?;
+                }
                 let frame = match rx.recv().await {
                     Some(fr) => fr,
                     None => {
@@ -448,11 +460,7 @@ pub async fn run_pipeline(
     }
 
     encoder.finish().await?;
-
-    // Cleanup the temp audio.
-    if let Some(p) = audio_path.as_ref() {
-        let _ = tokio::fs::remove_file(p).await;
-    }
+    // `_wav_guard` removes the timeline WAV on drop.
 
     on_progress(100.0, None);
     Ok(())

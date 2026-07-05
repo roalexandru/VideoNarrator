@@ -22,7 +22,25 @@ pub struct Encoder {
     child: Child,
     stdin: Option<ChildStdin>,
     stderr_handle: Option<tokio::task::JoinHandle<String>>,
+    /// Final destination, renamed into place only on a successful `finish()`.
     output_path: PathBuf,
+    /// Sibling temp file ffmpeg actually writes to. Keeping the real output
+    /// path untouched until the mux completes means a crashed/cancelled encode
+    /// can never leave a truncated-but-valid MP4 at `output_path` (which would
+    /// then pass the frontend's `fileExists` cache check).
+    partial_path: PathBuf,
+    finished: bool,
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        // `kill_on_drop(true)` reaps the ffmpeg child; here we just make sure a
+        // half-written partial file doesn't linger. On the success path
+        // `finish()` renames it away and clears `finished`.
+        if !self.finished {
+            let _ = std::fs::remove_file(&self.partial_path);
+        }
+    }
 }
 
 impl Encoder {
@@ -52,8 +70,26 @@ impl Encoder {
         let size_arg = format!("{width}x{height}");
         let fps_arg = format!("{:.6}", fps);
 
+        // ffmpeg writes to a sibling `.partial-<uuid>.<ext>` file; we rename it
+        // onto `output_path` only after a clean `finish()`. The extension is
+        // preserved so container-format inference still works.
+        let ext = output_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("mp4");
+        let stem = output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("out");
+        let partial_path = output_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(".{stem}.partial-{}.{ext}", uuid::Uuid::new_v4()));
+
         let mut cmd = tokio::process::Command::new(ffmpeg.as_os_str());
         cmd.no_window();
+        // Reap the encoder ffmpeg if this Encoder is dropped without finishing.
+        cmd.kill_on_drop(true);
         cmd.args([
             "-y",
             "-hide_banner",
@@ -123,7 +159,7 @@ impl Encoder {
             ]);
         }
 
-        cmd.arg(output_path.as_os_str())
+        cmd.arg(partial_path.as_os_str())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
@@ -146,6 +182,8 @@ impl Encoder {
             stdin,
             stderr_handle,
             output_path: output_path.to_path_buf(),
+            partial_path,
+            finished: false,
         })
     }
 
@@ -190,11 +228,20 @@ impl Encoder {
                 .take(8)
                 .collect::<Vec<_>>()
                 .join("\n");
+            // Leave `finished = false` so Drop removes the partial file.
             return Err(NarratorError::FfmpegFailed(format!(
                 "encoder exited {:?}:\n{tail}",
                 status.code()
             )));
         }
-        Ok(self.output_path)
+
+        // Atomically move the finished mux onto the real output path. File-over-
+        // file rename is atomic on POSIX and NTFS (same guarantee as
+        // project_store::atomic_write).
+        tokio::fs::rename(&self.partial_path, &self.output_path)
+            .await
+            .map_err(|e| NarratorError::FfmpegFailed(format!("encoder finalize (rename): {e}")))?;
+        self.finished = true;
+        Ok(self.output_path.clone())
     }
 }

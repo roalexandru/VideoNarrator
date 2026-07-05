@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useExportStore, slugify } from "../../stores/exportStore";
@@ -9,7 +9,7 @@ import { useEditStore } from "../../stores/editStore";
 import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
-  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits,
+  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits, cancelVideoOperation,
   ffmpegSupportsSubtitleBurn,
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
@@ -176,6 +176,9 @@ export function ExportScreen() {
   const [videoError, setVideoError] = useState<string | null>(null);
   const [, setVideoOutputPath] = useState<string | null>(null);
   const [videoNotice, setVideoNotice] = useState<string | null>(null);
+  // Set when the user clicks Cancel; distinguishes a user abort (→ idle) from a
+  // real failure (→ error) at the boundary between sequential export commands.
+  const cancelRequested = useRef(false);
 
   // Audio-only export
   const [audioPhase, setAudioPhase] = useState<"idle" | "generating" | "done" | "error">("idle");
@@ -268,6 +271,7 @@ export function ExportScreen() {
     setVideoError(null);
     setVideoOutputPath(null);
     setVideoNotice(null);
+    cancelRequested.current = false;
     const exportStart = Date.now();
 
     try {
@@ -430,10 +434,18 @@ export function ExportScreen() {
         tts_provider: ttsProviderTelemetry,
       });
     } catch (e: any) {
+      // A user-initiated cancel returns to idle rather than the error state.
+      if (cancelRequested.current || String(e).toLowerCase().includes("cancel")) {
+        setVideoPhase("idle");
+        setVideoProgress(0);
+        return;
+      }
       console.error("Export video:", e);
       trackError("export_video", e, { tts_provider: ttsProviderTelemetry, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio });
       setVideoError(toUserMessage(e));
       setVideoPhase("error");
+    } finally {
+      cancelRequested.current = false;
     }
   };
 
@@ -837,7 +849,13 @@ export function ExportScreen() {
             {videoPhase !== "idle" && videoPhase !== "done" && videoPhase !== "error" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <ProgressBar value={videoProgress} height={4} />
-                <span style={{ fontSize: 11, color: C.dim }}>{phaseLabels[videoPhase]}</span>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontSize: 11, color: C.dim }}>{phaseLabels[videoPhase]}</span>
+                  <button
+                    onClick={() => { cancelRequested.current = true; cancelVideoOperation(); }}
+                    style={{ background: "none", border: "none", color: C.accent, fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}
+                  >Cancel</button>
+                </div>
               </div>
             )}
 
