@@ -7,7 +7,7 @@ import { useScriptStore } from "../../stores/scriptStore";
 import { useEditStore } from "../../stores/editStore";
 import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProviderStatus } from "../../lib/tauri/commands";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
-import { buildEditPlan } from "../../lib/buildEditPlan";
+import { buildEditPlan, resolveEditedVideo } from "../../lib/buildEditPlan";
 import { trackEvent, trackError, resetErrorCount } from "../telemetry/analytics";
 import { toUserMessage, isContextOverflowError } from "../../lib/errorMessages";
 import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
@@ -98,24 +98,31 @@ export function ProcessingScreen() {
     const editSnapshot = useEditStore.getState();
 
     // Decide edit branch BEFORE wiring the main-channel handler so its
-    // percent scaling matches.
+    // percent scaling matches. Use the shared resolver so ALL effect types
+    // (blur/text/spotlight/fade — not just zoom-pan) and trim-only edits are
+    // baked in before frame extraction; otherwise the AI receives frames from
+    // the unedited video (e.g. it could read content the user redacted with a
+    // blur). A valid cached render is reused rather than re-rendered.
     let videoPath = project.videoFile!.path;
-    const hasEdits = editSnapshot.clips.length > 1
-      || editSnapshot.clips.some((c) => c.speed !== 1.0)
-      || editSnapshot.clips.some((c) => c.type === 'freeze')
-      || editSnapshot.clips.some((c) => !!c.zoomPan)
-      || (editSnapshot.effects && editSnapshot.effects.length > 0 && editSnapshot.effects.some((e) => e.type === 'zoom-pan'))
-      || (editSnapshot.clips.length === 1 && editSnapshot.sourceDuration > 0
-          && (editSnapshot.clips[0].sourceStart > 0.5 || Math.abs(editSnapshot.clips[0].sourceEnd - editSnapshot.sourceDuration) > 0.5));
+    const resolution = await resolveEditedVideo({
+      clips: editSnapshot.clips,
+      effects: editSnapshot.effects,
+      sourceDuration: editSnapshot.sourceDuration,
+      originalVideoPath: videoPath,
+      editedVideoPath: editSnapshot.editedVideoPath,
+      editedVideoPlanHash: editSnapshot.editedVideoPlanHash,
+    });
+    const willRender = resolution.kind === "render-required";
+    if (resolution.kind === "rendered") videoPath = resolution.path;
 
     // Main generation channel. `progress` events scale into the remaining
-    // budget (whole bar when no edits, EDIT_BUDGET→100 when edits ran).
+    // budget (whole bar when no render, EDIT_BUDGET→100 when a render ran).
     // Messages become the live sub-label.
     const ch = new Channel<ProgressEvent>();
     ch.onmessage = (e: ProgressEvent) => {
       if (e.kind === "phase_change") proc.setPhase(e.phase);
       else if (e.kind === "progress") {
-        const global = hasEdits
+        const global = willRender
           ? EDIT_BUDGET + (e.percent / 100) * (100 - EDIT_BUDGET)
           : e.percent;
         proc.setProgress(global);
@@ -127,7 +134,7 @@ export function ProcessingScreen() {
       else if (e.kind === "error") proc.setError(e.message);
     };
 
-    if (hasEdits && editSnapshot.clips.length > 0) {
+    if (willRender && editSnapshot.clips.length > 0) {
       trackEvent("video_edited", {
         clips_count: editSnapshot.clips.length,
         has_speed_change: editSnapshot.clips.some(c => c.speed !== 1.0),

@@ -2735,8 +2735,8 @@ mod tests {
 
     #[tokio::test]
     async fn integration_quality_file_size_reasonable() {
-        // Sanity check: CRF 12 on a simple trimmed video should produce a file
-        // larger than stream-copy but still sensible (not wildly inflated).
+        // Sanity check: a CRF 18 re-encode of a sped-up clip produces a file
+        // that is sensible (a valid container, not wildly inflated).
         if !ffmpeg_ok() {
             return;
         }
@@ -3147,32 +3147,34 @@ mod tests {
         .await
         .unwrap();
 
-        // If the fast path ran, it would be `-c copy` so size ≈ src.
-        // With CRF 0 + fade drawbox overlay, size should be different
-        // (either larger due to the CRF 0 re-encode, or same if encoder is
-        // very efficient). The key check: the output actually went through
-        // the effects pass. We can't easily detect the overlay visually in
-        // a unit test, but we can probe that the output exists and isn't a
-        // byte-for-byte copy of the input.
+        // The bug this guards: a single full-coverage clip with an effect took
+        // the trivial fast path, which is `tokio::fs::copy` (a byte-for-byte
+        // copy of the input) and silently dropped the effect. So the real
+        // regression check is byte-identity: if the output equals the input,
+        // the fast path ran and the fade was lost. (We deliberately don't
+        // assert on size ratio anymore — with the compositor now encoding at
+        // CRF 18 rather than lossless CRF 0, a re-encode of a compressible
+        // testsrc can legitimately be smaller than the source.)
         let out_size = tokio::fs::metadata(&output).await.unwrap().len();
         assert!(out_size > 0);
-        // The CRF-0 lossless re-encode will be significantly larger than
-        // a CRF-36 testsrc input; if sizes are nearly identical something
-        // copied the source without processing.
-        let ratio = out_size as f64 / src_size as f64;
+        let _ = src_size;
+        let src_bytes = tokio::fs::read(&input).await.unwrap();
+        let out_bytes = tokio::fs::read(&output).await.unwrap();
         assert!(
-            ratio > 2.0,
-            "output/input size ratio = {ratio:.2} — suggests fast path ran and skipped effects"
+            src_bytes != out_bytes,
+            "output is a byte-for-byte copy of the input — the fast path ran and dropped the effect"
         );
     }
 
-    /// Lossless verification: when a clip has `speed=1.0`, no zoom, no fps
-    /// override, no effects, the output's video bitrate should be at least
-    /// as high as the source (CRF 0 = bit-exact). This is a weak check (same
-    /// decode but ffprobe counts both bitrates, good enough as a regression
-    /// guard against accidentally re-introducing CRF > 0).
+    /// Regression guard against re-introducing the CRF-0 lossless encode.
+    /// The compositor re-encode path (forced here with two clips) now targets
+    /// CRF 18. A true-lossless CRF-0 re-encode of a testsrc input inflates the
+    /// file by roughly an order of magnitude; CRF 18 lands at or below the
+    /// source size. So a valid output that is not wildly inflated confirms we
+    /// are NOT encoding lossless. (Primary parity is enforced by the
+    /// frontend/backend size sanity test above; this is the loud tripwire.)
     #[tokio::test]
-    async fn integration_lossless_encode_simple_trim() {
+    async fn integration_encode_not_crf0_inflated() {
         if !ffmpeg_ok() {
             return;
         }
@@ -3182,8 +3184,7 @@ mod tests {
         make_test_video(&input, 5.0).await.unwrap();
 
         // Full-source single clip with speed=1 falls through the fast path
-        // (stream-copy). But for multi-clip we re-encode at CRF 0 — so use
-        // two clips to force the re-encode path.
+        // (stream-copy). Two clips force the compositor re-encode path.
         let plan = VideoEditPlan {
             clips: vec![simple_clip(0.0, 2.5, 1.0), simple_clip(2.5, 5.0, 1.0)],
             effects: None,
@@ -3199,13 +3200,15 @@ mod tests {
 
         let src_size = tokio::fs::metadata(&input).await.unwrap().len();
         let out_size = tokio::fs::metadata(&output).await.unwrap().len();
-        // Lossless output from testsrc should be AT LEAST as large as the
-        // heavily-compressed source. A CRF-0 encode cannot produce a smaller
-        // file than the lossy input unless something is stripped.
         assert!(
-            out_size >= src_size,
-            "lossless output ({out_size}) unexpectedly smaller than source ({src_size}) — \
-             likely indicates we're not actually encoding lossless"
+            out_size > 500,
+            "output is implausibly small: {out_size} bytes"
+        );
+        // CRF 0 would inflate this ~10x; CRF 18 stays at or below src_size.
+        assert!(
+            out_size < src_size * 3,
+            "output ({out_size}) is >3x the source ({src_size}) — CRF-0 lossless \
+             encoding appears to have been re-introduced"
         );
     }
 

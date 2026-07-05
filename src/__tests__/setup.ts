@@ -273,6 +273,9 @@ export function setupDefaultMocks() {
       case "apply_video_edits":
         return "/tmp/edited.mp4";
 
+      case "file_exists":
+        return true;
+
       case "merge_audio_video":
         return { output_path: "/tmp/final.mp4", fell_back_to_narration_only: false };
 

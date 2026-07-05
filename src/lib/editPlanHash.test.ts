@@ -53,6 +53,12 @@ describe("computeEditPlanHash", () => {
     expect(h1).not.toBe(h2);
   });
 
+  it("changes when skipFrames toggles (time-lapse silences audio)", () => {
+    const h1 = computeEditPlanHash([clip({ skipFrames: false })], []);
+    const h2 = computeEditPlanHash([clip({ skipFrames: true })], []);
+    expect(h1).not.toBe(h2);
+  });
+
   it("changes when an effect's spotlight position changes", () => {
     const h1 = computeEditPlanHash([clip()], [spotlight({ spotlight: { x: 0.5, y: 0.5, radius: 0.1, dimOpacity: 0.8 } })]);
     const h2 = computeEditPlanHash([clip()], [spotlight({ spotlight: { x: 0.8, y: 0.2, radius: 0.1, dimOpacity: 0.8 } })]);

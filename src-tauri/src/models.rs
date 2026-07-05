@@ -241,6 +241,7 @@ pub struct EditClip {
     pub source_start: f64,
     pub source_end: f64,
     pub speed: f64,
+    #[serde(default)]
     pub skip_frames: bool,
     pub fps_override: Option<f64>,
     #[serde(default)]

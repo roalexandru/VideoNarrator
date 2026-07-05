@@ -79,10 +79,17 @@ impl Encoder {
                 "1:a:0?",
                 "-c:v",
                 "libx264",
+                // Visually lossless, universally playable output. The previous
+                // `ultrafast -crf 0` was true-lossless: 50-150 Mbps files that
+                // QuickTime/AVFoundation and Windows Media Foundation refuse to
+                // decode (qp=0 forces the High 4:4:4 Predictive profile). This
+                // matters because merge_audio_video stream-copies (`-c:v copy`)
+                // whatever we emit straight into the user's final export, so
+                // this IS the delivered video. Same reasoning as burn_subtitles.
                 "-preset",
-                "ultrafast",
+                "medium",
                 "-crf",
-                "0",
+                "18",
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -102,10 +109,12 @@ impl Encoder {
                 "0:v:0",
                 "-c:v",
                 "libx264",
+                // See the audio branch above: visually lossless CRF 18 instead
+                // of true-lossless CRF 0, which produced huge, undecodable files.
                 "-preset",
-                "ultrafast",
+                "medium",
                 "-crf",
-                "0",
+                "18",
                 "-pix_fmt",
                 "yuv420p",
                 "-an",

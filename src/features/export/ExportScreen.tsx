@@ -9,11 +9,11 @@ import { useEditStore } from "../../stores/editStore";
 import {
   exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
-  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits, fileExists,
+  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits,
   ffmpegSupportsSubtitleBurn,
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
-import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { buildEditPlan, resolveEditedVideo } from "../../lib/buildEditPlan";
 import { predictExport } from "../../lib/speechRate";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { EXPORT_FORMATS } from "../../lib/constants";
@@ -132,11 +132,10 @@ export function ExportScreen() {
   const scripts = useScriptStore((s) => s.scripts);
   const languages = useConfigStore((s) => s.languages);
   const projectTitle = useProjectStore((s) => s.title);
-  // Export uses the EDITED video (with speed changes, zooms, and effects baked in)
-  // when edits were applied; falls back to the original if no edits were made.
+  // Export resolves the correct source (original vs. up-to-date rendered edit)
+  // at export time via resolveEditedVideo — see doExportVideo Phase 0. The UI
+  // only needs the original path to know a video exists at all.
   const originalVideoPath = useProjectStore((s) => s.videoFile?.path);
-  const editedVideoPath = useEditStore((s) => s.editedVideoPath);
-  const videoPath = editedVideoPath || originalVideoPath;
 
   // Script export
   const [scriptResults, setScriptResults] = useState<ExportResult[]>([]);
@@ -250,7 +249,7 @@ export function ExportScreen() {
 
   // ── Export Video pipeline ──
   const doExportVideo = async () => {
-    if (!exp.outputDirectory || !videoPath) return;
+    if (!exp.outputDirectory || !originalVideoPath) return;
     if (ttsProvider === "elevenlabs" && !elConfig) return;
     if (ttsProvider === "azure" && !azureConfig) return;
     // builtin provider needs no config check
@@ -273,51 +272,54 @@ export function ExportScreen() {
 
     try {
       // ── Phase 0: ensure the edited video is present and up-to-date ──
-      // The source for the final export is the EDITED video (with clips,
-      // zoom/pan, spotlight, blur, text, fade baked in). If the cache is
-      // missing or stale, regenerate it here before muxing the audio.
+      // Resolve the correct source through the shared helper: the untrimmed
+      // original when no render is needed (ignoring any stale cache), the
+      // cached render when its plan hash still matches, or a fresh render
+      // otherwise. This is what fixes trim-only edits silently shipping the
+      // original, and deleting an effect after a render shipping the stale file.
       const editState = useEditStore.getState();
-      const needsEdit = planRequiresRender(editState.clips, editState.effects);
-      let sourceVideoPath = videoPath;
-      if (needsEdit && originalVideoPath) {
+      const resolution = await resolveEditedVideo({
+        clips: editState.clips,
+        effects: editState.effects,
+        sourceDuration: editState.sourceDuration,
+        originalVideoPath,
+        editedVideoPath: editState.editedVideoPath,
+        editedVideoPlanHash: editState.editedVideoPlanHash,
+      });
+      let sourceVideoPath: string;
+      if (resolution.kind === "render-required") {
+        setVideoPhase("rendering");
+        setVideoProgress(0);
         const currentHash = computeEditPlanHash(editState.clips, editState.effects);
-        const cacheMatches =
-          editState.editedVideoPath &&
-          editState.editedVideoPlanHash === currentHash &&
-          (await fileExists(editState.editedVideoPath));
-
-        if (!cacheMatches) {
-          setVideoPhase("rendering");
-          setVideoProgress(0);
-          const home = await getHomeDir();
-          const projectId = useProjectStore.getState().projectId;
-          const srcExt = originalVideoPath.split(".").pop() || "mp4";
-          const editedPath = `${home}/.narrator/projects/${projectId}/edited.${srcExt}`;
-          const plan = buildEditPlan(
-            editState.clips,
-            editState.effects,
-            (c) => {
-              const m = editState.resolveClipMedia(c);
-              return m ? { path: m.path, id: m.id } : null;
-            },
-            editState.primaryMediaRefId,
-          );
-          const renderCh = new Channel<ProgressEvent>();
-          renderCh.onmessage = (e: ProgressEvent) => {
-            if (e.kind === "progress") setVideoProgress(e.percent * 0.25); // 0-25%
-          };
-          const rendered = await applyVideoEdits(
-            originalVideoPath,
-            editedPath,
-            plan,
-            renderCh,
-          );
-          editState.setEditedVideoPath(rendered);
-          editState.setEditedVideoPlanHash(currentHash);
-          sourceVideoPath = rendered;
-        } else {
-          sourceVideoPath = editState.editedVideoPath!;
-        }
+        const home = await getHomeDir();
+        const projectId = useProjectStore.getState().projectId;
+        const srcExt = originalVideoPath.split(".").pop() || "mp4";
+        const editedPath = `${home}/.narrator/projects/${projectId}/edited.${srcExt}`;
+        const plan = buildEditPlan(
+          editState.clips,
+          editState.effects,
+          (c) => {
+            const m = editState.resolveClipMedia(c);
+            return m ? { path: m.path, id: m.id } : null;
+          },
+          editState.primaryMediaRefId,
+        );
+        const renderCh = new Channel<ProgressEvent>();
+        renderCh.onmessage = (e: ProgressEvent) => {
+          if (e.kind === "progress") setVideoProgress(e.percent * 0.25); // 0-25%
+        };
+        const rendered = await applyVideoEdits(
+          originalVideoPath,
+          editedPath,
+          plan,
+          renderCh,
+        );
+        editState.setEditedVideoPath(rendered);
+        editState.setEditedVideoPlanHash(currentHash);
+        sourceVideoPath = rendered;
+      } else {
+        // "original" or verified "rendered" — use the resolved path directly.
+        sourceVideoPath = resolution.path;
       }
 
       setVideoPhase("audio");
@@ -856,7 +858,7 @@ export function ExportScreen() {
             {/* Export button */}
             <Button
               onClick={doExportVideo}
-              disabled={videoPhase === "rendering" || videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles" || !videoPath || segCount === 0}
+              disabled={videoPhase === "rendering" || videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles" || !originalVideoPath || segCount === 0}
               style={{ width: "100%", fontSize: 13 }}
             >
               {videoPhase === "rendering" || videoPhase === "audio" || videoPhase === "merge" || videoPhase === "subtitles"
