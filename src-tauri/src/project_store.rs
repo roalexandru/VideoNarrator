@@ -2,13 +2,54 @@
 
 use crate::error::NarratorError;
 use crate::models::*;
+use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+const MAX_SAFE_FILENAME_COMPONENT_LEN: usize = 128;
+const MAX_IMPORT_ENTRIES: usize = 2_000;
+const MAX_IMPORT_PROJECT_JSON_BYTES: u64 = 1024 * 1024;
+const MAX_IMPORT_SCRIPT_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_IMPORT_FRAME_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_IMPORT_TOTAL_BYTES: u64 = 500 * 1024 * 1024;
 
 /// Validate that a project ID is a valid UUID to prevent path traversal attacks.
 pub fn validate_project_id(id: &str) -> Result<(), NarratorError> {
     uuid::Uuid::parse_str(id)
         .map_err(|_| NarratorError::ProjectError(format!("Invalid project ID: {id}")))?;
     Ok(())
+}
+
+pub fn safe_filename_component<'a>(value: &'a str, label: &str) -> Result<&'a str, NarratorError> {
+    let err = |reason: &str| {
+        NarratorError::ProjectError(format!("Invalid {label} filename component: {reason}"))
+    };
+
+    if value.is_empty() {
+        return Err(err("empty value"));
+    }
+    if value.len() > MAX_SAFE_FILENAME_COMPONENT_LEN {
+        return Err(err("value is too long"));
+    }
+    if value == "." || value == ".." {
+        return Err(err("reserved path component"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(err(
+            "only ASCII letters, digits, '.', '_', and '-' are allowed",
+        ));
+    }
+
+    let mut components = Path::new(value).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(os)), None) if os == OsStr::new(value) => Ok(value),
+        _ => Err(err(
+            "path separators, prefixes, and parent directories are not allowed",
+        )),
+    }
 }
 
 /// Atomically write `contents` to `path` by writing to a sibling temp file and
@@ -281,6 +322,10 @@ pub fn save_script(
     script: &NarrationScript,
 ) -> Result<String, NarratorError> {
     validate_project_id(project_id)?;
+    // `language` is interpolated straight into the script filename below, so it
+    // must be constrained to a safe single path component — otherwise a value
+    // like `../../config` would write outside the project's scripts directory.
+    let language = safe_filename_component(language, "script language")?;
     let base = get_narrator_dir();
     let scripts_dir = base.join("projects").join(project_id).join("scripts");
     std::fs::create_dir_all(&scripts_dir)
@@ -330,7 +375,8 @@ pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
 pub fn save_template(template: &ProjectTemplate) -> Result<(), NarratorError> {
     let dir = get_narrator_dir().join("templates");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{}.json", template.id));
+    let id = safe_filename_component(&template.id, "template id")?;
+    let path = dir.join(format!("{id}.json"));
     let json = serde_json::to_string_pretty(template)?;
     atomic_write(&path, json.as_bytes())?;
     Ok(())
@@ -357,6 +403,7 @@ pub fn list_templates() -> Result<Vec<ProjectTemplate>, NarratorError> {
 }
 
 pub fn delete_template(id: &str) -> Result<(), NarratorError> {
+    let id = safe_filename_component(id, "template id")?;
     let path = get_narrator_dir()
         .join("templates")
         .join(format!("{id}.json"));
@@ -442,17 +489,31 @@ pub fn import_project(archive_path: &Path) -> Result<String, NarratorError> {
     let file = std::fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|e| NarratorError::ProjectError(format!("Invalid .narrator file: {e}")))?;
+    if archive.len() > MAX_IMPORT_ENTRIES {
+        return Err(NarratorError::ProjectError(format!(
+            ".narrator archive has too many entries: {} > {}",
+            archive.len(),
+            MAX_IMPORT_ENTRIES
+        )));
+    }
 
     // Read project.json to get metadata
     let mut config: ProjectConfig = {
         let mut entry = archive.by_name("project.json").map_err(|e| {
             NarratorError::ProjectError(format!("Missing project.json in archive: {e}"))
         })?;
-        let mut json = String::new();
-        std::io::Read::read_to_string(&mut entry, &mut json)?;
+        if entry.size() > MAX_IMPORT_PROJECT_JSON_BYTES {
+            return Err(NarratorError::ProjectError(format!(
+                "project.json exceeds {} bytes",
+                MAX_IMPORT_PROJECT_JSON_BYTES
+            )));
+        }
+        let json =
+            read_zip_text_limited(&mut entry, MAX_IMPORT_PROJECT_JSON_BYTES, "project.json")?;
         serde_json::from_str(&json)
             .map_err(|e| NarratorError::ProjectError(format!("Invalid project.json: {e}")))?
     };
+    let mut total_extracted: u64 = 0;
 
     // Assign new UUID to avoid collisions
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -472,49 +533,140 @@ pub fn import_project(archive_path: &Path) -> Result<String, NarratorError> {
 
     // Create project directory structure
     let base = get_narrator_dir();
-    let project_dir = base.join("projects").join(&new_id);
-    std::fs::create_dir_all(project_dir.join("frames"))?;
-    std::fs::create_dir_all(project_dir.join("scripts"))?;
-    std::fs::create_dir_all(project_dir.join("exports"))?;
+    let projects_dir = base.join("projects");
+    let project_dir = projects_dir.join(&new_id);
+    let temp_project_dir = projects_dir.join(format!(".import-{new_id}.tmp"));
 
-    // Write updated project.json
-    let json = serde_json::to_string_pretty(&config)?;
-    atomic_write(&project_dir.join("project.json"), json.as_bytes())?;
+    let import_result = (|| -> Result<(), NarratorError> {
+        std::fs::create_dir_all(temp_project_dir.join("frames"))?;
+        std::fs::create_dir_all(temp_project_dir.join("scripts"))?;
+        std::fs::create_dir_all(temp_project_dir.join("exports"))?;
 
-    // Extract scripts and frames
-    for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|e| NarratorError::ProjectError(format!("ZIP entry error: {e}")))?;
+        // Write updated project.json
+        let json = serde_json::to_string_pretty(&config)?;
+        checked_add_import_bytes(&mut total_extracted, json.len() as u64)?;
+        atomic_write(&temp_project_dir.join("project.json"), json.as_bytes())?;
 
-        let name = entry.name().to_string();
+        // Extract scripts and frames
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| NarratorError::ProjectError(format!("ZIP entry error: {e}")))?;
 
-        // Skip project.json (already handled) and any directory entries
-        if name == "project.json" || entry.is_dir() {
-            continue;
+            let name = entry.name().to_string();
+
+            // Skip project.json (already handled) and any directory entries
+            if name == "project.json" || entry.is_dir() {
+                continue;
+            }
+
+            let Some((dest, max_bytes)) = import_entry_destination(&temp_project_dir, &name)?
+            else {
+                continue;
+            };
+
+            copy_zip_entry_limited(&mut entry, &dest, max_bytes, &mut total_extracted)?;
         }
 
-        // Only extract known paths (security: prevent path traversal)
-        let dest = if let Some(script_name) = name.strip_prefix("scripts/") {
-            if script_name.contains('/') || script_name.contains('\\') {
-                continue;
-            }
-            project_dir.join("scripts").join(script_name)
-        } else if let Some(frame_name) = name.strip_prefix("frames/") {
-            if frame_name.contains('/') || frame_name.contains('\\') {
-                continue;
-            }
-            project_dir.join("frames").join(frame_name)
-        } else {
-            continue; // Skip unknown entries
-        };
+        std::fs::rename(&temp_project_dir, &project_dir).map_err(|e| {
+            NarratorError::ProjectError(format!("Failed to finalize imported project: {e}"))
+        })?;
+        Ok(())
+    })();
 
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut entry, &mut data)?;
-        std::fs::write(&dest, &data)?;
+    if let Err(err) = import_result {
+        let _ = std::fs::remove_dir_all(&temp_project_dir);
+        return Err(err);
     }
 
     Ok(new_id)
+}
+
+fn read_zip_text_limited<R: Read>(
+    reader: &mut R,
+    limit: u64,
+    label: &str,
+) -> Result<String, NarratorError> {
+    let mut limited = reader.take(limit + 1);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(NarratorError::ProjectError(format!(
+            "{label} exceeds {limit} bytes"
+        )));
+    }
+    String::from_utf8(bytes)
+        .map_err(|e| NarratorError::ProjectError(format!("{label} is not valid UTF-8: {e}")))
+}
+
+fn import_entry_destination(
+    project_dir: &Path,
+    name: &str,
+) -> Result<Option<(PathBuf, u64)>, NarratorError> {
+    if let Some(script_name) = name.strip_prefix("scripts/") {
+        let script_name = safe_filename_component(script_name, "script archive entry")?;
+        if !script_name.ends_with(".json") {
+            return Err(NarratorError::ProjectError(format!(
+                "Unsupported script archive entry: {script_name}"
+            )));
+        }
+        return Ok(Some((
+            project_dir.join("scripts").join(script_name),
+            MAX_IMPORT_SCRIPT_BYTES,
+        )));
+    }
+
+    if let Some(frame_name) = name.strip_prefix("frames/") {
+        let frame_name = safe_filename_component(frame_name, "frame archive entry")?;
+        let ext = Path::new(frame_name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+            return Err(NarratorError::ProjectError(format!(
+                "Unsupported frame archive entry: {frame_name}"
+            )));
+        }
+        return Ok(Some((
+            project_dir.join("frames").join(frame_name),
+            MAX_IMPORT_FRAME_BYTES,
+        )));
+    }
+
+    Ok(None)
+}
+
+fn copy_zip_entry_limited<R: Read>(
+    entry: &mut R,
+    dest: &Path,
+    max_bytes: u64,
+    total_extracted: &mut u64,
+) -> Result<(), NarratorError> {
+    let mut out = std::fs::File::create(dest)?;
+    let copied = std::io::copy(&mut entry.take(max_bytes + 1), &mut out)?;
+    if copied > max_bytes {
+        return Err(NarratorError::ProjectError(format!(
+            "Archive entry {} exceeds {} bytes",
+            dest.display(),
+            max_bytes
+        )));
+    }
+    out.flush()?;
+    checked_add_import_bytes(total_extracted, copied)
+}
+
+fn checked_add_import_bytes(total: &mut u64, additional: u64) -> Result<(), NarratorError> {
+    *total = total
+        .checked_add(additional)
+        .ok_or_else(|| NarratorError::ProjectError("Imported project is too large".to_string()))?;
+    if *total > MAX_IMPORT_TOTAL_BYTES {
+        return Err(NarratorError::ProjectError(format!(
+            "Imported project exceeds {} bytes",
+            MAX_IMPORT_TOTAL_BYTES
+        )));
+    }
+    Ok(())
 }
 
 pub fn load_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
@@ -1033,6 +1185,33 @@ mod tests {
         }
     }
 
+    fn write_test_archive(path: &Path, entries: Vec<(&str, Vec<u8>)>) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn valid_project_json() -> Vec<u8> {
+        serde_json::to_vec(&sample_config(
+            &uuid::Uuid::new_v4().to_string(),
+            "Imported",
+        ))
+        .unwrap()
+    }
+
+    fn projects_dir_is_empty(root: &Path) -> bool {
+        let projects = root.join("projects");
+        std::fs::read_dir(projects)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true)
+    }
+
     #[test]
     fn test_project_create_load_list_roundtrip() {
         let g = NarratorDirGuard::new();
@@ -1102,6 +1281,36 @@ mod tests {
         drop(g);
     }
 
+    #[test]
+    fn test_save_script_rejects_path_traversal_language() {
+        let g = NarratorDirGuard::new();
+        let id = uuid::Uuid::new_v4().to_string();
+        let cfg = sample_config(&id, "Scripts Traversal");
+        create_project(&cfg).unwrap();
+
+        let outside = g.path().join("config.json");
+        std::fs::write(&outside, b"keep").unwrap();
+
+        let script = NarrationScript {
+            title: "S1".into(),
+            total_duration_seconds: 30.0,
+            segments: vec![],
+            metadata: ScriptMetadata {
+                style: "test".into(),
+                language: "en".into(),
+                provider: "mock".into(),
+                model: "m".into(),
+                generated_at: "2026-04-01T00:00:00Z".into(),
+            },
+            speech_rate_report: None,
+        };
+
+        let err = save_script(&id, "../../config", &script).unwrap_err();
+        assert!(err.to_string().contains("script language"));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"keep");
+        drop(g);
+    }
+
     // ── Template CRUD ────────────────────────────────────────────────
 
     #[test]
@@ -1121,6 +1330,21 @@ mod tests {
         let after = list_templates().unwrap();
         assert_eq!(after.len(), 1);
         assert!(after.iter().all(|t| t.id != t1.id));
+        drop(g);
+    }
+
+    #[test]
+    fn test_template_rejects_path_traversal_id() {
+        let g = NarratorDirGuard::new();
+        let outside_config = g.path().join("config.json");
+        std::fs::write(&outside_config, b"keep").unwrap();
+
+        let bad_template = sample_template("../config", "Bad Template");
+        assert!(save_template(&bad_template).is_err());
+        assert_eq!(std::fs::read(&outside_config).unwrap(), b"keep");
+
+        assert!(delete_template("../config").is_err());
+        assert_eq!(std::fs::read(&outside_config).unwrap(), b"keep");
         drop(g);
     }
 
@@ -1226,6 +1450,85 @@ mod tests {
         std::fs::write(&bogus, b"this is not a zip").unwrap();
         let err = import_project(&bogus).unwrap_err();
         assert!(!err.to_string().is_empty());
+        drop(g);
+    }
+
+    #[test]
+    fn test_import_project_rejects_unsafe_entry_without_partial_project() {
+        let g = NarratorDirGuard::new();
+        let archive = g.path().join("unsafe.narrator");
+        write_test_archive(
+            &archive,
+            vec![
+                ("project.json", valid_project_json()),
+                ("scripts/../config.json", b"{}".to_vec()),
+            ],
+        );
+
+        let err = import_project(&archive).unwrap_err();
+        assert!(err.to_string().contains("Invalid script archive entry"));
+        assert!(projects_dir_is_empty(g.path()));
+        drop(g);
+    }
+
+    #[test]
+    fn test_import_project_rejects_oversized_project_json_without_partial_project() {
+        let g = NarratorDirGuard::new();
+        let archive = g.path().join("huge-project-json.narrator");
+        write_test_archive(
+            &archive,
+            vec![(
+                "project.json",
+                vec![b'a'; MAX_IMPORT_PROJECT_JSON_BYTES as usize + 1],
+            )],
+        );
+
+        let err = import_project(&archive).unwrap_err();
+        assert!(err.to_string().contains("project.json exceeds"));
+        assert!(projects_dir_is_empty(g.path()));
+        drop(g);
+    }
+
+    #[test]
+    fn test_import_project_rejects_oversized_frame_without_partial_project() {
+        let g = NarratorDirGuard::new();
+        let archive = g.path().join("huge-frame.narrator");
+        write_test_archive(
+            &archive,
+            vec![
+                ("project.json", valid_project_json()),
+                (
+                    "frames/frame_0001.jpg",
+                    vec![0; MAX_IMPORT_FRAME_BYTES as usize + 1],
+                ),
+            ],
+        );
+
+        let err = import_project(&archive).unwrap_err();
+        assert!(err.to_string().contains("exceeds"));
+        assert!(projects_dir_is_empty(g.path()));
+        drop(g);
+    }
+
+    #[test]
+    fn test_import_project_rejects_too_many_entries() {
+        let g = NarratorDirGuard::new();
+        let archive = g.path().join("too-many.narrator");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("project.json", options).unwrap();
+        zip.write_all(&valid_project_json()).unwrap();
+        for i in 0..MAX_IMPORT_ENTRIES {
+            zip.start_file(format!("ignored_{i}.txt"), options).unwrap();
+            zip.write_all(b"x").unwrap();
+        }
+        zip.finish().unwrap();
+
+        let err = import_project(&archive).unwrap_err();
+        assert!(err.to_string().contains("too many entries"));
+        assert!(projects_dir_is_empty(g.path()));
         drop(g);
     }
 }

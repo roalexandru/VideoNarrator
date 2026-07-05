@@ -68,6 +68,51 @@ fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
     parts.join(",")
 }
 
+fn trailing_silence_duration(video_dur: f64, audio_pos: f64) -> Option<f64> {
+    if video_dur > audio_pos + 0.1 {
+        Some(video_dur - audio_pos)
+    } else {
+        None
+    }
+}
+
+async fn write_silence_mp3(
+    ffmpeg: &Path,
+    temp_dir: &Path,
+    silence_idx: usize,
+    seconds: f64,
+    sample_rate: &str,
+) -> Result<PathBuf, NarratorError> {
+    let sil_path = temp_dir.join(format!("_tmp_sil_{silence_idx}.mp3"));
+    let anullsrc = format!("anullsrc=r={sample_rate}:cl=stereo");
+    let output = Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args(["-y", "-f", "lavfi", "-i"])
+        .arg(&anullsrc)
+        .args([
+            "-t",
+            &format!("{seconds:.3}"),
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
+        ])
+        .arg(sil_path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::FfmpegFailed(format!("silence exec: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(format!(
+            "ffmpeg silence generation failed: {}",
+            &stderr[stderr.len().saturating_sub(500)..]
+        )));
+    }
+
+    Ok(sil_path)
+}
+
 /// Concat per-segment TTS audio files into one MP3 that tracks the script's
 /// timeline. Applies atempo speed-up (capped at `speech_rate::COMPRESSION_CAP`)
 /// when a segment's audio overruns its window, applies a 30ms afade in/out on
@@ -111,23 +156,8 @@ pub async fn concat_narration_segments(
         // may have overrun or been compressed, drifting the position.
         let gap = sf.start_seconds - audio_pos;
         if gap > 0.05 {
-            let sil_path = temp_dir.join(format!("_tmp_sil_{silence_idx}.mp3"));
-            let anullsrc = format!("anullsrc=r={silence_sample_rate}:cl=stereo");
-            let _ = Command::new(ffmpeg.as_os_str())
-                .no_window()
-                .args(["-y", "-f", "lavfi", "-i"])
-                .arg(&anullsrc)
-                .args([
-                    "-t",
-                    &format!("{gap:.3}"),
-                    "-codec:a",
-                    "libmp3lame",
-                    "-q:a",
-                    "2",
-                ])
-                .arg(sil_path.as_os_str())
-                .output()
-                .await;
+            let sil_path =
+                write_silence_mp3(&ffmpeg, temp_dir, silence_idx, gap, silence_sample_rate).await?;
             concat_parts.push(sil_path);
             audio_pos += gap;
             silence_idx += 1;
@@ -253,29 +283,12 @@ pub async fn concat_narration_segments(
         );
     }
 
-    // Trailing silence up to the scripted video duration. Only applies if the
-    // last segment's scripted end is short of the video; if segments have
-    // already driven audio_pos past video_dur, no silence is added.
-    let last_end = segment_files.last().map(|sf| sf.end_seconds).unwrap_or(0.0);
-    if video_dur > last_end + 0.1 {
-        let trail = video_dur - last_end;
-        let sil_path = temp_dir.join(format!("_tmp_sil_{silence_idx}.mp3"));
-        let anullsrc = format!("anullsrc=r={silence_sample_rate}:cl=stereo");
-        let _ = Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args(["-y", "-f", "lavfi", "-i"])
-            .arg(&anullsrc)
-            .args([
-                "-t",
-                &format!("{trail:.3}"),
-                "-codec:a",
-                "libmp3lame",
-                "-q:a",
-                "2",
-            ])
-            .arg(sil_path.as_os_str())
-            .output()
-            .await;
+    // Trailing silence is sized against the actual packed output position,
+    // not the scripted final segment end, because compressed or over-cap TTS
+    // can drift the output timeline.
+    if let Some(trail) = trailing_silence_duration(video_dur, audio_pos) {
+        let sil_path =
+            write_silence_mp3(&ffmpeg, temp_dir, silence_idx, trail, silence_sample_rate).await?;
         concat_parts.push(sil_path);
     }
 
@@ -370,5 +383,23 @@ mod tests {
         let chain = build_segment_filter(crate::speech_rate::COMPRESSION_CAP, 1.0);
         let atempo_count = chain.matches("atempo=").count();
         assert_eq!(atempo_count, 1);
+    }
+
+    #[test]
+    fn trailing_silence_uses_actual_audio_position() {
+        assert_eq!(trailing_silence_duration(10.0, 11.0), None);
+        assert_eq!(trailing_silence_duration(10.0, 9.95), None);
+        assert_eq!(trailing_silence_duration(10.0, 8.0), Some(2.0));
+    }
+
+    #[tokio::test]
+    async fn silence_generation_failure_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing_ffmpeg = dir.path().join("missing-ffmpeg");
+        let err = write_silence_mp3(&missing_ffmpeg, dir.path(), 0, 1.0, "44100")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, NarratorError::FfmpegFailed(_)));
+        assert!(!dir.path().join("_tmp_sil_0.mp3").exists());
     }
 }

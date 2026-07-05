@@ -27,6 +27,10 @@ fn strip_extended_path_prefix(path: &Path) -> PathBuf {
     }
 }
 
+const MAX_DOCUMENTS: usize = 20;
+const MAX_DOCUMENT_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_TOTAL_DOCUMENT_BYTES: u64 = 10 * 1024 * 1024;
+
 // ── Persistent config file for API keys ──
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -507,33 +511,75 @@ pub async fn compute_media_hash(path: String) -> Result<String, NarratorError> {
 pub async fn process_documents(
     paths: Vec<String>,
 ) -> Result<Vec<ProcessedDocument>, NarratorError> {
-    if paths.len() > 20 {
+    let mut docs = Vec::new();
+    for path in preflight_document_paths(&paths)? {
+        docs.push(process_document_blocking(path).await?);
+    }
+    Ok(docs)
+}
+
+fn preflight_document_paths(paths: &[String]) -> Result<Vec<PathBuf>, NarratorError> {
+    if paths.len() > MAX_DOCUMENTS {
         return Err(NarratorError::DocumentError(
             "Maximum 20 documents allowed".to_string(),
         ));
     }
-    let mut docs = Vec::new();
-    let mut total_size: usize = 0;
-    const MAX_TOTAL_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+    let mut resolved_paths = Vec::with_capacity(paths.len());
+    let mut total_size: u64 = 0;
     for path in paths {
-        let p = Path::new(&path);
-        if !p.exists() {
+        let p = Path::new(path);
+        let metadata = std::fs::metadata(p)
+            .map_err(|_| NarratorError::DocumentError(format!("File not found: {path}")))?;
+        if !metadata.is_file() {
             return Err(NarratorError::DocumentError(format!(
-                "File not found: {path}"
+                "Not a regular file: {path}"
             )));
         }
-        let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        let resolved = strip_extended_path_prefix(&resolved);
-        let doc = doc_processor::process_document(&resolved)?;
-        total_size += doc.content.len();
-        if total_size > MAX_TOTAL_SIZE {
+        if !is_supported_document_path(p) {
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            return Err(NarratorError::DocumentError(format!(
+                "Unsupported document type: .{ext}"
+            )));
+        }
+
+        let size = metadata.len();
+        if size > MAX_DOCUMENT_BYTES {
+            return Err(NarratorError::DocumentError(format!(
+                "Document exceeds 10MB limit: {path}"
+            )));
+        }
+        total_size = total_size.checked_add(size).ok_or_else(|| {
+            NarratorError::DocumentError("Total document size exceeds 10MB limit".to_string())
+        })?;
+        if total_size > MAX_TOTAL_DOCUMENT_BYTES {
             return Err(NarratorError::DocumentError(
                 "Total document size exceeds 10MB limit".to_string(),
             ));
         }
-        docs.push(doc);
+
+        let resolved = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        resolved_paths.push(strip_extended_path_prefix(&resolved));
     }
-    Ok(docs)
+    Ok(resolved_paths)
+}
+
+fn is_supported_document_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "txt" | "text" | "md" | "markdown" | "pdf"
+            )
+        })
+        .unwrap_or(false)
+}
+
+async fn process_document_blocking(path: PathBuf) -> Result<ProcessedDocument, NarratorError> {
+    tokio::task::spawn_blocking(move || doc_processor::process_document(&path))
+        .await
+        .map_err(|e| NarratorError::DocumentError(format!("Document task failed: {e}")))?
 }
 
 // ── Generation commands ──
@@ -579,12 +625,17 @@ pub async fn generate_narration(
         })
         .ok();
 
-    // Reuse project_id if provided, otherwise create a new one
+    // Reuse project_id if provided, otherwise create a new one. Validate the
+    // caller-supplied id as a UUID before it is ever joined into a filesystem
+    // path — this command writes to and (on error/cancel) `remove_dir_all`s
+    // `~/.narrator/projects/<id>/frames`, so an unvalidated `../…` id would
+    // escape the projects directory.
     let project_id = if params.project_id.is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
         params.project_id.clone()
     };
+    project_store::validate_project_id(&project_id)?;
     // Validate frame config bounds. Mirrors the frontend's recommended ceiling
     // in `src/lib/frameBudget.ts::recommendedMaxFrames` (300). Both sides must
     // agree — silently capping below the frontend's intent results in sparser
@@ -654,10 +705,11 @@ pub async fn generate_narration(
             .send(ProgressEvent::progress_msg(30.0, "No context documents"))
             .ok();
     } else {
-        for (i, path) in params.document_paths.iter().enumerate() {
+        let resolved_doc_paths = preflight_document_paths(&params.document_paths)?;
+        for (i, path) in resolved_doc_paths.iter().enumerate() {
             // Base of the slice for this document.
             let base = 25.0 + (i as f64 / total_docs as f64) * 5.0;
-            let name = Path::new(path)
+            let name = path
                 .file_name()
                 .and_then(|s| s.to_str())
                 .unwrap_or("document");
@@ -668,7 +720,7 @@ pub async fn generate_narration(
                 ))
                 .ok();
 
-            match doc_processor::process_document(Path::new(path)) {
+            match process_document_blocking(path.clone()).await {
                 Ok(doc) => docs.push(doc),
                 Err(e) => {
                     channel
@@ -1955,6 +2007,9 @@ pub async fn open_folder(path: String) -> Result<(), NarratorError> {
 
 #[tauri::command]
 pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>, NarratorError> {
+    // Validate before joining into `~/.narrator/projects/<id>/frames`, so a
+    // crafted `../…` id can't enumerate an arbitrary directory.
+    project_store::validate_project_id(&project_id)?;
     let frames_dir = project_store::get_project_frames_dir(&project_id);
     if !frames_dir.exists() {
         return Ok(Vec::new());
@@ -1997,7 +2052,12 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
         .await
         .map_err(|e| NarratorError::ExportError(format!("Failed to create output dir: {e}")))?;
 
+    let basename = options.basename.as_deref().unwrap_or("narration");
+    let basename = project_store::safe_filename_component(basename, "export basename")
+        .map_err(|e| NarratorError::ExportError(e.to_string()))?;
     for language in &options.languages {
+        let language = project_store::safe_filename_component(language, "export language")
+            .map_err(|e| NarratorError::ExportError(e.to_string()))?;
         if let Some(script) = options.scripts.get(language) {
             for format in &options.formats {
                 let content = match format {
@@ -2008,7 +2068,6 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                     ExportFormat::Markdown => export_engine::export_markdown(script),
                     ExportFormat::Ssml => export_engine::export_ssml(script),
                 };
-                let basename = options.basename.as_deref().unwrap_or("narration");
                 let filename = if options.languages.len() > 1 {
                     format!("{basename}_{language}.{format}")
                 } else {
@@ -2018,14 +2077,14 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                 match tokio::fs::write(&filepath, &content).await {
                     Ok(()) => results.push(ExportResult {
                         format: format.to_string(),
-                        language: language.clone(),
+                        language: language.to_string(),
                         file_path: filepath.to_string_lossy().to_string(),
                         success: true,
                         error: None,
                     }),
                     Err(e) => results.push(ExportResult {
                         format: format.to_string(),
-                        language: language.clone(),
+                        language: language.to_string(),
                         file_path: filepath.to_string_lossy().to_string(),
                         success: false,
                         error: Some(e.to_string()),
@@ -2155,6 +2214,34 @@ pub async fn list_styles() -> Result<Vec<NarrationStyle>, NarratorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn sample_script() -> NarrationScript {
+        NarrationScript {
+            title: "Test Script".to_string(),
+            total_duration_seconds: 2.0,
+            segments: vec![Segment {
+                index: 0,
+                start_seconds: 0.0,
+                end_seconds: 2.0,
+                text: "Hello".to_string(),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: Pace::Medium,
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            }],
+            metadata: ScriptMetadata {
+                style: "test".to_string(),
+                language: "en".to_string(),
+                provider: "mock".to_string(),
+                model: "mock".to_string(),
+                generated_at: "2026-05-25T00:00:00Z".to_string(),
+            },
+            speech_rate_report: None,
+        }
+    }
 
     // ── is_safe_intermediate_path tests ──
 
@@ -2197,6 +2284,57 @@ mod tests {
             "video_merged.mp4",
             "/tmp/out/video.mp4"
         ));
+    }
+
+    #[tokio::test]
+    async fn export_script_rejects_unsafe_basename_and_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scripts = HashMap::new();
+        scripts.insert("en".to_string(), sample_script());
+
+        let bad_basename = export_script(ExportOptions {
+            formats: vec![ExportFormat::Txt],
+            languages: vec!["en".to_string()],
+            output_directory: dir.path().to_string_lossy().to_string(),
+            scripts: scripts.clone(),
+            basename: Some("../escape".to_string()),
+        })
+        .await
+        .unwrap_err();
+        assert!(bad_basename.to_string().contains("export basename"));
+
+        let bad_language = export_script(ExportOptions {
+            formats: vec![ExportFormat::Txt],
+            languages: vec!["../en".to_string()],
+            output_directory: dir.path().to_string_lossy().to_string(),
+            scripts,
+            basename: Some("narration".to_string()),
+        })
+        .await
+        .unwrap_err();
+        assert!(bad_language.to_string().contains("export language"));
+        assert!(!dir.path().join("escape.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn process_documents_rejects_oversized_file_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.md");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_DOCUMENT_BYTES + 1).unwrap();
+
+        let err = process_documents(vec![path.to_string_lossy().to_string()])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Document exceeds 10MB limit"));
+    }
+
+    #[tokio::test]
+    async fn list_project_frames_rejects_path_traversal_id() {
+        let err = list_project_frames("../../../etc".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, NarratorError::ProjectError(_)));
     }
 
     // ── sanitize_tts_text tests ──
