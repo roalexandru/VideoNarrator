@@ -6,9 +6,12 @@ const C = { border: "rgba(255,255,255,0.07)", dim: "#8b8ba0" };
  * A numeric input that allows free typing (including deleting all digits).
  * Validates and clamps on blur/Enter. Uses type="text" to avoid browser number input quirks.
  */
-export function NumericInput({ value, onChange, min = 0, max = 999, width = 40, color = C.dim, style }: {
+export function NumericInput({ value, onChange, onCommit, min = 0, max = 999, width = 40, color = C.dim, style }: {
   value: number;
   onChange: (v: number) => void;
+  /** Fired once on blur/Enter. Lets callers coalesce a burst of per-keystroke
+   *  `onChange` calls into a single committed change (e.g. one undo entry). */
+  onCommit?: () => void;
   min?: number;
   max?: number;
   width?: number;
@@ -18,13 +21,15 @@ export function NumericInput({ value, onChange, min = 0, max = 999, width = 40, 
   const [editing, setEditing] = useState<string | null>(null);
 
   const commit = useCallback(() => {
-    if (editing === null) return;
-    const v = parseFloat(editing);
-    if (!isNaN(v)) {
-      onChange(Math.max(min, Math.min(max, v)));
+    if (editing !== null) {
+      const v = parseFloat(editing);
+      if (!isNaN(v)) {
+        onChange(Math.max(min, Math.min(max, v)));
+      }
+      setEditing(null);
     }
-    setEditing(null);
-  }, [editing, onChange, min, max]);
+    onCommit?.();
+  }, [editing, onChange, onCommit, min, max]);
 
   return (
     <input

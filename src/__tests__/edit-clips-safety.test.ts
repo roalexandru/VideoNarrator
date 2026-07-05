@@ -80,6 +80,51 @@ describe("splitAt edge cases", () => {
     expect(clips[0].sourceEnd).toBeCloseTo(30, 5);
     expect(clips[1].sourceStart).toBeCloseTo(30, 5);
   });
+
+  it("splits an image clip by duration without duplicating it", () => {
+    useEditStore.setState({
+      clips: [{ id: "img1", mediaRefId: "m1", sourceStart: 0, sourceEnd: 0, speed: 1, skipFrames: false, fpsOverride: null, type: "image", imageDuration: 3 }],
+      sourceDuration: 3,
+    });
+    useEditStore.getState().splitAt(1);
+    const { clips } = useEditStore.getState();
+    expect(clips).toHaveLength(2);
+    expect(clips[0].type).toBe("image");
+    expect(clips[1].type).toBe("image");
+    // The two halves sum to the original 3s (no duplication/doubling).
+    expect((clips[0].imageDuration ?? 0) + (clips[1].imageDuration ?? 0)).toBeCloseTo(3, 5);
+    expect(clips[0].imageDuration).toBeCloseTo(1, 5);
+    expect(clips[1].imageDuration).toBeCloseTo(2, 5);
+  });
+});
+
+describe("insertFreezeFrame", () => {
+  it("is a no-op on an image clip and leaves undo history untouched", () => {
+    useEditStore.setState({
+      clips: [{ id: "img1", mediaRefId: "m1", sourceStart: 0, sourceEnd: 0, speed: 1, skipFrames: false, fpsOverride: null, type: "image", imageDuration: 3 }],
+      sourceDuration: 3,
+    });
+    useEditStore.getState().insertFreezeFrame(1);
+    const { clips } = useEditStore.getState();
+    expect(clips).toHaveLength(1);
+    expect(clips[0].type).toBe("image");
+    expect(useEditStore.getState().canUndo()).toBe(false);
+  });
+});
+
+describe("effect inspector undo coalescing", () => {
+  it("records one undo entry for many live updates + a single commit", () => {
+    useEditStore.getState().initFromVideo(60);
+    useEditStore.getState().addEffect({ type: "blur", startTime: 0, endTime: 5, blur: { x: 0.1, y: 0.1, width: 0.5, height: 0.5, radius: 0.03 } });
+    const id = useEditStore.getState().effects[0].id;
+    const before = useEditStore.getState().undoStack.length;
+    for (let i = 0; i < 6; i++) {
+      useEditStore.getState().updateEffectLive(id, { blur: { x: 0.1, y: 0.1, width: 0.5, height: 0.5, radius: 0.03 + i * 0.001 } });
+    }
+    useEditStore.getState().commitEffectChange();
+    // 6 live updates + 1 commit → exactly ONE new undo entry (not 6).
+    expect(useEditStore.getState().undoStack.length).toBe(before + 1);
+  });
 });
 
 describe("deleteClip", () => {
