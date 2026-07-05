@@ -222,6 +222,10 @@ export const getRecordingsDirectory = () => invoke<string>("get_recordings_direc
 export interface VideoEditPlan {
   clips: {
     start_seconds: number; end_seconds: number; speed: number; fps_override: number | null;
+    /** "Time-lapse" mode for sped-up clips: silences the clip's audio instead
+     *  of atempo-compressing it. Video frames are unaffected. Optional because
+     *  the Rust `EditClip` defaults it to false via #[serde(default)]. */
+    skip_frames?: boolean;
     clip_type?: string; freeze_source_time?: number; freeze_duration?: number;
     /** Output-timeline duration for image clips. */
     image_duration?: number;

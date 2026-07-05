@@ -3,7 +3,7 @@ import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
 import { extractEditThumbnails, applyVideoEdits, openFolder } from "../../lib/tauri/commands";
-import { buildEditPlan, planRequiresRender } from "../../lib/buildEditPlan";
+import { buildEditPlan, editsRequireRender } from "../../lib/buildEditPlan";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { Channel } from "@tauri-apps/api/core";
 import { save as saveDialog, message as showMessage } from "@tauri-apps/plugin-dialog";
@@ -167,8 +167,7 @@ export function EditVideoScreen() {
       await showMessage(String(err).replace(/^(Error: )?/, ""), { title: "Render failed", kind: "error" });
     }
   }, [videoFile?.path, videoFile?.name]);
-  const canRender = !!videoFile?.path && (planRequiresRender(clips, effects) ||
-    (clips[0] && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) > 0.5));
+  const canRender = !!videoFile?.path && editsRequireRender(clips, effects, videoDuration);
 
   // Extract one thumbnail strip per unique video MediaRef in the pool. Ran
   // once when the pool first has a real path, then re-runs incrementally as

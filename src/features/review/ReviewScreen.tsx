@@ -12,6 +12,7 @@ import { showToast } from "../../components/ui/Toast";
 import { trackEvent } from "../telemetry/analytics";
 import type { ProgressEvent } from "../../types/processing";
 import { computeSpeechRateReport, predictExport, type Severity } from "../../lib/speechRate";
+import { resolveEditedVideo } from "../../lib/buildEditPlan";
 
 // Debounced flag to avoid firing script_edited on every keystroke
 let editDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -37,6 +38,10 @@ export function ReviewScreen() {
   const videoFile = useProjectStore((s) => s.videoFile);
   const currentStep = useWizardStore((s) => s.currentStep);
   const editedVideoPath = useEditStore((s) => s.editedVideoPath);
+  const editedVideoPlanHash = useEditStore((s) => s.editedVideoPlanHash);
+  const editClips = useEditStore((s) => s.clips);
+  const editEffects = useEditStore((s) => s.effects);
+  const editSourceDuration = useEditStore((s) => s.sourceDuration);
   const projectId = useProjectStore((s) => s.projectId);
   const configLanguages = useConfigStore((s) => s.languages);
   const { scripts, activeLanguage, setActiveLanguage, setActiveSegment, updateSegmentText, updateSegmentTiming, deleteSegment, setScript, canUndo, canRedo, undo, redo } = useScriptStore();
@@ -367,9 +372,36 @@ export function ReviewScreen() {
   }, [canUndo, canRedo, undo, redo]);
 
   // Review plays the edited video so the user sees the same output that will
-  // be exported (speed changes, zooms, effects baked in).
-  const videoPath = editedVideoPath || videoFile?.path;
-  const src = videoPath ? convertFileSrc(videoPath) : undefined;
+  // be exported (speed changes, zooms, effects baked in). Resolve through the
+  // shared helper so a STALE cached render (whose plan hash no longer matches)
+  // or a deleted file falls back to the original instead of showing something
+  // that won't be exported. Review has no render affordance, so a
+  // "render-required" result also falls back to the original.
+  const [previewPath, setPreviewPath] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!videoFile?.path) {
+        setPreviewPath(undefined);
+        return;
+      }
+      const r = await resolveEditedVideo({
+        clips: editClips,
+        effects: editEffects,
+        sourceDuration: editSourceDuration,
+        originalVideoPath: videoFile.path,
+        editedVideoPath,
+        editedVideoPlanHash,
+      });
+      if (!cancelled) {
+        setPreviewPath(r.kind === "rendered" ? r.path : videoFile.path);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [videoFile?.path, editedVideoPath, editedVideoPlanHash, editClips, editEffects, editSourceDuration]);
+  const src = previewPath ? convertFileSrc(previewPath) : undefined;
   const currentSegmentIdx = segments.findIndex((s) => currentTime >= s.start_seconds && currentTime < s.end_seconds);
   const currentSegment = currentSegmentIdx >= 0 ? segments[currentSegmentIdx] : null;
 

@@ -15,6 +15,8 @@
 
 import type { EditClip, TimelineEffect } from "../stores/editStore";
 import type { VideoEditPlan } from "./tauri/commands";
+import { fileExists } from "./tauri/commands";
+import { computeEditPlanHash } from "./editPlanHash";
 
 export function buildEditPlan(
   clips: EditClip[],
@@ -45,6 +47,11 @@ export function buildEditPlan(
       start_seconds: c.sourceStart,
       end_seconds: c.sourceEnd,
       speed: c.speed,
+      // "Time-lapse" mode: the Rust compositor silences a sped-up clip's audio
+      // (compositor/audio.rs) instead of atempo-compressing it into chipmunk
+      // playback. Video is unaffected — speed already time-compresses it. This
+      // was never transmitted before, so the toggle silently did nothing.
+      skip_frames: !!c.skipFrames,
       fps_override: c.fpsOverride,
       clip_type: c.type ?? "normal",
       freeze_source_time: c.freezeSourceTime,
@@ -117,21 +124,106 @@ export function buildEditPlan(
   return { clips: planClips, effects: planEffects };
 }
 
-/** Heuristic: does this edit plan actually require rendering?  If there are
- *  no speed/zoom/freeze/effects the original video can be used as-is. */
-export function planRequiresRender(
+/** Tolerance for the trim check, mirroring the Rust fast-path `covers_full`
+ *  comparison in video_edit.rs. Trims smaller than this render identically to
+ *  the untrimmed source, so they don't force a render. */
+const TRIM_EPSILON_S = 0.5;
+
+/** Core heuristic: do the clip/effect settings (ignoring trim) require a
+ *  render? Private — callers must go through `editsRequireRender`, which also
+ *  folds in the trim check that this function deliberately omits. */
+function planRequiresRender(
   clips: EditClip[],
   effects: TimelineEffect[],
 ): boolean {
-  if (effects.some((e) => e.type !== "zoom-pan" || e.zoomPan)) return true;
+  // ANY effect requires a render. (Previously this only counted zoom-pan,
+  // which meant blur/text/spotlight/fade were skipped before frame extraction
+  // — so a blur placed over sensitive content never reached the frames sent
+  // to the LLM, and the AI could read what the user had redacted.)
+  if (effects.length > 0) return true;
   if (clips.length > 1) return true;
   const c = clips[0];
   if (!c) return false;
   if (c.speed !== 1) return true;
+  if (c.skipFrames) return true;
   if (c.fpsOverride != null) return true;
   if (c.type === "freeze") return true;
   if (c.zoomPan) return true;
-  // Also triggered if the single clip doesn't cover the full source (trim).
-  // Caller compares sourceStart/sourceEnd against video duration separately.
   return false;
+}
+
+/**
+ * SINGLE source of truth for "do the current edits require a render?".
+ * Folds in the trim check that `planRequiresRender` omits — previously every
+ * caller re-implemented that comparison inline (and ExportScreen forgot to,
+ * so trim-only edits silently exported the untrimmed original).
+ *
+ * `sourceDuration` is the primary source's duration in seconds. Pass 0 when it
+ * is unknown: the trim check is then skipped (fail-open to "no render"), which
+ * matches the previous behavior for that case.
+ */
+export function editsRequireRender(
+  clips: EditClip[],
+  effects: TimelineEffect[],
+  sourceDuration: number,
+): boolean {
+  if (planRequiresRender(clips, effects)) return true;
+  const c = clips[0];
+  if (!c || sourceDuration <= 0) return false;
+  return (
+    c.sourceStart > TRIM_EPSILON_S ||
+    Math.abs(c.sourceEnd - sourceDuration) > TRIM_EPSILON_S
+  );
+}
+
+export type EditedVideoResolution =
+  | { kind: "original"; path: string }
+  | { kind: "rendered"; path: string }
+  | { kind: "render-required" };
+
+/**
+ * Decide which video file the export / preview should consume, given the
+ * current edit state and the cached render metadata.
+ *
+ * - `original`: the edits don't require a render — use the untrimmed source.
+ *   (Deliberately ignores any lingering `editedVideoPath`: deleting the last
+ *   effect after a render must NOT keep exporting the stale rendered file.)
+ * - `rendered`: a cached render exists, its plan hash matches the current
+ *   plan, and the file is present on disk — reuse it, no re-render.
+ * - `render-required`: edits exist but the cache is missing or stale.
+ *
+ * `fileExists` is injectable for tests; it defaults to the Tauri wrapper.
+ */
+export async function resolveEditedVideo(args: {
+  clips: EditClip[];
+  effects: TimelineEffect[];
+  sourceDuration: number;
+  originalVideoPath: string;
+  editedVideoPath: string | null;
+  editedVideoPlanHash: string | null;
+  fileExists?: (path: string) => Promise<boolean>;
+}): Promise<EditedVideoResolution> {
+  const {
+    clips,
+    effects,
+    sourceDuration,
+    originalVideoPath,
+    editedVideoPath,
+    editedVideoPlanHash,
+  } = args;
+
+  if (!editsRequireRender(clips, effects, sourceDuration)) {
+    return { kind: "original", path: originalVideoPath };
+  }
+
+  const exists = args.fileExists ?? fileExists;
+  const current = computeEditPlanHash(clips, effects);
+  if (
+    editedVideoPath &&
+    editedVideoPlanHash === current &&
+    (await exists(editedVideoPath))
+  ) {
+    return { kind: "rendered", path: editedVideoPath };
+  }
+  return { kind: "render-required" };
 }
