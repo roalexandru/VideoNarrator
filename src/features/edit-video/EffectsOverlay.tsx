@@ -147,9 +147,9 @@ function DraggableCircle({ cx, cy, radius, color, videoW, videoH, isSelected, on
 
 // ── Draggable Text ──
 
-function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, italic, underline, background, align, opacity, videoW, videoH, isSelected, onMove, onCommit }: {
+function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, background, opacity, videoW, videoH, isSelected, onMove, onCommit }: {
   x: number; y: number; content: string; fontSize: number; color: string;
-  fontFamily?: string; bold?: boolean; italic?: boolean; underline?: boolean; background?: string; align?: string; opacity?: number;
+  fontFamily?: string; bold?: boolean; background?: string; opacity?: number;
   videoW: number; videoH: number; isSelected: boolean;
   onMove: (x: number, y: number) => void; onCommit: () => void;
 }) {
@@ -179,15 +179,14 @@ function DraggableText({ x, y, content, fontSize, color, fontFamily, bold, itali
         transform: "translate(-50%, -50%)",
         fontSize: scaledFont,
         fontWeight: bold ? 700 : 400,
-        fontStyle: italic ? "italic" : "normal",
-        textDecoration: underline ? "underline" : "none",
         fontFamily: fontFamily || "Inter, system-ui, sans-serif",
         color,
         background: background || "transparent",
         textShadow: !background ? "0 2px 8px rgba(0,0,0,0.8), 0 1px 3px rgba(0,0,0,0.6)" : "none",
-        whiteSpace: "pre-wrap",
-        textAlign: (align as React.CSSProperties['textAlign']) || "center",
-        maxWidth: videoW * 0.8,
+        // Single line, no wrapping: the export (ffmpeg drawtext) renders one
+        // line and collapses newlines, so the preview must not soft-wrap or
+        // promise italic/underline/alignment the export can't reproduce.
+        whiteSpace: "nowrap",
         lineHeight: 1.3,
         cursor: isSelected ? "move" : "default",
         pointerEvents: isSelected ? "auto" : "none",
@@ -218,7 +217,7 @@ export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime
   if (allVisible.length === 0 || videoWidth <= 0) return null;
 
   return (
-    <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: videoWidth, height: videoHeight, pointerEvents: "none", zIndex: 4 }}>
+    <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)", width: videoWidth, height: videoHeight, overflow: "hidden", pointerEvents: "none", zIndex: 4 }}>
       {allVisible.map((effect) => {
         const opacity = (outputTime >= effect.startTime && outputTime <= effect.endTime) ? getEffectOpacity(effect, outputTime) : 0.4;
         const isSel = effect.id === selectedEffectId;
@@ -257,19 +256,25 @@ export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime
 
         if (effect.type === 'blur' && effect.blur) {
           const { x, y, width, height, radius: blurR, invert } = effect.blur;
+          // blur.radius is stored normalized (0,1] = CSS blur radius as a
+          // fraction of video width; render it in preview-content pixels.
+          // Legacy values > 1 are absolute pixels — passed through so old
+          // projects look the same until re-created. Keeps parity with the
+          // Rust export (blur.rs), which derives sigma from the same fraction.
+          const cssBlur = blurR <= 1 ? blurR * videoWidth : blurR;
           return (
             <div key={effect.id} style={{ position: "absolute", inset: 0, opacity }}>
               {invert ? (
                 /* Invert mode: blur everything EXCEPT the rectangle */
                 <>
                   {/* Top strip */}
-                  <div style={{ position: "absolute", left: 0, top: 0, width: videoWidth, height: y * videoHeight, backdropFilter: `blur(${blurR}px)`, WebkitBackdropFilter: `blur(${blurR}px)`, pointerEvents: "none" }} />
+                  <div style={{ position: "absolute", left: 0, top: 0, width: videoWidth, height: y * videoHeight, backdropFilter: `blur(${cssBlur}px)`, WebkitBackdropFilter: `blur(${cssBlur}px)`, pointerEvents: "none" }} />
                   {/* Bottom strip */}
-                  <div style={{ position: "absolute", left: 0, top: (y + height) * videoHeight, width: videoWidth, height: (1 - y - height) * videoHeight, backdropFilter: `blur(${blurR}px)`, WebkitBackdropFilter: `blur(${blurR}px)`, pointerEvents: "none" }} />
+                  <div style={{ position: "absolute", left: 0, top: (y + height) * videoHeight, width: videoWidth, height: (1 - y - height) * videoHeight, backdropFilter: `blur(${cssBlur}px)`, WebkitBackdropFilter: `blur(${cssBlur}px)`, pointerEvents: "none" }} />
                   {/* Left strip */}
-                  <div style={{ position: "absolute", left: 0, top: y * videoHeight, width: x * videoWidth, height: height * videoHeight, backdropFilter: `blur(${blurR}px)`, WebkitBackdropFilter: `blur(${blurR}px)`, pointerEvents: "none" }} />
+                  <div style={{ position: "absolute", left: 0, top: y * videoHeight, width: x * videoWidth, height: height * videoHeight, backdropFilter: `blur(${cssBlur}px)`, WebkitBackdropFilter: `blur(${cssBlur}px)`, pointerEvents: "none" }} />
                   {/* Right strip */}
-                  <div style={{ position: "absolute", left: (x + width) * videoWidth, top: y * videoHeight, width: (1 - x - width) * videoWidth, height: height * videoHeight, backdropFilter: `blur(${blurR}px)`, WebkitBackdropFilter: `blur(${blurR}px)`, pointerEvents: "none" }} />
+                  <div style={{ position: "absolute", left: (x + width) * videoWidth, top: y * videoHeight, width: (1 - x - width) * videoWidth, height: height * videoHeight, backdropFilter: `blur(${cssBlur}px)`, WebkitBackdropFilter: `blur(${cssBlur}px)`, pointerEvents: "none" }} />
                 </>
               ) : (
                 /* Normal mode: blur inside the rectangle */
@@ -277,7 +282,7 @@ export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime
                   position: "absolute",
                   left: x * videoWidth, top: y * videoHeight,
                   width: width * videoWidth, height: height * videoHeight,
-                  backdropFilter: `blur(${blurR}px)`, WebkitBackdropFilter: `blur(${blurR}px)`,
+                  backdropFilter: `blur(${cssBlur}px)`, WebkitBackdropFilter: `blur(${cssBlur}px)`,
                   pointerEvents: "none",
                 }} />
               )}
@@ -299,8 +304,8 @@ export const EffectsOverlay = memo(function EffectsOverlay({ effects, outputTime
           return (
             <DraggableText key={effect.id}
               x={t.x} y={t.y} content={t.content} fontSize={t.fontSize} color={t.color}
-              fontFamily={t.fontFamily} bold={t.bold} italic={t.italic} underline={t.underline}
-              background={t.background} align={t.align} opacity={opacity}
+              fontFamily={t.fontFamily} bold={t.bold}
+              background={t.background} opacity={opacity}
               videoW={videoWidth} videoH={videoHeight} isSelected={isSel}
               onMove={(nx, ny) => onUpdateEffectLive(effect.id, { text: { ...t, x: nx, y: ny } })}
               onCommit={onCommitEffect}

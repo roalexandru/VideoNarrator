@@ -41,8 +41,10 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
     const b = effect.blur;
     return (
       <>
-        <NumInput label="Blur" value={b.radius} onChange={(v) => onUpdate({ blur: { ...b, radius: v } })} min={1} max={50} width={36} />
-        <span style={{ fontSize: 10, color: C.muted }}>px</span>
+        {/* Strength is stored normalized (0,1] = blur radius as a fraction of
+            video width, so the exported blur is as strong as the preview at any
+            resolution. Displayed 1–100 = tenths of a percent of width. */}
+        <NumInput label="Strength" value={Math.round((b.radius <= 1 ? b.radius : 0.03) * 1000)} onChange={(v) => onUpdate({ blur: { ...b, radius: v / 1000 } })} min={1} max={100} width={36} />
         <div style={{ width: 1, height: 20, background: C.border }} />
         <div style={{ display: "flex", gap: 2, background: "rgba(255,255,255,0.03)", borderRadius: 5, padding: 2 }}>
           <button onClick={() => onUpdate({ blur: { ...b, invert: false } })} style={{
@@ -108,23 +110,13 @@ export function EffectInspector({ effect, onUpdate }: EffectInspectorProps) {
         </select>
         {/* Size */}
         <NumInput label="Size %" value={t.fontSize} onChange={(v) => onUpdate({ text: { ...t, fontSize: v } })} min={1} max={20} width={36} />
-        {/* Bold / Italic / Underline */}
+        {/* Bold. Italic/underline/alignment are intentionally omitted: ffmpeg
+            drawtext (the export path) has no underline or alignment option and
+            ignores font-style on non-fontconfig builds, so exposing them would
+            promise styling the exported video can't reproduce. Bold stays — it
+            maps to a heavier border in the export. */}
         <div style={{ display: "flex", gap: 1, background: "rgba(255,255,255,0.03)", borderRadius: 4, padding: 1 }}>
           {toggleBtn(!!t.bold, () => onUpdate({ text: { ...t, bold: !t.bold } }), "B", "Bold")}
-          {toggleBtn(!!t.italic, () => onUpdate({ text: { ...t, italic: !t.italic } }), "I", "Italic")}
-          {toggleBtn(!!t.underline, () => onUpdate({ text: { ...t, underline: !t.underline } }), "U", "Underline")}
-        </div>
-        {/* Alignment */}
-        <div style={{ display: "flex", gap: 1, background: "rgba(255,255,255,0.03)", borderRadius: 4, padding: 1 }}>
-          {(['left', 'center', 'right'] as const).map((a) => (
-            <button key={a} onClick={() => onUpdate({ text: { ...t, align: a } })} title={`Align ${a}`} style={{
-              padding: "3px 6px", borderRadius: 3, border: "none", fontSize: 9, fontWeight: 600,
-              background: (t.align || 'center') === a ? "rgba(16,185,129,0.2)" : "transparent",
-              color: (t.align || 'center') === a ? "#10b981" : C.muted, cursor: "pointer", fontFamily: "inherit",
-            }}>
-              {a === 'left' ? '⫷' : a === 'right' ? '⫸' : '⫿'}
-            </button>
-          ))}
         </div>
         {/* Text color */}
         <span style={{ fontSize: 9, color: C.muted }}>Text</span>

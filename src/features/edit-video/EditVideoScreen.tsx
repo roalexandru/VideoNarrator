@@ -59,7 +59,10 @@ export function EditVideoScreen() {
   const [isEditingZoomPan, setIsEditingZoomPan] = useState(false);
   const [activeZoomRegion, setActiveZoomRegion] = useState<'start' | 'end'>('start');
   const [showAddEffectMenu, setShowAddEffectMenu] = useState(false);
-  const [videoContainerRect, setVideoContainerRect] = useState({ width: 0, height: 0, left: 0, top: 0 });
+  // width/height = the letterboxed video content rect; containerWidth/Height =
+  // the full container. Their difference is the letterbox/pillarbox inset,
+  // needed to keep the zoom-pan preview transform anchored to the video origin.
+  const [videoContainerRect, setVideoContainerRect] = useState({ width: 0, height: 0, left: 0, top: 0, containerWidth: 0, containerHeight: 0 });
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
   // Persist timeline height
@@ -251,9 +254,9 @@ export function EditVideoScreen() {
           renderedH = containerRect.height;
           renderedW = containerRect.height * videoAspect;
         }
-        setVideoContainerRect({ width: renderedW, height: renderedH, left: containerRect.left, top: containerRect.top });
+        setVideoContainerRect({ width: renderedW, height: renderedH, left: containerRect.left, top: containerRect.top, containerWidth: containerRect.width, containerHeight: containerRect.height });
       } else {
-        setVideoContainerRect({ width: containerRect.width, height: containerRect.height, left: containerRect.left, top: containerRect.top });
+        setVideoContainerRect({ width: containerRect.width, height: containerRect.height, left: containerRect.left, top: containerRect.top, containerWidth: containerRect.width, containerHeight: containerRect.height });
       }
     };
     update();
@@ -507,7 +510,13 @@ export function EditVideoScreen() {
           transform: (isEditingZoomPan || selectedEffect?.type === 'zoom-pan')
             ? undefined  // never apply zoom transform while editing zoom regions
             : (zoomTransform.scale !== 1 || zoomTransform.tx !== 0 || zoomTransform.ty !== 0)
-              ? `translate(${zoomTransform.tx}px, ${zoomTransform.ty}px) scale(${zoomTransform.scale})`
+              // The transform pivots at the container's top-left (0,0), but the
+              // video content is inset by the letterbox offset (dx,dy). Add
+              // (1-scale)*offset so the scale is effectively about the video
+              // content origin — otherwise the preview reframe drifts from the
+              // export by (scale-1)*dx, worst for portrait video in a wide pane.
+              // (The canvas fills the bars with black, so scaling them is fine.)
+              ? `translate(${zoomTransform.tx + (1 - zoomTransform.scale) * ((videoContainerRect.containerWidth - videoContainerRect.width) / 2)}px, ${zoomTransform.ty + (1 - zoomTransform.scale) * ((videoContainerRect.containerHeight - videoContainerRect.height) / 2)}px) scale(${zoomTransform.scale})`
               : undefined,
           transformOrigin: "0 0",
           willChange: selClip?.zoomPan || effects.length > 0 ? "transform" : undefined,
@@ -1028,7 +1037,7 @@ export function EditVideoScreen() {
                           const defaults: Record<string, Partial<Omit<TimelineEffect, 'id'>>> = {
                             'zoom-pan': { transitionIn: 1, transitionOut: 1, reverse: true, zoomPan: { ...DEFAULT_ZOOM_PAN } },
                             'spotlight': { transitionIn: 0.5, transitionOut: 0.5, reverse: true, spotlight: { x: 0.5, y: 0.5, radius: 0.15, dimOpacity: 0.7 } },
-                            'blur': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, blur: { x: 0.3, y: 0.3, width: 0.4, height: 0.4, radius: 20 } },
+                            'blur': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, blur: { x: 0.3, y: 0.3, width: 0.4, height: 0.4, radius: 0.03 } },
                             'text': { transitionIn: 0.3, transitionOut: 0.3, reverse: true, text: { content: 'Text', x: 0.5, y: 0.5, fontSize: 5, color: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif', bold: true, italic: false, underline: false, background: '', align: 'center' as const } },
                             'fade': { transitionIn: 1, transitionOut: 1, reverse: true, fade: { color: '#000000', opacity: 1 } },
                           };

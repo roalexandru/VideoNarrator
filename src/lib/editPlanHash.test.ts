@@ -59,6 +59,33 @@ describe("computeEditPlanHash", () => {
     expect(h1).not.toBe(h2);
   });
 
+  it("distinguishes normalized blur radii at 4-decimal precision", () => {
+    const mk = (radius: number): TimelineEffect => ({
+      id: "b", type: "blur", startTime: 0, endTime: 1,
+      blur: { x: 0.1, y: 0.1, width: 0.5, height: 0.5, radius },
+    } as TimelineEffect);
+    // 0.025 vs 0.026 would collide at 2 decimals; must differ now.
+    expect(computeEditPlanHash([clip()], [mk(0.025)])).not.toBe(
+      computeEditPlanHash([clip()], [mk(0.026)]),
+    );
+  });
+
+  it("hashes an unset zoom-pan transitionIn the same as an explicit full-window value", () => {
+    const unset = zoomPan({ startTime: 0, endTime: 4 });
+    const explicit = zoomPan({ startTime: 0, endTime: 4, transitionIn: 4 });
+    expect(computeEditPlanHash([clip()], [unset])).toBe(
+      computeEditPlanHash([clip()], [explicit]),
+    );
+  });
+
+  it("changes the hash when an unset-transition zoom-pan's window changes", () => {
+    const a = zoomPan({ startTime: 0, endTime: 4 });
+    const b = zoomPan({ startTime: 0, endTime: 6 });
+    expect(computeEditPlanHash([clip()], [a])).not.toBe(
+      computeEditPlanHash([clip()], [b]),
+    );
+  });
+
   it("changes when an effect's spotlight position changes", () => {
     const h1 = computeEditPlanHash([clip()], [spotlight({ spotlight: { x: 0.5, y: 0.5, radius: 0.1, dimOpacity: 0.8 } })]);
     const h2 = computeEditPlanHash([clip()], [spotlight({ spotlight: { x: 0.8, y: 0.2, radius: 0.1, dimOpacity: 0.8 } })]);
