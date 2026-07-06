@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.0 — Edit → render → export hardening
+## v0.9.4 — Edit → render → export hardening
 
 A broad correctness, safety, and lifecycle pass across the video-edit,
 render, and export pipeline.
