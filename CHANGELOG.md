@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.10.0 — Edit → render → export hardening
+
+A broad correctness, safety, and lifecycle pass across the video-edit,
+render, and export pipeline.
+
+### Security
+- **Path traversal hardening.** `generate_narration` and `list_project_frames` now validate the project ID as a UUID before joining it into `~/.narrator`, and `save_script` sanitizes the language before using it in a filename — a crafted `../…` value can no longer read, enumerate, or delete arbitrary directories. Also adds `.narrator` import size/entry caps, document-import preflight validation, and export basename/language sanitization.
+
+### Fixed
+- **Exports are now playable everywhere.** The compositor encoded edited video losslessly (`ultrafast -crf 0`), producing 50–150 Mbps files that QuickTime and Windows Media Foundation refuse to decode; it now uses visually-lossless `medium -crf 18`.
+- **Trim-only edits are no longer dropped at export.** A split-and-delete-half edit previously exported the untrimmed original; the render decision is now a single shared predicate used by every screen.
+- **Redactions reach the AI.** A blur/spotlight/text effect now forces a render before frame extraction, so the frames sent to the model contain what the user hid (previously only zoom-pan did). Deleting an effect after a render no longer exports the stale rendered file.
+- **"Time-lapse" now works.** The `skipFrames` toggle was never transmitted, so a sped-up clip kept its chipmunk audio; it's now serialized and silences the clip's audio as intended.
+- **Cancellation.** Edit renders, audio merges, subtitle burns, and the scene/silence detection passes are now cancellable (with Cancel buttons on the edit and export progress), instead of running to completion.
+- **No more hung/leaked ffmpeg.** The compositor kills its decoder/encoder on any early exit, removes the timeline WAV on every path, and writes to a partial file that is renamed into place only on success — a crashed or cancelled encode can no longer leave a truncated video at the output path.
+- **Windows recorder no longer wedges.** A failed stop always closes the overlay, resets state, keeps the recorded segments, and surfaces the error; the gdigrab process is reliably killed; and recording directories containing apostrophes work.
+- **Fresh frames per generation.** Regenerating no longer inherits stale frames from a denser prior run (which were fed to the model with fabricated timestamps), and a failed/cancelled run preserves the previous successful frames.
+- **Preview matches export.** Text overlays center on their anchor, overlay-effect fades are eased (not linear), blur strength is resolution-independent, and the zoom-pan preview reframes correctly for letterboxed video.
+- **Editor paper cuts.** Splitting an image clip no longer duplicates it; `Cmd+S` no longer splits the clip; dragging an effect past the timeline end keeps its duration; the effect inspector no longer floods (and wipes) the undo history; and "+ Effect" near the end no longer silently no-ops.
+
+### Changed
+- Text overlay italic/underline/alignment controls were removed (ffmpeg's `drawtext` can't reproduce them); the blur control is now a resolution-independent "Strength". Cached renders re-render once on first open so the text and easing fixes take effect.
+
 ## v0.8.2 — Container-duration fix for audio-longer-than-video sources
 
 ### Fixed
