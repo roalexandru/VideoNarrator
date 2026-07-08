@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toUserMessage, isContextOverflowError } from "../lib/errorMessages";
+import { toUserMessage, isContextOverflowError, isBillingError } from "../lib/errorMessages";
 
 describe("toUserMessage", () => {
   // ── API key / auth errors ──
@@ -86,6 +86,36 @@ describe("toUserMessage", () => {
     it("returns wait/retry message for 'too many requests'", () => {
       const result = toUserMessage("Too many requests");
       expect(result).toContain("rate limiting");
+    });
+  });
+
+  // ── Billing / credit (must NOT be treated as a transient rate limit) ──
+  describe("billing / credit errors", () => {
+    it("detects the backend's wrapped credit/billing error", () => {
+      const raw = "API credit or billing problem: Claude rejected the request — Your credit balance is too low. Add credit or fix billing in the provider's console, then try again.";
+      expect(isBillingError(raw)).toBe(true);
+      const result = toUserMessage(raw);
+      // Surfaces the actionable detail, not the generic rate-limit message.
+      expect(result).toContain("credit balance is too low");
+      expect(result).not.toContain("rate limiting");
+    });
+
+    it("routes OpenAI insufficient_quota (a 429!) to billing, not rate limit", () => {
+      const raw = "insufficient_quota: You exceeded your current quota, please check your plan and billing details";
+      expect(isBillingError(raw)).toBe(true);
+      const result = toUserMessage(raw);
+      expect(result).not.toContain("rate limiting");
+      expect(result.toLowerCase()).toMatch(/billing|credit/);
+    });
+
+    it("routes a bare 402 to billing", () => {
+      expect(isBillingError("HTTP 402")).toBe(true);
+      expect(toUserMessage("HTTP 402")).not.toContain("rate limiting");
+    });
+
+    it("does not flag a genuine rate limit as billing", () => {
+      expect(isBillingError("HTTP 429 rate_limit_error")).toBe(false);
+      expect(toUserMessage("HTTP 429 rate_limit_error")).toContain("rate limiting");
     });
   });
 
@@ -237,9 +267,10 @@ describe("toUserMessage", () => {
   // ── Quota / billing ──
 
   describe("quota/billing errors", () => {
-    it("returns quota message for 402", () => {
+    it("returns an actionable billing message for 402", () => {
       const result = toUserMessage("HTTP 402 payment required");
-      expect(result).toContain("quota");
+      expect(result.toLowerCase()).toMatch(/billing|credit/);
+      expect(result).not.toContain("rate limiting");
     });
 
     it("returns billing message for quota exceeded", () => {

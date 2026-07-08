@@ -32,6 +32,19 @@ describe("processingStore", () => {
     expect(useProcessingStore.getState().frames[1].path).toBe("/tmp/frame1.png");
   });
 
+  it("clears frames without touching segments (resume/retry flow)", () => {
+    useProcessingStore.getState().appendFrame({ index: 0, path: "/tmp/frame0.png", timestamp_seconds: 0, width: 1920, height: 1080 });
+    useProcessingStore.getState().appendSegment({
+      index: 0, start_seconds: 0, end_seconds: 5,
+      text: "kept", visual_description: "", emphasis: [], pace: "medium", pause_after_ms: 0, frame_refs: [0],
+    });
+    useProcessingStore.getState().clearFrames();
+    // Frames gone (so re-extraction can't double them), segments preserved
+    // (they're sent back as resume_segments to skip already-billed chunks).
+    expect(useProcessingStore.getState().frames).toEqual([]);
+    expect(useProcessingStore.getState().streamingSegments).toHaveLength(1);
+  });
+
   it("appends segments", () => {
     useProcessingStore.getState().appendSegment({
       index: 0, start_seconds: 0, end_seconds: 5,
