@@ -440,6 +440,19 @@ pub struct GenerationParams {
     /// to five text-only refine calls per iteration.
     #[serde(default)]
     pub strict_mode: bool,
+    /// Send frames as tiled contact sheets instead of one image per frame.
+    ///
+    /// Nine moments then occupy one image slot, so a long video needs a handful
+    /// of API calls rather than thirty — and each call keeps full context
+    /// instead of a truncated summary of the previous one.
+    ///
+    /// Off by default on purpose: tiling halves each frame's linear resolution,
+    /// and reading on-screen text is exactly what this app asks the model to do.
+    /// Whether 512 px cells stay legible on a terminal-heavy screencast is an
+    /// empirical question that needs an A/B on real footage, so this ships as an
+    /// opt-in rather than silently changing every generation.
+    #[serde(default)]
+    pub use_contact_sheets: bool,
 }
 
 // ── Export ──
