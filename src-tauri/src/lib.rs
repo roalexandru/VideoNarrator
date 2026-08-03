@@ -18,6 +18,7 @@ mod models;
 mod process_utils;
 mod project_store;
 mod render;
+mod response_schema;
 mod screen_recorder;
 mod script_validator;
 mod secure_store;

@@ -3,6 +3,7 @@
 use crate::error::NarratorError;
 use crate::http_client;
 use crate::models::*;
+use crate::response_schema::{self, ResponseSchema};
 use crate::video_engine;
 use async_trait::async_trait;
 use serde_json::json;
@@ -39,6 +40,22 @@ pub trait AiProvider: Send + Sync {
         system_prompt: &str,
         user_message: serde_json::Value,
     ) -> Result<String, NarratorError>;
+
+    /// Generate with the response shape enforced by the provider rather than
+    /// requested in prose. Returns the same thing `generate` does — a JSON
+    /// string for the caller to deserialize — so downstream parsing is
+    /// unchanged and the tolerant parser stays a working fallback.
+    ///
+    /// The default implementation ignores the schema and delegates, which keeps
+    /// providers (and test doubles) that have no native support working as-is.
+    async fn generate_with_schema(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+        _schema: &ResponseSchema,
+    ) -> Result<String, NarratorError> {
+        self.generate(system_prompt, user_message).await
+    }
 
     fn name(&self) -> &str;
     fn model(&self) -> &str;
@@ -252,6 +269,49 @@ pub fn build_gemini_body(
     })
 }
 
+// ── Schema enforcement (pure) ────────────────────────────────────────────────
+//
+// Each provider spells "the response must match this shape" differently. These
+// mutate an already-built body so the builders above keep their signatures and
+// their existing tests, and each transform is independently unit-testable
+// without a network call.
+
+/// Force the response through a single-tool call whose `input_schema` is the
+/// contract. Anthropic has no `response_format`; a forced tool is the supported
+/// way to pin the output shape.
+pub fn apply_claude_schema(body: &mut serde_json::Value, schema: &ResponseSchema) {
+    body["tools"] = json!([{
+        "name": schema.name,
+        "description": schema.description,
+        "input_schema": schema.schema.clone(),
+    }]);
+    body["tool_choice"] = json!({ "type": "tool", "name": schema.name });
+}
+
+/// Set `response_format` to a strict JSON schema.
+///
+/// `strict: true` is what makes this a guarantee rather than a hint, and it is
+/// also what imposes the constraints the canonical schemas are written to
+/// satisfy (all properties required, `additionalProperties: false`).
+pub fn apply_openai_schema(body: &mut serde_json::Value, schema: &ResponseSchema) {
+    body["response_format"] = json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.name,
+            "strict": true,
+            "schema": schema.schema.clone(),
+        }
+    });
+}
+
+/// Set `generationConfig.responseSchema`, converted to Gemini's OpenAPI subset.
+///
+/// `responseMimeType` is already `application/json` from the builder; the
+/// schema narrows that from "some JSON" to "this JSON".
+pub fn apply_gemini_schema(body: &mut serde_json::Value, schema: &ResponseSchema) {
+    body["generationConfig"]["responseSchema"] = response_schema::to_gemini_dialect(&schema.schema);
+}
+
 // ── Claude Provider ──
 
 pub struct ClaudeProvider {
@@ -261,22 +321,59 @@ pub struct ClaudeProvider {
     pub reasoning_effort: ReasoningEffort,
 }
 
-#[async_trait]
-impl AiProvider for ClaudeProvider {
-    async fn generate(
+/// Pull the payload out of an Anthropic Messages response.
+///
+/// With a forced tool call the JSON arrives as the `input` object of a
+/// `tool_use` block, not as text — so it is re-serialized to a string here and
+/// callers keep parsing a string either way.
+///
+/// Falls back to the first text block when no matching `tool_use` is present.
+/// That is not merely defensive: a request that stops for `max_tokens` mid-tool
+/// can come back without the block, and a clear parse error downstream beats an
+/// empty string that looks like a successful empty script.
+fn extract_claude_payload(response: &serde_json::Value, tool_name: Option<&str>) -> String {
+    let blocks = response["content"].as_array();
+
+    if let (Some(name), Some(blocks)) = (tool_name, blocks) {
+        let tool_input = blocks.iter().find_map(|b| {
+            if b["type"] == "tool_use" && b["name"] == name {
+                Some(&b["input"])
+            } else {
+                None
+            }
+        });
+        if let Some(input) = tool_input {
+            return input.to_string();
+        }
+        tracing::warn!(
+            "Claude returned no `{name}` tool_use block; falling back to text content \
+             (stop_reason: {})",
+            response["stop_reason"].as_str().unwrap_or("unknown")
+        );
+    }
+
+    blocks
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                if b["type"] == "text" {
+                    b["text"].as_str().map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default()
+}
+
+impl ClaudeProvider {
+    /// Single POST to the Messages API. `tool_name` is `Some` when the request
+    /// forced a tool call and the response should be read from its input.
+    async fn send(
         &self,
-        system_prompt: &str,
-        user_message: serde_json::Value,
+        body: serde_json::Value,
+        tool_name: Option<&str>,
     ) -> Result<String, NarratorError> {
         let client = http_client::shared();
-
-        let body = build_claude_body(
-            &self.model,
-            self.temperature,
-            self.reasoning_effort,
-            system_prompt,
-            user_message,
-        );
 
         // Single attempt — retries on 429/529 are handled exactly once,
         // upstream in `generate_with_retry`. Looping here too compounded
@@ -295,19 +392,7 @@ impl AiProvider for ClaudeProvider {
 
         if status.is_success() {
             let response_json: serde_json::Value = resp.json().await?;
-            let text = response_json["content"]
-                .as_array()
-                .and_then(|blocks| {
-                    blocks.iter().find_map(|b| {
-                        if b["type"] == "text" {
-                            b["text"].as_str().map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_default();
-            Ok(text)
+            Ok(extract_claude_payload(&response_json, tool_name))
         } else {
             let error_text = resp.text().await.unwrap_or_default();
             tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
@@ -318,6 +403,41 @@ impl AiProvider for ClaudeProvider {
                 "Anthropic",
             ))
         }
+    }
+}
+
+#[async_trait]
+impl AiProvider for ClaudeProvider {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+    ) -> Result<String, NarratorError> {
+        let body = build_claude_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            user_message,
+        );
+        self.send(body, None).await
+    }
+
+    async fn generate_with_schema(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+        schema: &ResponseSchema,
+    ) -> Result<String, NarratorError> {
+        let mut body = build_claude_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            user_message,
+        );
+        apply_claude_schema(&mut body, schema);
+        self.send(body, Some(schema.name)).await
     }
 
     fn name(&self) -> &str {
@@ -451,58 +571,45 @@ pub struct OpenAiProvider {
     pub reasoning_effort: ReasoningEffort,
 }
 
-#[async_trait]
-impl AiProvider for OpenAiProvider {
-    async fn generate(
-        &self,
-        system_prompt: &str,
-        user_message: serde_json::Value,
-    ) -> Result<String, NarratorError> {
+/// Translate a Claude-shaped content array into OpenAI content parts.
+///
+/// The Claude block shape is canonical throughout this module; each provider
+/// converts on the way out.
+pub fn claude_content_to_openai(user_message: &serde_json::Value) -> serde_json::Value {
+    if let Some(parts) = user_message.as_array() {
+        let converted: Vec<serde_json::Value> = parts
+            .iter()
+            .map(|part| {
+                if part["type"] == "image" {
+                    let media_type = part["source"]["media_type"]
+                        .as_str()
+                        .unwrap_or("image/jpeg");
+                    let data = part["source"]["data"].as_str().unwrap_or("");
+                    json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        }
+                    })
+                } else {
+                    json!({
+                        "type": "text",
+                        "text": part["text"].as_str().unwrap_or("")
+                    })
+                }
+            })
+            .collect();
+        serde_json::Value::Array(converted)
+    } else if user_message.is_string() {
+        json!([{"type": "text", "text": user_message.as_str().unwrap_or("")}])
+    } else {
+        json!([{"type": "text", "text": user_message.to_string()}])
+    }
+}
+
+impl OpenAiProvider {
+    async fn send(&self, body: serde_json::Value) -> Result<String, NarratorError> {
         let client = http_client::shared();
-
-        // Convert user_message to OpenAI format
-        let user_content = if user_message.is_array() {
-            // It's a multimodal content array — convert to OpenAI format
-            let parts: Vec<serde_json::Value> = user_message
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|part| {
-                    if part["type"] == "image" {
-                        // Convert Claude image format to OpenAI
-                        let media_type = part["source"]["media_type"]
-                            .as_str()
-                            .unwrap_or("image/jpeg");
-                        let data = part["source"]["data"].as_str().unwrap_or("");
-                        json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!("data:{media_type};base64,{data}")
-                            }
-                        })
-                    } else {
-                        // Text part
-                        json!({
-                            "type": "text",
-                            "text": part["text"].as_str().unwrap_or("")
-                        })
-                    }
-                })
-                .collect();
-            serde_json::Value::Array(parts)
-        } else if user_message.is_string() {
-            json!([{"type": "text", "text": user_message.as_str().unwrap_or("")}])
-        } else {
-            json!([{"type": "text", "text": user_message.to_string()}])
-        };
-
-        let body = build_openai_body(
-            &self.model,
-            self.temperature,
-            self.reasoning_effort,
-            system_prompt,
-            user_content,
-        );
 
         // Retries handled by `generate_with_retry`; see ClaudeProvider for the
         // rationale on collapsing the inner loop.
@@ -534,6 +641,41 @@ impl AiProvider for OpenAiProvider {
             ))
         }
     }
+}
+
+#[async_trait]
+impl AiProvider for OpenAiProvider {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+    ) -> Result<String, NarratorError> {
+        let body = build_openai_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            claude_content_to_openai(&user_message),
+        );
+        self.send(body).await
+    }
+
+    async fn generate_with_schema(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+        schema: &ResponseSchema,
+    ) -> Result<String, NarratorError> {
+        let mut body = build_openai_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            claude_content_to_openai(&user_message),
+        );
+        apply_openai_schema(&mut body, schema);
+        self.send(body).await
+    }
 
     fn name(&self) -> &str {
         "openai"
@@ -553,58 +695,44 @@ pub struct GeminiProvider {
     pub reasoning_effort: ReasoningEffort,
 }
 
-#[async_trait]
-impl AiProvider for GeminiProvider {
-    async fn generate(
-        &self,
-        system_prompt: &str,
-        user_message: serde_json::Value,
-    ) -> Result<String, NarratorError> {
-        let client = http_client::shared();
+/// Translate a Claude-shaped content array into Gemini parts.
+pub fn claude_content_to_gemini(user_message: &serde_json::Value) -> Vec<serde_json::Value> {
+    if let Some(parts) = user_message.as_array() {
+        parts
+            .iter()
+            .map(|part| {
+                if part["type"] == "image" {
+                    let media_type = part["source"]["media_type"]
+                        .as_str()
+                        .unwrap_or("image/jpeg");
+                    let data = part["source"]["data"].as_str().unwrap_or("");
+                    json!({
+                        "inlineData": {
+                            "data": data,
+                            "mimeType": media_type
+                        }
+                    })
+                } else {
+                    json!({
+                        "text": part["text"].as_str().unwrap_or("")
+                    })
+                }
+            })
+            .collect()
+    } else if user_message.is_string() {
+        vec![json!({ "text": user_message.as_str().unwrap_or("") })]
+    } else {
+        vec![json!({ "text": user_message.to_string() })]
+    }
+}
 
-        // Convert user_message (Claude format) to Gemini parts
-        let parts: Vec<serde_json::Value> = if user_message.is_array() {
-            user_message
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|part| {
-                    if part["type"] == "image" {
-                        let media_type = part["source"]["media_type"]
-                            .as_str()
-                            .unwrap_or("image/jpeg");
-                        let data = part["source"]["data"].as_str().unwrap_or("");
-                        json!({
-                            "inlineData": {
-                                "data": data,
-                                "mimeType": media_type
-                            }
-                        })
-                    } else {
-                        // Text part
-                        json!({
-                            "text": part["text"].as_str().unwrap_or("")
-                        })
-                    }
-                })
-                .collect()
-        } else if user_message.is_string() {
-            vec![json!({ "text": user_message.as_str().unwrap_or("") })]
-        } else {
-            vec![json!({ "text": user_message.to_string() })]
-        };
+impl GeminiProvider {
+    async fn send(&self, body: serde_json::Value) -> Result<String, NarratorError> {
+        let client = http_client::shared();
 
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
             self.model
-        );
-
-        let body = build_gemini_body(
-            &self.model,
-            self.temperature,
-            self.reasoning_effort,
-            system_prompt,
-            parts,
         );
 
         // Retries handled by `generate_with_retry`; see ClaudeProvider for the
@@ -636,6 +764,41 @@ impl AiProvider for GeminiProvider {
                 "Google",
             ))
         }
+    }
+}
+
+#[async_trait]
+impl AiProvider for GeminiProvider {
+    async fn generate(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+    ) -> Result<String, NarratorError> {
+        let body = build_gemini_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            claude_content_to_gemini(&user_message),
+        );
+        self.send(body).await
+    }
+
+    async fn generate_with_schema(
+        &self,
+        system_prompt: &str,
+        user_message: serde_json::Value,
+        schema: &ResponseSchema,
+    ) -> Result<String, NarratorError> {
+        let mut body = build_gemini_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            claude_content_to_gemini(&user_message),
+        );
+        apply_gemini_schema(&mut body, schema);
+        self.send(body).await
     }
 
     fn name(&self) -> &str {
@@ -1092,8 +1255,14 @@ async fn generate_chunked(
             label: chunk_label,
             cancel: cancel.clone(),
         });
-        let response =
-            generate_with_retry(provider, system_prompt, chunk_message, ctx.as_ref()).await?;
+        let response = generate_with_retry(
+            provider,
+            system_prompt,
+            chunk_message,
+            ctx.as_ref(),
+            Some(&response_schema::narration_script()),
+        )
+        .await?;
 
         // Parse the chunk response
         let json_text = response
@@ -1527,11 +1696,16 @@ struct RetryContext {
 }
 
 /// Call an AI provider with exponential backoff on rate limit errors.
+///
+/// `schema`, when present, pins the response shape at the API level instead of
+/// asking for it in prose. Every JSON-returning path passes one; the paths that
+/// legitimately want free text (a single rewritten segment) pass `None`.
 async fn generate_with_retry(
     provider: &dyn AiProvider,
     system_prompt: &str,
     user_message: serde_json::Value,
     ctx: Option<&RetryContext>,
+    schema: Option<&ResponseSchema>,
 ) -> Result<String, NarratorError> {
     let max_retries = 4;
     let delays = [5, 15, 30, 60]; // seconds — aggressive backoff for rate limits
@@ -1563,7 +1737,12 @@ async fn generate_with_retry(
             }
         }
         // Run the call, driving the in-flight heartbeat when we have a context.
-        let call = provider.generate(system_prompt, user_message.clone());
+        // Both trait methods return the same boxed future type under
+        // `async_trait`, so this dispatches without extra allocation.
+        let call = match schema {
+            Some(s) => provider.generate_with_schema(system_prompt, user_message.clone(), s),
+            None => provider.generate(system_prompt, user_message.clone()),
+        };
         let outcome = match ctx {
             Some(c) => {
                 with_heartbeat(
@@ -1757,7 +1936,14 @@ async fn generate_narration_once(
             label: "Generating narration with AI…".to_string(),
             cancel: cancel.clone(),
         });
-        generate_with_retry(provider, system_prompt, user_message, ctx.as_ref()).await?
+        generate_with_retry(
+            provider,
+            system_prompt,
+            user_message,
+            ctx.as_ref(),
+            Some(&response_schema::narration_script()),
+        )
+        .await?
     };
 
     // Try to parse the JSON response
@@ -1960,7 +2146,14 @@ pub async fn polish_script(
         .map_err(|e| NarratorError::SerializationError(e.to_string()))?;
     let user_message = json!(script_json);
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
+    let response_text = generate_with_retry(
+        provider,
+        &system_prompt,
+        user_message,
+        None,
+        Some(&response_schema::narration_script()),
+    )
+    .await?;
     let json_text = response_text
         .trim()
         .trim_start_matches("```json")
@@ -2004,7 +2197,14 @@ pub async fn translate_script(
 
     let user_message = json!(script_json);
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
+    let response_text = generate_with_retry(
+        provider,
+        &system_prompt,
+        user_message,
+        None,
+        Some(&response_schema::narration_script()),
+    )
+    .await?;
 
     let json_text = response_text
         .trim()
@@ -2368,7 +2568,14 @@ async fn run_critique(
     // Goes through the same retry layer as every other AI call. Without this,
     // critique would skip the rate-limit backoff and surface a transient 429
     // as "self-critique skipped".
-    let response = generate_with_retry(provider, system_prompt, user_message, None).await?;
+    let response = generate_with_retry(
+        provider,
+        system_prompt,
+        user_message,
+        None,
+        Some(&response_schema::critique()),
+    )
+    .await?;
     parse_critique_response(&response)
 }
 
@@ -2471,7 +2678,8 @@ pub async fn refine_segment(
         Instruction: {instruction}"
     ));
 
-    let response = generate_with_retry(provider, system_prompt, user_message, None).await?;
+    // No schema: this path returns a bare rewritten sentence, not an object.
+    let response = generate_with_retry(provider, system_prompt, user_message, None, None).await?;
 
     // Clean up: remove any accidental quotes, markdown, or explanations
     let refined = response
@@ -2578,7 +2786,14 @@ pub async fn refine_script(
         script_json
     ));
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
+    let response_text = generate_with_retry(
+        provider,
+        &system_prompt,
+        user_message,
+        None,
+        Some(&response_schema::narration_script()),
+    )
+    .await?;
     let json_text = response_text
         .trim()
         .trim_start_matches("```json")
@@ -3257,7 +3472,8 @@ mod tests {
             cancel: Some(cancel),
         };
 
-        let result = generate_with_retry(&AlwaysRateLimited, "sys", json!("msg"), Some(&ctx)).await;
+        let result =
+            generate_with_retry(&AlwaysRateLimited, "sys", json!("msg"), Some(&ctx), None).await;
 
         // First call rate-limits → backoff; cancel set during the countdown
         // surfaces Cancelled rather than exhausting all four retries.
@@ -5052,5 +5268,331 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    // ── Structured output: wire shapes ──────────────────────────────────────
+    //
+    // Each provider spells schema enforcement differently and gets it wrong as
+    // a 400, not a soft degrade. These assert the exact request shape without
+    // touching the network.
+
+    #[test]
+    fn claude_schema_forces_a_single_tool_call() {
+        let schema = response_schema::narration_script();
+        let mut body = build_claude_body(
+            "claude-sonnet-5",
+            0.7,
+            ReasoningEffort::Balanced,
+            "sys",
+            json!([{"type": "text", "text": "hi"}]),
+        );
+        apply_claude_schema(&mut body, &schema);
+
+        let tools = body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 1, "exactly one tool, or the model may choose");
+        assert_eq!(tools[0]["name"], schema.name);
+        assert!(tools[0]["description"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()));
+        // The schema must land under `input_schema`, not `schema`.
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
+        assert!(tools[0]["input_schema"]["properties"]["segments"].is_object());
+
+        // Forced, not merely offered — `auto` would let the model reply in prose.
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], schema.name);
+
+        // Enforcement must not disturb the capability-matrix decisions.
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(
+            body.get("temperature").is_none(),
+            "sonnet-5 rejects sampling params"
+        );
+    }
+
+    #[test]
+    fn openai_schema_uses_strict_json_schema() {
+        let schema = response_schema::narration_script();
+        let mut body = build_openai_body(
+            "gpt-5",
+            0.7,
+            ReasoningEffort::Balanced,
+            "sys",
+            json!([{"type": "text", "text": "hi"}]),
+        );
+        apply_openai_schema(&mut body, &schema);
+
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        let js = &body["response_format"]["json_schema"];
+        assert_eq!(js["name"], schema.name);
+        // Without `strict` the schema is a hint, which defeats the purpose.
+        assert_eq!(js["strict"], true);
+        assert_eq!(js["schema"]["type"], "object");
+        assert_eq!(js["schema"]["additionalProperties"], false);
+    }
+
+    #[test]
+    fn gemini_schema_sets_response_schema_in_its_own_dialect() {
+        let schema = response_schema::narration_script();
+        let mut body = build_gemini_body(
+            "gemini-3-pro",
+            0.7,
+            ReasoningEffort::Balanced,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        apply_gemini_schema(&mut body, &schema);
+
+        let cfg = &body["generationConfig"];
+        // Both are needed: mime type says "JSON", schema says "this JSON".
+        assert_eq!(cfg["responseMimeType"], "application/json");
+        assert_eq!(cfg["responseSchema"]["type"], "object");
+        assert!(cfg["responseSchema"]["properties"]["segments"].is_object());
+        // `additionalProperties` is a hard 400 on Gemini.
+        assert!(
+            !cfg["responseSchema"]
+                .to_string()
+                .contains("additionalProperties"),
+            "unsupported keyword reached the Gemini request"
+        );
+        // Pre-existing thinking config must survive.
+        assert_eq!(cfg["thinkingLevel"], "medium");
+    }
+
+    #[test]
+    fn gemini_schema_does_not_clobber_sibling_generation_config() {
+        let mut body = build_gemini_body(
+            "gemini-2.5-pro",
+            0.4,
+            ReasoningEffort::Fast,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        apply_gemini_schema(&mut body, &response_schema::critique());
+        // Compared with tolerance: the f32 temperature widens to f64 in JSON.
+        let temp = body["generationConfig"]["temperature"]
+            .as_f64()
+            .expect("temperature");
+        assert!((temp - 0.4).abs() < 1e-6, "temperature was {temp}");
+        assert!(body["generationConfig"]["maxOutputTokens"].is_number());
+        assert!(body["generationConfig"]["responseSchema"].is_object());
+    }
+
+    // ── Structured output: response extraction ──────────────────────────────
+
+    #[test]
+    fn claude_payload_comes_from_the_tool_use_block() {
+        let response = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": "let me think about this"},
+                {"type": "tool_use", "name": "narration_script",
+                 "input": {"title": "From tool", "segments": []}}
+            ]
+        });
+        let payload = extract_claude_payload(&response, Some("narration_script"));
+        let parsed: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        // The tool input wins over the chatty text block that precedes it.
+        assert_eq!(parsed["title"], "From tool");
+    }
+
+    #[test]
+    fn claude_payload_ignores_a_tool_use_block_with_another_name() {
+        let response = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "tool_use", "name": "some_other_tool", "input": {"title": "wrong"}},
+                {"type": "text", "text": "{\"title\":\"from text\"}"}
+            ]
+        });
+        let payload = extract_claude_payload(&response, Some("narration_script"));
+        let parsed: serde_json::Value = serde_json::from_str(&payload).expect("valid JSON");
+        assert_eq!(parsed["title"], "from text");
+    }
+
+    #[test]
+    fn claude_payload_falls_back_to_text_when_the_tool_call_is_missing() {
+        // A response truncated by max_tokens can arrive with no tool_use block.
+        // Falling back to text gives the caller a real parse error instead of an
+        // empty string that reads as a successful empty script.
+        let response = json!({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "{\"title\":\"partial\"}"}]
+        });
+        let payload = extract_claude_payload(&response, Some("narration_script"));
+        assert_eq!(payload, "{\"title\":\"partial\"}");
+    }
+
+    #[test]
+    fn claude_payload_reads_text_when_no_schema_was_requested() {
+        let response = json!({
+            "content": [{"type": "text", "text": "plain prose reply"}]
+        });
+        assert_eq!(extract_claude_payload(&response, None), "plain prose reply");
+    }
+
+    #[test]
+    fn claude_payload_is_empty_when_there_is_no_usable_block() {
+        let response = json!({ "content": [] });
+        assert_eq!(extract_claude_payload(&response, None), "");
+        assert_eq!(
+            extract_claude_payload(&json!({}), Some("narration_script")),
+            ""
+        );
+    }
+
+    // ── Content conversion ──────────────────────────────────────────────────
+
+    #[test]
+    fn openai_conversion_maps_images_to_data_urls() {
+        let claude_content = json!([
+            {"type": "text", "text": "frame 0"},
+            {"type": "image", "source": {"media_type": "image/jpeg", "data": "QUJD"}}
+        ]);
+        let converted = claude_content_to_openai(&claude_content);
+        let parts = converted.as_array().expect("array");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "frame 0");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    #[test]
+    fn gemini_conversion_maps_images_to_inline_data() {
+        let claude_content = json!([
+            {"type": "text", "text": "frame 0"},
+            {"type": "image", "source": {"media_type": "image/jpeg", "data": "QUJD"}}
+        ]);
+        let parts = claude_content_to_gemini(&claude_content);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], "frame 0");
+        assert_eq!(parts[1]["inlineData"]["data"], "QUJD");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/jpeg");
+    }
+
+    #[test]
+    fn conversions_accept_a_bare_string_message() {
+        // The polish / translate / refine paths pass a JSON string, not an array.
+        let msg = json!("just text");
+        let openai = claude_content_to_openai(&msg);
+        assert_eq!(openai[0]["text"], "just text");
+        let gemini = claude_content_to_gemini(&msg);
+        assert_eq!(gemini[0]["text"], "just text");
+    }
+
+    // ── Schema threading ────────────────────────────────────────────────────
+
+    /// Records whether the schema-aware entry point was used, and which schema.
+    struct SchemaSpy {
+        response: String,
+        saw_schema: std::sync::Mutex<Option<String>>,
+        plain_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SchemaSpy {
+        fn new(response: &str) -> Self {
+            Self {
+                response: response.to_string(),
+                saw_schema: std::sync::Mutex::new(None),
+                plain_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AiProvider for SchemaSpy {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _user_message: serde_json::Value,
+        ) -> Result<String, NarratorError> {
+            self.plain_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.response.clone())
+        }
+        async fn generate_with_schema(
+            &self,
+            _system_prompt: &str,
+            _user_message: serde_json::Value,
+            schema: &ResponseSchema,
+        ) -> Result<String, NarratorError> {
+            *self.saw_schema.lock().unwrap() = Some(schema.name.to_string());
+            Ok(self.response.clone())
+        }
+        fn name(&self) -> &str {
+            "spy"
+        }
+        fn model(&self) -> &str {
+            "spy-v1"
+        }
+    }
+
+    #[tokio::test]
+    async fn narration_generation_requests_the_script_schema() {
+        let spy = SchemaSpy::new(&chunk_response_json(
+            "Spy",
+            10.0,
+            &[(0.0, 5.0, "one"), (5.0, 10.0, "two")],
+        ));
+        generate_narration(
+            &spy,
+            "sys",
+            json!([{"type": "text", "text": "ctx"}]),
+            "technical",
+            "en",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("generation succeeds");
+
+        assert_eq!(
+            spy.saw_schema.lock().unwrap().as_deref(),
+            Some("narration_script")
+        );
+        assert_eq!(
+            spy.plain_calls.load(Ordering::SeqCst),
+            0,
+            "narration must not fall back to the unstructured entry point"
+        );
+    }
+
+    #[tokio::test]
+    async fn refine_segment_stays_unstructured() {
+        // This path returns a bare sentence; forcing an object schema would
+        // break it.
+        let spy = SchemaSpy::new("A tighter sentence.");
+        let out = refine_segment(&spy, "old text", "make it shorter", "")
+            .await
+            .expect("refine succeeds");
+        assert_eq!(out, "A tighter sentence.");
+        assert!(spy.saw_schema.lock().unwrap().is_none());
+        assert_eq!(spy.plain_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_provider_without_schema_support_still_works() {
+        // The default trait method delegates to `generate`, so a provider (or
+        // test double) that never overrides it keeps functioning.
+        let provider = ScriptedProvider::new(vec![&chunk_response_json(
+            "Fallback",
+            10.0,
+            &[(0.0, 10.0, "only")],
+        )]);
+        let script = generate_narration(
+            &provider,
+            "sys",
+            json!([{"type": "text", "text": "ctx"}]),
+            "technical",
+            "en",
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("unstructured provider still generates");
+        assert_eq!(script.title, "Fallback");
     }
 }
