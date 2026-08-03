@@ -848,7 +848,12 @@ pub fn build_system_prompt(
     let target_rate = crate::speech_rate::rate_per_minute(lang);
     let unit = crate::speech_rate::budget_unit(lang);
 
-    // Base instructions
+    // Base instructions + output shape.
+    //
+    // The schema is still spelled out even though `response_schema` now enforces
+    // it at the API level: it documents the field *meanings*, which a bare schema
+    // does not, and it is the only description available on the tolerant-parse
+    // fallback path.
     prompt.push_str(
         "You are a professional video narrator. Your task is to generate a timed narration \
         script for a video based on the frames and context provided.\n\n\
@@ -860,40 +865,76 @@ pub fn build_system_prompt(
         \"pace\": \"slow\" | \"medium\" | \"fast\",\n      \"pause_after_ms\": number,\n      \
         \"frame_refs\": [number]\n    }\n  ],\n  \"metadata\": {\n    \"style\": \"string\",\n    \
         \"language\": \"string\",\n    \"model\": \"string\",\n    \
-        \"generated_at\": \"ISO8601 string\"\n  }\n}\n\n\
-        CRITICAL RULES:\n\
-        1. Return ONLY the JSON, no markdown code fences, no explanation.\n\
-        2. You MUST generate segments covering the ENTIRE video from start to end.\n\
-        3. The last segment's end_seconds MUST equal total_duration_seconds.\n\
-        4. Leave natural gaps (1-3 seconds) between segments for breathing room.\n\
-        5. A typical narration covers about 75-85% of the video duration with speech. \
-           Aim for MORE narration rather than less — long silent gaps feel empty.\n\
-        6. Distribute segments evenly across the full video timeline.\n\
-        7. Each segment's text MUST be plain speakable text only. NEVER include \
-           markup, tags, or directives like [pause], [break], (pause), etc. \
-           The text will be sent directly to a text-to-speech engine.\n\
-        8. Prefer substantive narration when the per-segment word budget allows \
-           (see WORD BUDGET below). When the budget is tight, keep the segment \
-           short — do NOT cram extra detail into a small time window.\n\n",
+        \"generated_at\": \"ISO8601 string\"\n  }\n}\n\n",
     );
 
-    // Word budget — the single most important constraint. Without this the LLM
-    // happily emits 550 wpm text that TTS cannot possibly deliver in the window.
+    // ── HARD RULES ──
+    //
+    // Deliberately short. Everything here breaks the export or the TTS engine if
+    // violated — these are correctness constraints, not taste. Mixing craft
+    // advice in with them (as the previous single "CRITICAL RULES" list did)
+    // dilutes both: the model treats a stylistic preference as inviolable and a
+    // real constraint as one item among many.
     prompt.push_str(&format!(
-        "## WORD BUDGET (hard constraint)\n\n\
-        The text-to-speech engine for language '{lang}' delivers roughly \
-        {target_rate:.0} {unit} per minute at natural pace. For EVERY segment, \
-        the `text` field MUST fit inside `end_seconds - start_seconds` at that \
-        rate. That means:\n\n\
+        "## HARD RULES (violating any of these breaks the export)\n\n\
+        1. Return ONLY the JSON. No markdown fences, no prose before or after.\n\
+        2. Segments MUST cover the ENTIRE video, and the last segment's \
+           `end_seconds` MUST equal `total_duration_seconds`.\n\
+        3. Segments MUST be in ascending time order and MUST NOT overlap.\n\
+        4. `text` MUST be plain speakable text. NEVER emit markup, tags, or \
+           directives such as [pause], [break], (pause) — the string goes \
+           straight to a text-to-speech engine, which will read them aloud.\n\
+        5. WORD BUDGET. The engine for language '{lang}' delivers roughly \
+           {target_rate:.0} {unit} per minute. For EVERY segment, `text` MUST fit \
+           inside its window at that rate:\n\n\
         \tmax_{unit} = round((end_seconds - start_seconds) × {target_rate:.0} / 60)\n\n\
-        If an idea doesn't fit the budget, do ONE of these — never cram text:\n\
+        \tWhen an idea does not fit, do ONE of these — never cram:\n\
         \t• Extend `end_seconds` (borrow from the gap before the next segment).\n\
-        \t• Split the idea into two adjacent segments.\n\
-        \t• Cut the idea down — trim adjectives, drop asides.\n\n\
-        A segment whose speech duration exceeds its window causes the exported \
-        video to visibly desync or stretch. Treat the budget as a hard upper \
-        bound, not a suggestion.\n\n"
+        \t• Split the idea across two adjacent segments.\n\
+        \t• Cut it down — trim adjectives, drop asides.\n\n\
+        \tExceeding the budget makes the exported video audibly desync or \
+        \tstretch. It is a hard upper bound, not a target.\n\n"
     ));
+
+    // ── CRAFT ──
+    //
+    // Defaults that work, explicitly marked as the model's call. Stated as
+    // guidance rather than rules so the model can depart from them when the
+    // material calls for it, instead of following them off a cliff.
+    prompt.push_str(
+        "## CRAFT (defaults that work — your judgement, not rules)\n\n\
+        These are starting points from videos that turned out well. Depart from \
+        any of them when the footage justifies it.\n\n\
+        • Coverage: speech over roughly 75-85% of the duration. Long silent \
+          stretches feel empty; wall-to-wall talking feels breathless.\n\
+        • Gaps: 1-3 seconds between segments gives the ear somewhere to rest.\n\
+        • Distribution: spread segments across the whole timeline rather than \
+          front-loading them.\n\
+        • Density: when the budget is generous, be substantive; when it is tight, \
+          be brief. A short segment is better than a rushed one.\n\
+        • Specificity: name what is actually on screen — the command, the file, \
+          the error, the value. Concrete beats generic every time.\n\n",
+    );
+
+    // ── AVOID ──
+    //
+    // Named failure modes observed in real output. Cheaper and more effective
+    // than adding another positive rule, because each one is a pattern the model
+    // otherwise reaches for by default.
+    prompt.push_str(
+        "## AVOID (these consistently make narration worse)\n\n\
+        • Reading on-screen text aloud verbatim. The viewer can already read it — \
+          say what it means or why it matters instead.\n\
+        • Filler openers: \"In this video we'll see…\", \"Let's take a look at…\", \
+          \"As you can see…\". Start with the substance.\n\
+        • Empty intensifiers: \"seamlessly\", \"effortlessly\", \"powerful\", \
+          \"robust\", \"simply\". They add syllables and no information.\n\
+        • Narrating the interface chrome — menu bars, window titles, the clock, \
+          the cursor moving. Describe the work, not the furniture.\n\
+        • Narrating the act of clicking or typing when the result is what matters.\n\
+        • Cramming past the word budget and hoping the engine keeps up.\n\
+        • Restating the previous segment in different words to fill a window.\n\n",
+    );
 
     // Style block
     prompt.push_str("## Narration Style\n\n");
@@ -3471,6 +3512,79 @@ mod tests {
             prompt.contains("WORD BUDGET") && prompt.contains("150"),
             "expected word-budget section mentioning 150 wpm"
         );
+    }
+
+    #[test]
+    fn system_prompt_separates_hard_rules_from_craft_and_anti_patterns() {
+        let prompt = build_system_prompt(&test_style(), &[], "", "en");
+        // Three distinct blocks, in escalating-latitude order: what breaks the
+        // export, what is taste, what to avoid.
+        let hard = prompt.find("## HARD RULES").expect("hard rules block");
+        let craft = prompt.find("## CRAFT").expect("craft block");
+        let avoid = prompt.find("## AVOID").expect("avoid block");
+        assert!(hard < craft && craft < avoid, "blocks out of order");
+
+        // Hard rules must read as non-negotiable, craft explicitly as judgement.
+        assert!(prompt[hard..craft].contains("MUST"));
+        assert!(
+            prompt[craft..avoid].contains("your judgement")
+                || prompt[craft..avoid].contains("not rules"),
+            "craft block must be marked optional"
+        );
+    }
+
+    #[test]
+    fn hard_rules_keep_every_export_breaking_constraint() {
+        // These four are the ones that corrupt the export or the TTS output if
+        // dropped. Asserted individually so a future prompt edit can't quietly
+        // lose one while the section still looks plausible.
+        let prompt = build_system_prompt(&test_style(), &[], "", "en");
+        let hard = &prompt[prompt.find("## HARD RULES").unwrap()..prompt.find("## CRAFT").unwrap()];
+        assert!(hard.contains("ONLY the JSON"), "JSON-only rule missing");
+        assert!(hard.contains("total_duration_seconds"), "coverage missing");
+        assert!(hard.contains("[pause]"), "speakable-text rule missing");
+        assert!(hard.contains("WORD BUDGET"), "word budget missing");
+        // The formula itself, not just the heading — it is what keeps TTS in sync.
+        assert!(hard.contains("round((end_seconds - start_seconds)"));
+    }
+
+    #[test]
+    fn anti_patterns_name_the_failure_modes_observed_in_output() {
+        let prompt = build_system_prompt(&test_style(), &[], "", "en");
+        let avoid = &prompt[prompt.find("## AVOID").unwrap()..];
+        for pattern in [
+            "verbatim",      // reading on-screen text aloud
+            "In this video", // filler opener
+            "seamlessly",    // empty intensifier
+            "chrome",        // narrating the UI furniture
+            "budget",        // cramming past the limit
+        ] {
+            assert!(
+                avoid.contains(pattern),
+                "anti-pattern list lost {pattern:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn word_budget_rate_still_tracks_the_language() {
+        // The budget is per-language; an English rate leaking into a Japanese
+        // prompt would silently license 2.5x too much text.
+        let en = build_system_prompt(&test_style(), &[], "", "en");
+        let ja = build_system_prompt(&test_style(), &[], "", "ja");
+        assert!(en.contains("150") && en.contains("words"));
+        assert!(ja.contains("400") && ja.contains("characters"));
+    }
+
+    fn test_style() -> NarrationStyle {
+        NarrationStyle {
+            id: "technical".into(),
+            label: "Technical".into(),
+            description: "Technical deep-dive".into(),
+            system_prompt: "You are narrating a technical video.".into(),
+            pacing: "medium".into(),
+            pause_markers: true,
+        }
     }
 
     #[test]
