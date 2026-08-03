@@ -44,12 +44,221 @@ pub trait AiProvider: Send + Sync {
     fn model(&self) -> &str;
 }
 
+// ── Model capability matrix ──────────────────────────────────────────────────
+//
+// Frontier models keep *removing* request parameters, so "which knobs may I
+// send to this model" is per-model state we have to track. Getting it wrong is
+// a hard 400, not a soft degrade. These predicates are the single source of
+// truth; the body builders below are pure functions over them so the wire shape
+// is unit-testable without touching the network.
+
+/// Claude models that reject `temperature` / `top_p` / `top_k` outright (400).
+///
+/// Removed starting with Opus 4.7. Sending a sampling parameter to any of these
+/// fails the whole request, so the builder must omit it rather than clamp it.
+pub fn claude_rejects_sampling_params(model: &str) -> bool {
+    model.starts_with("claude-opus-5")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-mythos-5")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-4-7")
+}
+
+/// Claude models that take `thinking: {type: "adaptive"}` (the 4.6+ family).
+///
+/// The older fixed `budget_tokens` form is deprecated on 4.6 and rejected with a
+/// 400 from 4.7 onward, so adaptive is the only form we ever send.
+pub fn claude_supports_adaptive_thinking(model: &str) -> bool {
+    model.starts_with("claude-opus-5")
+        || model.starts_with("claude-sonnet-5")
+        || model.starts_with("claude-fable-5")
+        || model.starts_with("claude-mythos-5")
+        || model.starts_with("claude-opus-4-8")
+        || model.starts_with("claude-opus-4-7")
+        || model.starts_with("claude-opus-4-6")
+        || model.starts_with("claude-sonnet-4-6")
+}
+
+/// Claude models that accept `output_config.effort`.
+///
+/// Errors on Sonnet 4.5 and Haiku 4.5, so it can't be sent unconditionally.
+pub fn claude_supports_effort(model: &str) -> bool {
+    claude_supports_adaptive_thinking(model) || model.starts_with("claude-opus-4-5")
+}
+
+/// Gemini models that take `generationConfig.thinkingLevel` (Gemini 3+).
+///
+/// Gemini 2.5 uses the older `thinkingBudget`; the two are mutually exclusive in
+/// one request, so we only send the new form to models that understand it.
+pub fn gemini_supports_thinking_level(model: &str) -> bool {
+    model.starts_with("gemini-3")
+}
+
+/// Output-token ceiling. Thinking tokens and visible response text share this
+/// budget, so a thinking-capable model needs materially more headroom than the
+/// 8192 that sufficed when no model reasoned — too tight and the JSON payload
+/// gets truncated mid-object and fails the strict parse downstream.
+fn max_output_tokens(thinking_enabled: bool) -> u32 {
+    if thinking_enabled {
+        16000
+    } else {
+        8192
+    }
+}
+
+impl ReasoningEffort {
+    /// Anthropic `output_config.effort` (`low` | `medium` | `high` | `xhigh` | `max`).
+    fn claude_effort(self) -> &'static str {
+        match self {
+            ReasoningEffort::Fast => "low",
+            ReasoningEffort::Balanced => "medium",
+            ReasoningEffort::Thorough => "high",
+            ReasoningEffort::Max => "max",
+        }
+    }
+
+    /// OpenAI Chat Completions `reasoning_effort`.
+    ///
+    /// Note this is the *flat* parameter used by `/v1/chat/completions`; the
+    /// Responses API spells the same thing `reasoning: {effort}`.
+    fn openai_effort(self) -> &'static str {
+        match self {
+            ReasoningEffort::Fast => "low",
+            ReasoningEffort::Balanced => "medium",
+            ReasoningEffort::Thorough => "high",
+            ReasoningEffort::Max => "max",
+        }
+    }
+
+    /// Gemini `thinkingLevel`. Clamped: Gemini's ladder stops at `high`, so
+    /// `Max` maps to `high` rather than sending a value the API would reject.
+    fn gemini_thinking_level(self) -> &'static str {
+        match self {
+            ReasoningEffort::Fast => "low",
+            ReasoningEffort::Balanced => "medium",
+            ReasoningEffort::Thorough | ReasoningEffort::Max => "high",
+        }
+    }
+}
+
+// ── Request body builders (pure) ─────────────────────────────────────────────
+
+/// Build the Anthropic Messages request body.
+pub fn build_claude_body(
+    model: &str,
+    temperature: f32,
+    effort: ReasoningEffort,
+    system_prompt: &str,
+    user_message: serde_json::Value,
+) -> serde_json::Value {
+    let thinking = claude_supports_adaptive_thinking(model);
+
+    let mut body = json!({
+        "model": model,
+        "max_tokens": max_output_tokens(thinking),
+        "system": system_prompt,
+        "messages": [{
+            "role": "user",
+            "content": user_message
+        }]
+    });
+
+    // Omit entirely on models that removed sampling params — clamping is not an
+    // option, any value is a 400.
+    if !claude_rejects_sampling_params(model) {
+        body["temperature"] = json!(temperature);
+    }
+
+    if thinking {
+        // Always adaptive, never `disabled`: on Fable 5 an explicit `disabled`
+        // is a 400, on Opus 5 it's rejected above `high` effort, and with
+        // thinking off these models sometimes leak `<thinking>` tags into the
+        // visible response — which would break the strict JSON parse this app
+        // depends on. "Fast" is expressed as low effort instead.
+        body["thinking"] = json!({ "type": "adaptive" });
+    }
+
+    if claude_supports_effort(model) {
+        body["output_config"] = json!({ "effort": effort.claude_effort() });
+    }
+
+    body
+}
+
+/// Build the OpenAI Chat Completions request body. `user_content` is expected in
+/// OpenAI content-part shape.
+pub fn build_openai_body(
+    model: &str,
+    temperature: f32,
+    effort: ReasoningEffort,
+    system_prompt: &str,
+    user_content: serde_json::Value,
+) -> serde_json::Value {
+    // Reasoning models require `max_completion_tokens` and reject a user-set
+    // `temperature` (only the implicit default is accepted).
+    let is_reasoning = is_openai_reasoning_model(model);
+    let token_key = if is_reasoning {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+
+    let mut body = json!({
+        "model": model,
+        token_key: max_output_tokens(is_reasoning),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content}
+        ]
+    });
+
+    if is_reasoning {
+        body["reasoning_effort"] = json!(effort.openai_effort());
+    } else {
+        body["temperature"] = json!(temperature);
+    }
+
+    body
+}
+
+/// Build the Gemini `generateContent` request body.
+pub fn build_gemini_body(
+    model: &str,
+    temperature: f32,
+    effort: ReasoningEffort,
+    system_prompt: &str,
+    parts: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let thinking = gemini_supports_thinking_level(model);
+
+    let mut generation_config = json!({
+        "temperature": temperature,
+        "maxOutputTokens": max_output_tokens(thinking),
+        // Force strict JSON output. Without this, Gemini occasionally emits
+        // Python-dict-style responses (single-quoted keys), which fail the
+        // strict serde_json parse downstream.
+        "responseMimeType": "application/json"
+    });
+
+    if thinking {
+        generation_config["thinkingLevel"] = json!(effort.gemini_thinking_level());
+    }
+
+    json!({
+        "contents": [{ "parts": parts }],
+        "systemInstruction": { "parts": [{ "text": system_prompt }] },
+        "generationConfig": generation_config
+    })
+}
+
 // ── Claude Provider ──
 
 pub struct ClaudeProvider {
     pub api_key: String,
     pub model: String,
     pub temperature: f32,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[async_trait]
@@ -61,16 +270,13 @@ impl AiProvider for ClaudeProvider {
     ) -> Result<String, NarratorError> {
         let client = http_client::shared();
 
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 8192,
-            "temperature": self.temperature,
-            "system": system_prompt,
-            "messages": [{
-                "role": "user",
-                "content": user_message
-            }]
-        });
+        let body = build_claude_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            user_message,
+        );
 
         // Single attempt — retries on 429/529 are handled exactly once,
         // upstream in `generate_with_retry`. Looping here too compounded
@@ -242,6 +448,7 @@ pub struct OpenAiProvider {
     pub api_key: String,
     pub model: String,
     pub temperature: f32,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[async_trait]
@@ -289,27 +496,13 @@ impl AiProvider for OpenAiProvider {
             json!([{"type": "text", "text": user_message.to_string()}])
         };
 
-        // Reasoning models (o1/o3/o4, gpt-5) require `max_completion_tokens`
-        // instead of `max_tokens` AND reject any user-set `temperature`
-        // (only the default of 1 is accepted — sending even 1.0 explicitly
-        // has been observed to fail on some checkpoints, so we omit it).
-        let is_reasoning_model = is_openai_reasoning_model(&self.model);
-        let token_key = if is_reasoning_model {
-            "max_completion_tokens"
-        } else {
-            "max_tokens"
-        };
-        let mut body = json!({
-            "model": self.model,
-            token_key: 8192,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ]
-        });
-        if !is_reasoning_model {
-            body["temperature"] = json!(self.temperature);
-        }
+        let body = build_openai_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            user_content,
+        );
 
         // Retries handled by `generate_with_retry`; see ClaudeProvider for the
         // rationale on collapsing the inner loop.
@@ -357,6 +550,7 @@ pub struct GeminiProvider {
     pub api_key: String,
     pub model: String,
     pub temperature: f32,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[async_trait]
@@ -405,18 +599,13 @@ impl AiProvider for GeminiProvider {
             self.model
         );
 
-        let body = json!({
-            "contents": [{ "parts": parts }],
-            "systemInstruction": { "parts": [{ "text": system_prompt }] },
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": 8192,
-                // Force strict JSON output. Without this, Gemini occasionally
-                // emits Python-dict-style responses (single-quoted keys),
-                // which fail the strict serde_json parse downstream.
-                "responseMimeType": "application/json"
-            }
-        });
+        let body = build_gemini_body(
+            &self.model,
+            self.temperature,
+            self.reasoning_effort,
+            system_prompt,
+            parts,
+        );
 
         // Retries handled by `generate_with_retry`; see ClaudeProvider for the
         // rationale on collapsing the inner loop.
@@ -466,16 +655,19 @@ pub fn create_provider(config: &AiConfig, api_key: String) -> Box<dyn AiProvider
             api_key,
             model: config.model.clone(),
             temperature: config.temperature,
+            reasoning_effort: config.reasoning_effort,
         }),
         AiProviderKind::OpenAi => Box::new(OpenAiProvider {
             api_key,
             model: config.model.clone(),
             temperature: config.temperature,
+            reasoning_effort: config.reasoning_effort,
         }),
         AiProviderKind::Gemini => Box::new(GeminiProvider {
             api_key,
             model: config.model.clone(),
             temperature: config.temperature,
+            reasoning_effort: config.reasoning_effort,
         }),
     }
 }
@@ -2482,6 +2674,245 @@ pub fn get_available_models(provider: &AiProviderKind) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod request_shape_tests {
+    use super::*;
+
+    fn user_msg() -> serde_json::Value {
+        json!([{ "type": "text", "text": "hi" }])
+    }
+
+    // ── Anthropic ────────────────────────────────────────────────────────────
+
+    /// Opus 4.7+ removed `temperature`/`top_p`/`top_k` — sending any of them is a
+    /// hard 400, so the builder must omit the key entirely (not clamp it).
+    #[test]
+    fn claude_omits_temperature_on_models_that_reject_it() {
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-fable-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+        ] {
+            let body = build_claude_body(model, 0.7, ReasoningEffort::Balanced, "sys", user_msg());
+            assert!(
+                body.get("temperature").is_none(),
+                "{model} must not receive `temperature` (400)"
+            );
+        }
+    }
+
+    /// Models that still accept sampling params should keep getting them, so we
+    /// don't silently change behaviour for the older tiers.
+    #[test]
+    fn claude_keeps_temperature_on_models_that_accept_it() {
+        for model in ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"] {
+            let body = build_claude_body(model, 0.42, ReasoningEffort::Balanced, "sys", user_msg());
+            assert_eq!(
+                body["temperature"].as_f64().unwrap(),
+                0.42_f32 as f64,
+                "{model} should still receive `temperature`"
+            );
+        }
+    }
+
+    /// Thinking must be the adaptive form and never `disabled`: `disabled` is a
+    /// 400 on Fable 5, is rejected above `high` effort on Opus 5, and with
+    /// thinking off these models can leak `<thinking>` tags into the visible
+    /// response — which would break this app's strict JSON parse.
+    #[test]
+    fn claude_uses_adaptive_thinking_never_disabled() {
+        for effort in [
+            ReasoningEffort::Fast,
+            ReasoningEffort::Balanced,
+            ReasoningEffort::Thorough,
+            ReasoningEffort::Max,
+        ] {
+            let body = build_claude_body("claude-opus-5", 0.7, effort, "sys", user_msg());
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert!(body["thinking"].get("budget_tokens").is_none());
+        }
+    }
+
+    #[test]
+    fn claude_maps_effort_levels() {
+        let cases = [
+            (ReasoningEffort::Fast, "low"),
+            (ReasoningEffort::Balanced, "medium"),
+            (ReasoningEffort::Thorough, "high"),
+            (ReasoningEffort::Max, "max"),
+        ];
+        for (effort, expected) in cases {
+            let body = build_claude_body("claude-sonnet-5", 0.7, effort, "sys", user_msg());
+            assert_eq!(body["output_config"]["effort"], expected);
+        }
+    }
+
+    /// `effort` errors on Sonnet 4.5 / Haiku 4.5, so it must not be sent there.
+    #[test]
+    fn claude_omits_effort_on_models_without_support() {
+        let body = build_claude_body(
+            "claude-haiku-4-5",
+            0.7,
+            ReasoningEffort::Max,
+            "sys",
+            user_msg(),
+        );
+        assert!(body.get("output_config").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
+    /// Thinking tokens and response text share `max_tokens`; a thinking model
+    /// sized at the old 8192 can truncate the JSON payload mid-object.
+    #[test]
+    fn claude_gives_thinking_models_more_output_headroom() {
+        let thinking = build_claude_body(
+            "claude-opus-5",
+            0.7,
+            ReasoningEffort::Balanced,
+            "s",
+            user_msg(),
+        );
+        let plain = build_claude_body(
+            "claude-haiku-4-5",
+            0.7,
+            ReasoningEffort::Balanced,
+            "s",
+            user_msg(),
+        );
+        assert!(thinking["max_tokens"].as_u64().unwrap() > plain["max_tokens"].as_u64().unwrap());
+    }
+
+    // ── OpenAI ───────────────────────────────────────────────────────────────
+
+    /// The GPT-5.6 variants must be recognised as reasoning models, or they get
+    /// `max_tokens` + `temperature` and 400.
+    #[test]
+    fn openai_treats_gpt56_variants_as_reasoning_models() {
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6"] {
+            assert!(
+                is_openai_reasoning_model(model),
+                "{model} must be treated as a reasoning model"
+            );
+            let body = build_openai_body(model, 0.7, ReasoningEffort::Thorough, "sys", user_msg());
+            assert!(body.get("temperature").is_none(), "{model}: no temperature");
+            assert!(body.get("max_tokens").is_none(), "{model}: no max_tokens");
+            assert!(body["max_completion_tokens"].is_number());
+        }
+    }
+
+    /// Chat Completions takes the *flat* `reasoning_effort`. The nested
+    /// `reasoning: {effort}` object is the Responses API shape and 400s here.
+    #[test]
+    fn openai_uses_flat_reasoning_effort_for_chat_completions() {
+        let body = build_openai_body(
+            "gpt-5.6-sol",
+            0.7,
+            ReasoningEffort::Balanced,
+            "sys",
+            user_msg(),
+        );
+        assert_eq!(body["reasoning_effort"], "medium");
+        assert!(
+            body.get("reasoning").is_none(),
+            "must not send the Responses-API nested object"
+        );
+    }
+
+    #[test]
+    fn openai_non_reasoning_model_keeps_temperature() {
+        let body = build_openai_body("gpt-4o", 0.33, ReasoningEffort::Max, "sys", user_msg());
+        assert!((body["temperature"].as_f64().unwrap() - 0.33_f32 as f64).abs() < 1e-9);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body["max_tokens"].is_number());
+    }
+
+    // ── Gemini ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn gemini_sends_thinking_level_on_gemini_3() {
+        let body = build_gemini_body(
+            "gemini-3.6-flash",
+            0.7,
+            ReasoningEffort::Thorough,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        assert_eq!(body["generationConfig"]["thinkingLevel"], "high");
+        // Legacy 2.5 knob is mutually exclusive with thinkingLevel — never both.
+        assert!(body["generationConfig"].get("thinkingBudget").is_none());
+    }
+
+    /// Gemini's ladder stops at `high`; `max` must clamp rather than send a
+    /// value the API would reject.
+    #[test]
+    fn gemini_clamps_max_to_high() {
+        let body = build_gemini_body(
+            "gemini-3.6-flash",
+            0.7,
+            ReasoningEffort::Max,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        assert_eq!(body["generationConfig"]["thinkingLevel"], "high");
+    }
+
+    /// Gemini 2.5 uses the older `thinkingBudget`, so the new key must not be
+    /// sent to it.
+    #[test]
+    fn gemini_omits_thinking_level_on_gemini_25() {
+        let body = build_gemini_body(
+            "gemini-2.5-flash",
+            0.7,
+            ReasoningEffort::Max,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        assert!(body["generationConfig"].get("thinkingLevel").is_none());
+    }
+
+    /// Strict JSON output is what keeps Gemini from emitting Python-dict-style
+    /// responses that fail the downstream parse — must survive the refactor.
+    #[test]
+    fn gemini_keeps_strict_json_response_type() {
+        let body = build_gemini_body(
+            "gemini-3.6-flash",
+            0.7,
+            ReasoningEffort::Balanced,
+            "sys",
+            vec![json!({"text": "hi"})],
+        );
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "sys");
+    }
+
+    // ── Config plumbing ──────────────────────────────────────────────────────
+
+    /// Projects saved before reasoning selection existed must still load.
+    #[test]
+    fn ai_config_defaults_reasoning_effort_when_absent() {
+        let cfg: AiConfig = serde_json::from_str(
+            r#"{"provider":"claude","model":"claude-sonnet-5","temperature":0.7}"#,
+        )
+        .expect("legacy AiConfig without reasoning_effort must deserialize");
+        assert_eq!(cfg.reasoning_effort, ReasoningEffort::Balanced);
+    }
+
+    #[test]
+    fn reasoning_effort_round_trips_as_lowercase() {
+        let json = serde_json::to_string(&ReasoningEffort::Thorough).unwrap();
+        assert_eq!(json, "\"thorough\"");
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
+            ReasoningEffort::Max
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2707,6 +3138,7 @@ mod tests {
             provider: AiProviderKind::Claude,
             model: "claude-sonnet-4-20250514".to_string(),
             temperature: 0.7,
+            reasoning_effort: ReasoningEffort::Balanced,
         };
         let provider = create_provider(&config, "test-key".to_string());
         assert_eq!(provider.name(), "claude");
@@ -2719,6 +3151,7 @@ mod tests {
             provider: AiProviderKind::Gemini,
             model: "gemini-2.5-flash".to_string(),
             temperature: 0.7,
+            reasoning_effort: ReasoningEffort::Balanced,
         };
         let provider = create_provider(&config, "test-key".to_string());
         assert_eq!(provider.name(), "gemini");

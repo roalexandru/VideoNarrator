@@ -986,7 +986,7 @@ describe("E2E Flow 9: Configuration Validation", () => {
   it("configStore provider/model switching works", () => {
     const cs = useConfigStore.getState();
     expect(cs.aiProvider).toBe("claude");
-    expect(cs.model).toBe("claude-sonnet-4-20250514");
+    expect(cs.model).toBe("claude-sonnet-5");
 
     useConfigStore.getState().setAiProvider("openai");
     useConfigStore.getState().setModel("gpt-4o");

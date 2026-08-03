@@ -25,13 +25,44 @@ export interface Language {
 
 export type FrameDensity = "light" | "medium" | "heavy";
 export type AiProvider = "claude" | "openai" | "gemini";
-export type ModelId =
+
+/** Models offered in the picker (current generation). */
+export type CurrentModelId =
+  // Anthropic
+  | "claude-fable-5"
+  | "claude-opus-5"
+  | "claude-sonnet-5"
+  | "claude-haiku-4-5"
+  // OpenAI — GPT-5.6 ships as three named variants
+  | "gpt-5.6-sol"
+  | "gpt-5.6-terra"
+  | "gpt-5.6-luna"
+  // Google
+  | "gemini-3.1-pro-preview"
+  | "gemini-3.6-flash"
+  | "gemini-3.5-flash"
+  | "gemini-3.5-flash-lite";
+
+/**
+ * Model IDs that may appear in a *saved* project but are no longer offered.
+ * Kept in the union so loading an older project still type-checks; the picker
+ * only lists `CurrentModelId`.
+ */
+export type LegacyModelId =
   | "claude-sonnet-4-20250514"
   | "claude-opus-4-20250514"
   | "gpt-4o"
   | "o3"
   | "gemini-2.5-flash"
   | "gemini-2.5-pro";
+
+export type ModelId = CurrentModelId | LegacyModelId;
+
+/**
+ * Provider-agnostic reasoning depth. Mapped to each vendor's own parameter in
+ * the Rust client (`output_config.effort` / `reasoning_effort` / `thinkingLevel`).
+ */
+export type ReasoningEffort = "fast" | "balanced" | "thorough" | "max";
 
 export type TtsProvider = "elevenlabs" | "azure" | "builtin";
 
@@ -44,6 +75,7 @@ export interface AiConfig {
   provider: AiProvider;
   model: ModelId;
   temperature: number;
+  reasoning_effort: ReasoningEffort;
 }
 
 export interface FrameConfig {

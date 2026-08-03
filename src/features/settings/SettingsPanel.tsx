@@ -26,7 +26,7 @@ import type {
   AzureTtsConfig,
   AzureTtsVoice,
 } from "../../lib/tauri/commands";
-import { PROVIDERS, TTS_PROVIDERS, ELEVEN_MODELS } from "../../lib/constants";
+import { PROVIDERS, TTS_PROVIDERS, ELEVEN_MODELS, REASONING_LEVELS } from "../../lib/constants";
 import { useConfigStore } from "../../stores/configStore";
 import { Button } from "../../components/ui/Button";
 import { setTelemetryEnabled as setAnalyticsEnabled, trackEvent, trackError } from "../telemetry/analytics";
@@ -174,10 +174,12 @@ export function SettingsPanel({
     aiProvider,
     model,
     temperature,
+    reasoningEffort,
     ttsProvider,
     setAiProvider,
     setModel,
     setTemperature,
+    setReasoningEffort,
     setTtsProvider,
   } = useConfigStore();
 
@@ -944,7 +946,7 @@ export function SettingsPanel({
                   }}
                 >
                   {p.models.map((m) => (
-                    <option key={m.id} value={m.id}>
+                    <option key={m.id} value={m.id} title={m.hint}>
                       {m.label}
                     </option>
                   ))}
@@ -993,6 +995,43 @@ export function SettingsPanel({
             </span>
           </div>
         )}
+
+        {/* Reasoning depth — every current frontier model exposes a thinking
+            knob under a different name; this maps to the right one per provider
+            in the Rust client (and clamps where a provider's ladder is shorter). */}
+        <div style={{ ...sectionLabel, marginTop: 4 }}>Reasoning Depth</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", gap: 4, background: "rgba(255,255,255,0.03)", borderRadius: 6, padding: 3 }}>
+            {REASONING_LEVELS.map((lvl) => {
+              const active = reasoningEffort === lvl.id;
+              return (
+                <button
+                  key={lvl.id}
+                  onClick={() => setReasoningEffort(lvl.id)}
+                  title={lvl.hint}
+                  style={{
+                    flex: 1,
+                    padding: "5px 8px",
+                    borderRadius: 4,
+                    border: "none",
+                    fontSize: 11,
+                    fontWeight: active ? 600 : 400,
+                    background: active ? "rgba(99,102,241,0.18)" : "transparent",
+                    color: active ? C.accent : C.muted,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                  }}
+                >
+                  {lvl.label}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+            {REASONING_LEVELS.find((l) => l.id === reasoningEffort)?.hint}
+            {" — deeper reasoning costs more tokens per frame analysed."}
+          </div>
+        </div>
 
         {/* Temperature section -- no card border */}
         <div style={{ ...sectionLabel, marginTop: 4 }}>Default Temperature</div>
@@ -1611,7 +1650,7 @@ export function SettingsPanel({
       languages: config.languages,
       primary_language: config.primaryLanguage,
       frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: config.maxFrames },
-      ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature },
+      ai_config: { provider: config.aiProvider, model: config.model, temperature: config.temperature, reasoning_effort: config.reasoningEffort },
       custom_prompt: config.customPrompt,
       tts_provider: config.ttsProvider || "",
       created_at: new Date().toISOString(),
@@ -1677,6 +1716,7 @@ export function SettingsPanel({
                 cs.setAiProvider(t.ai_config.provider as Parameters<typeof cs.setAiProvider>[0]);
                 cs.setModel(t.ai_config.model as Parameters<typeof cs.setModel>[0]);
                 cs.setTemperature(t.ai_config.temperature);
+                cs.setReasoningEffort(t.ai_config.reasoning_effort ?? "balanced");
                 cs.setCustomPrompt(t.custom_prompt);
                 trackEvent("template_applied", { name: t.name });
               }} style={{

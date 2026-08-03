@@ -165,7 +165,7 @@ export interface LoadedProject {
     languages: string[];
     primary_language: string;
     frame_config: { density: string; scene_threshold: number; max_frames: number };
-    ai_config: { provider: string; model: string; temperature: number };
+    ai_config: { provider: string; model: string; temperature: number; reasoning_effort?: import("../../types/config").ReasoningEffort };
     custom_prompt: string;
     created_at: string;
     updated_at: string;

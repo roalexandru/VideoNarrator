@@ -219,7 +219,7 @@ export function ProcessingScreen() {
       style: config.style, primary_language: config.primaryLanguage,
       additional_languages: config.languages.filter((l) => l !== config.primaryLanguage),
       frame_config: { density: config.frameDensity, scene_threshold: config.sceneThreshold, max_frames: effectiveMaxFrames, skip_dedup: true },
-      ai_config: { provider: config.aiProvider, model: config.model, temperature: effectiveTemperature },
+      ai_config: { provider: config.aiProvider, model: config.model, temperature: effectiveTemperature, reasoning_effort: config.reasoningEffort },
       custom_prompt: config.customPrompt,
       strict_mode: config.strictMode,
       ...(resumeSegments.length > 0 ? { resume_segments: resumeSegments } : {}),

@@ -199,8 +199,9 @@ describe("reset", () => {
     expect(state.maxFrames).toBe(30);
     expect(state.customPrompt).toBe("");
     expect(state.aiProvider).toBe("claude");
-    expect(state.model).toBe("claude-sonnet-4-20250514");
+    expect(state.model).toBe("claude-sonnet-5");
     expect(state.temperature).toBe(0.7);
+    expect(state.reasoningEffort).toBe("balanced");
     expect(state.ttsProvider).toBe("elevenlabs");
   });
 });
