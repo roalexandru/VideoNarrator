@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.5 — Current-generation models + edit → render → export hardening
+
+### Added
+- **Current-generation models across all three providers.** The picker had drifted a full generation behind (Claude Sonnet/Opus 4 — both deprecated — GPT-4o, o3, Gemini 2.5). Now offered: Claude **Sonnet 5** (new default), **Opus 5**, Haiku 4.5 and Fable 5; OpenAI **GPT-5.6 Sol / Terra / Luna**; Google **Gemini 3.6 Flash**, 3.5 Flash, 3.5 Flash-Lite and 3.1 Pro. Projects saved with older model IDs still load.
+- **Reasoning depth selection** (Settings → AI). One choice — Fast / Balanced / Thorough / Maximum — mapped to whichever parameter each vendor uses (`output_config.effort`, `reasoning_effort`, `thinkingLevel`), and clamped where a provider's ladder is shorter. Deeper reasoning costs more tokens per frame analysed, so the tradeoff is stated in the UI.
+
+### Fixed
+- **Windows release builds.** The pinned ffmpeg sidecar URL 404'd because upstream deletes its dated builds after a few months, which broke every Windows release build since May. Repinned to a live build on the same 8.1 line, with docs so the next expiry is a two-minute fix.
+- **Requests to current Claude models no longer fail.** Opus 4.7+ removed `temperature`/`top_p`/`top_k` (sending them is a hard 400) and thinking now shares the output-token budget with the response — the old fixed 8192 ceiling risked truncating a reply mid-JSON. Both are handled per model.
+
 ## v0.9.4 — Edit → render → export hardening
 
 A broad correctness, safety, and lifecycle pass across the video-edit,
