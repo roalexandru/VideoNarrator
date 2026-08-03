@@ -945,7 +945,13 @@ async fn pad_video_to_audio_length(
 
     let padded_path =
         std::env::temp_dir().join(format!("_narrator_padded_{}.mp4", uuid::Uuid::new_v4()));
-    let filter = format!("tpad=stop_mode=clone:stop_duration={delta:.3}");
+    // Tone-map first when the source is HDR: this branch re-encodes to 8-bit
+    // yuv420p, which without tone mapping turns an HDR tail grey.
+    let hdr = video_engine::needs_hdr_tonemap(Path::new(video_path)).await;
+    let filter = video_engine::prepend_hdr_tonemap(
+        &format!("tpad=stop_mode=clone:stop_duration={delta:.3}"),
+        hdr,
+    );
     let mut cmd = Command::new(ffmpeg);
     cmd.no_window()
         .args([
@@ -1209,7 +1215,12 @@ pub async fn burn_subtitles_with_cancel(
         tokio::fs::write(&temp_srt, transformed).await?;
     }
 
-    let subtitle_filter = build_subtitles_filter(&temp_srt, style);
+    // Tone mapping goes FIRST and the subtitle burn stays LAST: libass renders
+    // Rec.709 white, so burning before the tone map would push the captions
+    // through the HDR→SDR curve and dull them along with the picture.
+    let hdr = video_engine::needs_hdr_tonemap(Path::new(video_path)).await;
+    let subtitle_filter =
+        video_engine::prepend_hdr_tonemap(&build_subtitles_filter(&temp_srt, style), hdr);
 
     // -preset medium -crf 18 is visually lossless and produces files ~5-20x
     // smaller than `-preset ultrafast -crf 0`. CRF 0 also forces High 4:4:4
@@ -1328,6 +1339,17 @@ pub async fn extract_edit_thumbnails(
 
     tokio::fs::create_dir_all(output_dir).await?;
 
+    // Timeline filmstrip: without tone mapping an HDR source produces washed-out
+    // thumbnails that don't match what the preview player shows.
+    let hdr = video_engine::needs_hdr_tonemap(Path::new(video_path)).await;
+    let thumb_filter = video_engine::prepend_hdr_tonemap(
+        &format!(
+            "fps=1/{:.3},scale='min(120,iw)':'min(68,ih)':force_original_aspect_ratio=decrease",
+            interval
+        ),
+        hdr,
+    );
+
     let output = Command::new(ffmpeg.as_os_str())
         .no_window()
         .args([
@@ -1335,10 +1357,7 @@ pub async fn extract_edit_thumbnails(
             "-i",
             video_path,
             "-vf",
-            &format!(
-                "fps=1/{:.3},scale='min(120,iw)':'min(68,ih)':force_original_aspect_ratio=decrease",
-                interval
-            ),
+            &thumb_filter,
             "-q:v",
             "5",
             &format!("{}/thumb_%04d.jpg", output_dir),

@@ -100,6 +100,33 @@ fn detect_binary(name: &str) -> Result<PathBuf, NarratorError> {
     Err(NarratorError::FfmpegNotFound)
 }
 
+/// True if the detected `ffmpeg` advertises `name` in its filter table.
+///
+/// Uncached — callers should wrap this in their own `OnceLock` so a given
+/// filter costs one ~50 ms `-filters` invocation per process.
+fn ffmpeg_advertises_filter(name: &str) -> bool {
+    let Ok(ffmpeg) = detect_ffmpeg() else {
+        return false;
+    };
+    let output = std::process::Command::new(ffmpeg.as_os_str())
+        .no_window()
+        .args(["-hide_banner", "-filters"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            // Filter table has one row per filter; match at a line boundary
+            // so we don't false-positive on the word appearing in a
+            // description (e.g. "Render text subtitles...").
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.lines().any(|line| {
+                // Filter rows look like: " .. subtitles  V->V   ..."
+                line.split_whitespace().nth(1) == Some(name)
+            })
+        }
+        _ => false,
+    }
+}
+
 /// True if the detected `ffmpeg` has the `subtitles` video filter (libass).
 ///
 /// Burning subtitles into a video needs libass-backed `-vf subtitles=...`.
@@ -109,28 +136,144 @@ fn detect_binary(name: &str) -> Result<PathBuf, NarratorError> {
 pub fn ffmpeg_has_subtitles_filter() -> bool {
     use std::sync::OnceLock;
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        let Ok(ffmpeg) = detect_ffmpeg() else {
+    *CACHED.get_or_init(|| ffmpeg_advertises_filter("subtitles"))
+}
+
+/// True if the detected `ffmpeg` has `zscale` (libzimg).
+///
+/// The HDR tone-mapping chain is built on `zscale`, which only exists in
+/// builds linked against libzimg. Our bundled sidecars have it; a system
+/// ffmpeg a developer happens to have on PATH may not. Checked rather than
+/// assumed, because an unavailable filter fails the *entire* encode — a much
+/// worse outcome than the washed-out colours we're trying to fix.
+pub fn ffmpeg_has_zscale_filter() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| ffmpeg_advertises_filter("zscale"))
+}
+
+// ── HDR → SDR tone mapping ───────────────────────────────────────────────────
+//
+// iPhone captures and modern screen recorders increasingly write HDR: PQ
+// (`smpte2084`) or HLG (`arib-std-b67`) transfer curves. Re-encoding those to
+// 8-bit `yuv420p` without tone mapping does not fail — it silently produces
+// washed-out, grey, low-contrast video, because the HDR curve is reinterpreted
+// as if it were Rec.709.
+//
+// This bites twice in Narrator. The obvious damage is the exported video. The
+// less obvious damage is that the JPEG frames we send to the vision model come
+// out of the same pipeline, so the model reasons about washed-out screenshots
+// and describes them less accurately.
+
+/// Transfer characteristics that require tone mapping before an SDR encode.
+///
+/// `bt709`, `smpte170m`, `iec61966-2-1` (sRGB) and friends are already SDR and
+/// must be left alone — tone mapping them would crush contrast.
+pub fn is_hdr_transfer(transfer: &str) -> bool {
+    matches!(transfer.trim(), "smpte2084" | "arib-std-b67")
+}
+
+/// Tone-map HDR to Rec.709 SDR.
+///
+/// Deliberately stops before any `format=`/`scale=` step so callers can append
+/// their own target (`format=yuv420p` for an encode, `scale=…,format=rgba` for
+/// the compositor's raw pipe) without a redundant conversion.
+///
+/// `npl=100` treats the source as 100-nit-referenced, and `hable` is the
+/// tone-mapping curve that preserves highlight detail without the flat look
+/// `clip` or `linear` give. `desat=0` disables ffmpeg's highlight desaturation,
+/// which otherwise greys out bright UI on screen recordings.
+pub const HDR_TO_SDR_FILTER: &str = "zscale=t=linear:npl=100,format=gbrpf32le,\
+     zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv";
+
+/// Prepend the tone-map chain to an existing filter string.
+///
+/// Tone mapping must run *first*: everything downstream (scaling, subtitle
+/// burn-in, overlays) should operate on Rec.709 pixels. Returns `filter`
+/// untouched when `hdr` is false, and handles an empty `filter`.
+pub fn prepend_hdr_tonemap(filter: &str, hdr: bool) -> String {
+    if !hdr {
+        return filter.to_string();
+    }
+    if filter.trim().is_empty() {
+        return HDR_TO_SDR_FILTER.to_string();
+    }
+    format!("{HDR_TO_SDR_FILTER},{filter}")
+}
+
+/// Probe the colour transfer characteristic of the first video stream.
+///
+/// Returns `Ok(None)` when ffprobe parsed the file but the stream declares no
+/// transfer (very common — most SDR files omit it). `Err` only when ffprobe
+/// itself failed to run.
+pub async fn probe_color_transfer(path: &Path) -> Result<Option<String>, NarratorError> {
+    probe_video_stream_field(path, "color_transfer").await
+}
+
+/// Read one field of the first video stream via ffprobe.
+async fn probe_video_stream_field(
+    path: &Path,
+    field: &str,
+) -> Result<Option<String>, NarratorError> {
+    let ffprobe = detect_ffprobe()?;
+    let output = Command::new(ffprobe.as_os_str())
+        .no_window()
+        .args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+        ])
+        .arg(path.as_os_str())
+        .output()
+        .await
+        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::VideoProbeError(stderr.to_string()));
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+        NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}"))
+    })?;
+
+    Ok(json["streams"][0][field].as_str().map(|s| s.to_string()))
+}
+
+/// Best-effort: should this source be tone-mapped before an SDR encode?
+///
+/// Never returns an error. A probe failure, a missing `color_transfer`, or an
+/// ffmpeg without `zscale` all resolve to `false` — i.e. today's behaviour.
+/// Producing a slightly washed-out file is recoverable; failing the export
+/// because a filter is unavailable is not.
+pub async fn needs_hdr_tonemap(path: &Path) -> bool {
+    let transfer = match probe_color_transfer(path).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return false,
+        Err(e) => {
+            tracing::debug!("colour transfer probe failed, assuming SDR: {e}");
             return false;
-        };
-        let output = std::process::Command::new(ffmpeg.as_os_str())
-            .no_window()
-            .args(["-hide_banner", "-filters"])
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                // Filter table has one row per filter; match at a line boundary
-                // so we don't false-positive on the word appearing in a
-                // description (e.g. "Render text subtitles...").
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.lines().any(|line| {
-                    // Filter rows look like: " .. subtitles  V->V   ..."
-                    line.split_whitespace().nth(1) == Some("subtitles")
-                })
-            }
-            _ => false,
         }
-    })
+    };
+
+    if !is_hdr_transfer(&transfer) {
+        return false;
+    }
+
+    if !ffmpeg_has_zscale_filter() {
+        tracing::warn!(
+            "source is HDR ({transfer}) but this ffmpeg has no zscale filter — \
+             skipping tone mapping; colours may look washed out"
+        );
+        return false;
+    }
+
+    tracing::info!("source is HDR ({transfer}) — tone mapping to Rec.709");
+    true
 }
 
 pub async fn probe_video(path: &Path) -> Result<VideoMetadata, NarratorError> {
@@ -246,35 +389,7 @@ pub async fn probe_has_audio_stream(path: &Path) -> Result<bool, NarratorError> 
 /// stream or no pix_fmt field (e.g. image containers). Returns `Err` only
 /// when ffprobe itself failed to run.
 pub async fn probe_pix_fmt(path: &Path) -> Result<Option<String>, NarratorError> {
-    let ffprobe = detect_ffprobe()?;
-    let output = Command::new(ffprobe.as_os_str())
-        .no_window()
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-select_streams",
-            "v:0",
-        ])
-        .arg(path.as_os_str())
-        .output()
-        .await
-        .map_err(|e| NarratorError::VideoProbeError(e.to_string()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(NarratorError::VideoProbeError(stderr.to_string()));
-    }
-
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
-        NarratorError::VideoProbeError(format!("Failed to parse ffprobe output: {e}"))
-    })?;
-
-    Ok(json["streams"][0]["pix_fmt"]
-        .as_str()
-        .map(|s| s.to_string()))
+    probe_video_stream_field(path, "pix_fmt").await
 }
 
 /// Probe the duration of any media file (audio or video).
@@ -382,6 +497,11 @@ pub async fn extract_frames(
 
     let metadata = probe_video(video_path).await?;
 
+    // Probed once here rather than per-frame: an HDR source decoded straight to
+    // JPEG yields washed-out frames, and the vision model then reasons about
+    // washed-out screenshots.
+    let hdr = needs_hdr_tonemap(video_path).await;
+
     let on_frame: Arc<dyn Fn(Frame) + Send + Sync> = Arc::new(on_frame);
     let on_tick: Arc<dyn Fn(f64, String) + Send + Sync> = Arc::new(on_tick);
 
@@ -411,6 +531,7 @@ pub async fn extract_frames(
                 on_frame,
                 on_tick,
                 cancel_flag,
+                hdr,
             )
             .await;
         }
@@ -434,6 +555,7 @@ pub async fn extract_frames(
             on_tick,
             cancel_flag,
         },
+        hdr,
     )
     .await
 }
@@ -674,7 +796,11 @@ async fn extract_frames_at_anchors(
     on_frame: Arc<dyn Fn(Frame) + Send + Sync>,
     on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    hdr: bool,
 ) -> Result<Vec<Frame>, NarratorError> {
+    // Only an HDR source gets a filter chain here; SDR keeps the original
+    // filter-free invocation so the common path is untouched.
+    let tonemap = prepend_hdr_tonemap("", hdr);
     on_tick(
         0.30,
         format!("Extracting {} anchored frames", anchors.len()),
@@ -690,11 +816,15 @@ async fn extract_frames_at_anchors(
         let fine = ts - coarse;
         let coarse_str = format!("{coarse:.3}");
         let fine_str = format!("{fine:.3}");
-        let status = Command::new(ffmpeg.as_os_str())
-            .no_window()
+        let mut cmd = Command::new(ffmpeg.as_os_str());
+        cmd.no_window()
             .args(["-nostats", "-hide_banner", "-y", "-ss", &coarse_str, "-i"])
             .arg(video_path.as_os_str())
-            .args(["-ss", &fine_str, "-frames:v", "1", "-q:v", "2"])
+            .args(["-ss", &fine_str, "-frames:v", "1", "-q:v", "2"]);
+        if !tonemap.is_empty() {
+            cmd.args(["-vf", &tonemap]);
+        }
+        let status = cmd
             .arg(out_path.as_os_str())
             .output()
             .await
@@ -748,6 +878,7 @@ async fn extract_frames_fixed_interval(
     config: &FrameConfig,
     output_dir: &Path,
     control: ExtractionControl,
+    hdr: bool,
 ) -> Result<Vec<Frame>, NarratorError> {
     let ExtractionControl {
         on_frame,
@@ -779,7 +910,8 @@ async fn extract_frames_fixed_interval(
     // so stderr is \n-terminated structured progress we can parse line-by-line
     // (see ffmpeg_progress::extract_time_from_ffmpeg_line).
     let output_pattern = output_dir.join("frame_%04d.jpg");
-    let vf_filter = format!("fps=1/{interval}");
+    // Tone mapping runs before the frame selector so the JPEGs are Rec.709.
+    let vf_filter = prepend_hdr_tonemap(&format!("fps=1/{interval}"), hdr);
 
     let mut child = Command::new(ffmpeg.as_os_str())
         .no_window()
@@ -1133,6 +1265,102 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── HDR tone mapping ────────────────────────────────────────────────────
+
+    #[test]
+    fn hdr_transfer_detects_pq_and_hlg() {
+        // The two curves that actually mean HDR in practice.
+        assert!(is_hdr_transfer("smpte2084"), "PQ / HDR10");
+        assert!(is_hdr_transfer("arib-std-b67"), "HLG");
+        // ffprobe values sometimes carry surrounding whitespace.
+        assert!(is_hdr_transfer("  smpte2084  "));
+    }
+
+    #[test]
+    fn hdr_transfer_leaves_sdr_alone() {
+        // Tone mapping an SDR source crushes its contrast, so a false positive
+        // here is a visible regression on every ordinary screen recording.
+        for sdr in [
+            "bt709",
+            "smpte170m",
+            "bt470bg",
+            "iec61966-2-1",
+            "srgb",
+            "linear",
+            "unknown",
+            "",
+        ] {
+            assert!(!is_hdr_transfer(sdr), "{sdr} must not be treated as HDR");
+        }
+    }
+
+    #[test]
+    fn tonemap_is_a_no_op_for_sdr_sources() {
+        assert_eq!(prepend_hdr_tonemap("fps=1/5", false), "fps=1/5");
+        assert_eq!(prepend_hdr_tonemap("", false), "");
+    }
+
+    #[test]
+    fn tonemap_runs_before_the_existing_filter() {
+        let out = prepend_hdr_tonemap("fps=1/5", true);
+        assert!(out.ends_with(",fps=1/5"), "existing filter must stay last");
+        assert!(out.starts_with("zscale=t=linear"), "tone map must be first");
+        let tonemap_at = out.find("tonemap=").expect("tonemap present");
+        let fps_at = out.find("fps=1/5").expect("fps present");
+        assert!(tonemap_at < fps_at);
+    }
+
+    #[test]
+    fn tonemap_alone_when_there_was_no_filter() {
+        // The anchor path has no `-vf` normally; an HDR source gives it one.
+        let out = prepend_hdr_tonemap("", true);
+        assert_eq!(out, HDR_TO_SDR_FILTER);
+        assert!(!out.ends_with(','), "no dangling separator");
+        assert!(!out.starts_with(','));
+    }
+
+    #[test]
+    fn tonemap_preserves_subtitle_burn_as_the_last_step() {
+        // Ordering rule: tone map first, subtitle burn last. libass renders
+        // Rec.709 white, so captions must not be pushed through the HDR curve.
+        let subtitle = "subtitles=/tmp/x.srt:force_style='FontSize=18'";
+        let out = prepend_hdr_tonemap(subtitle, true);
+        assert!(out.ends_with(subtitle));
+        assert!(out.find("tonemap=").unwrap() < out.find("subtitles=").unwrap());
+    }
+
+    #[test]
+    fn tonemap_chain_ends_ready_for_a_caller_supplied_format() {
+        // The chain must not pin an output pix_fmt: callers append their own
+        // (`format=rgba` for the compositor, `yuv420p` for an encode).
+        assert!(
+            !HDR_TO_SDR_FILTER.ends_with("format=yuv420p"),
+            "chain must stay format-agnostic"
+        );
+        // Composing an rgba target must not leave two conflicting formats last.
+        let rgba = prepend_hdr_tonemap("scale=100:100:flags=lanczos,format=rgba", true);
+        assert!(rgba.ends_with("format=rgba"));
+    }
+
+    #[test]
+    fn tonemap_chain_is_a_single_valid_filter_list() {
+        // A stray empty element (",,") makes ffmpeg reject the whole graph.
+        for part in HDR_TO_SDR_FILTER.split(',') {
+            assert!(!part.trim().is_empty(), "empty filter in chain");
+        }
+        assert!(HDR_TO_SDR_FILTER.contains("zscale=t=linear:npl=100"));
+        assert!(HDR_TO_SDR_FILTER.contains("tonemap=tonemap=hable"));
+        // Must land back in Rec.709, otherwise the encode is still mislabelled.
+        assert!(HDR_TO_SDR_FILTER.contains("zscale=t=bt709:m=bt709:r=tv"));
+    }
+
+    #[tokio::test]
+    async fn needs_hdr_tonemap_is_false_for_an_unreadable_path() {
+        // Best-effort contract: a probe failure degrades to "assume SDR"
+        // rather than failing the export.
+        assert!(!needs_hdr_tonemap(Path::new("/nonexistent/nope.mp4")).await);
+    }
+
     #[tokio::test]
     async fn fixed_interval_respects_pre_cancelled_flag() {
         let dir = tempfile::tempdir().unwrap();
@@ -1148,6 +1376,7 @@ mod tests {
                 on_tick: Arc::new(|_, _| {}),
                 cancel_flag: Some(flag),
             },
+            false,
         )
         .await
         .unwrap_err();
@@ -1184,6 +1413,7 @@ mod tests {
                 on_tick: Arc::new(|_, _| {}),
                 cancel_flag: Some(flag),
             },
+            false,
         )
         .await
         .unwrap_err();

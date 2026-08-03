@@ -57,7 +57,15 @@ pub async fn decode_video_range(
     let ffmpeg = video_engine::detect_ffmpeg()?;
     let frame_bytes = (width as usize) * (height as usize) * 4;
     let fps_arg = format!("{:.6}", fps);
-    let scale_arg = format!("scale={width}:{height}:flags=lanczos,format=rgba");
+    // Tone map before the RGBA conversion. Everything downstream (effects,
+    // compositing, the final encode) works on these RGBA pixels, so an
+    // untone-mapped HDR source would bake washed-out colour into the whole
+    // render — and the encoder cannot recover it afterwards.
+    let hdr = video_engine::needs_hdr_tonemap(path).await;
+    let scale_arg = video_engine::prepend_hdr_tonemap(
+        &format!("scale={width}:{height}:flags=lanczos,format=rgba"),
+        hdr,
+    );
 
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window();
@@ -170,7 +178,13 @@ pub async fn decode_single_frame_rgba(
     height: u32,
 ) -> Result<Vec<u8>, NarratorError> {
     let ffmpeg = video_engine::detect_ffmpeg()?;
-    let scale_arg = format!("scale={width}:{height}:flags=lanczos,format=rgba");
+    // Same reasoning as `decode_video_range`: a freeze frame must match the
+    // colour of the moving footage around it, so it needs the same tone map.
+    let hdr = video_engine::needs_hdr_tonemap(path).await;
+    let scale_arg = video_engine::prepend_hdr_tonemap(
+        &format!("scale={width}:{height}:flags=lanczos,format=rgba"),
+        hdr,
+    );
     let output = Command::new(ffmpeg.as_os_str())
         .no_window()
         .args([
