@@ -552,8 +552,9 @@ pub async fn apply_edits_with_cancel(
             "copy",
             "-avoid_negative_ts",
             "make_zero",
-            output_path,
         ]);
+        // Works with `-c copy`: faststart is a container remux, not a re-encode.
+        cmd.args(MP4_FASTSTART).arg(output_path);
         let output = output_with_cancel(&mut cmd, &cancel).await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -679,8 +680,8 @@ pub async fn merge_audio_video_with_cancel(
             "0:v:0",
             "-map",
             "1:a:0",
-            output_path,
         ]);
+        cmd.args(MP4_FASTSTART).arg(output_path);
         let output = output_with_cancel(&mut cmd, &cancel).await?;
 
         if !output.status.success() {
@@ -728,8 +729,8 @@ pub async fn merge_audio_video_with_cancel(
             "0:v:0",
             "-map",
             "1:a:0",
-            output_path,
         ]);
+        cmd.args(MP4_FASTSTART).arg(output_path);
         let fallback = output_with_cancel(&mut cmd, &cancel).await?;
         if !fallback.status.success() {
             let stderr = String::from_utf8_lossy(&fallback.stderr);
@@ -790,8 +791,8 @@ pub async fn merge_audio_video_with_cancel(
                 "0:v:0",
                 "-map",
                 "1:a:0",
-                output_path,
             ]);
+            cmd.args(MP4_FASTSTART).arg(output_path);
             let fallback = output_with_cancel(&mut cmd, &cancel).await?;
             if !fallback.status.success() {
                 let stderr = String::from_utf8_lossy(&fallback.stderr);
@@ -865,6 +866,18 @@ pub async fn merge_audio_video_with_cancel(
         fell_back_to_narration_only: false,
     })
 }
+
+/// Flags every MP4 this app writes must carry.
+///
+/// `+faststart` runs a second container pass that moves the `moov` atom ahead
+/// of `mdat`. Without it a player has to fetch the whole file (or the host has
+/// to remux server-side) before the first frame can appear — so a
+/// progressive-download upload stalls on a blank frame.
+///
+/// Kept as one constant, and applied at every MP4 output rather than at the one
+/// path that happened to have it, because the file the user actually uploads is
+/// whichever path ran last.
+const MP4_FASTSTART: [&str; 2] = ["-movflags", "+faststart"];
 
 /// RAII helper for cleaning up temp files inside merge_audio_video.
 struct TempCleanup(Vec<PathBuf>);
@@ -1275,6 +1288,10 @@ pub async fn burn_subtitles_with_cancel(
             "18",
             "-pix_fmt",
             "yuv420p",
+            // This is the LAST pass in the burn-in export, so this file is what
+            // the user uploads — it needs faststart more than any other output.
+            MP4_FASTSTART[0],
+            MP4_FASTSTART[1],
             output_path,
         ],
         total_duration,
@@ -3238,6 +3255,100 @@ mod tests {
             "burn_subtitles must preserve resolution"
         );
         assert_eq!(final_meta.codec, "h264", "final output must be h264");
+
+        // Every MP4 the pipeline hands off must be progressively playable.
+        // Asserted on each stage, not just the last, because whichever stage
+        // runs last is the file the user uploads: burn-in off makes `merged`
+        // the deliverable, burn-in on makes `final_out` the deliverable.
+        assert_faststart(&edited);
+        assert_faststart(&merged);
+        assert_faststart(&final_out);
+    }
+
+    /// True when the MP4's `moov` atom precedes `mdat` — i.e. `+faststart` ran.
+    ///
+    /// Checked by scanning for the atom type tags rather than parsing the box
+    /// tree: ffprobe reports no field for this, and the byte order *is* the
+    /// property that matters to a streaming player.
+    fn moov_precedes_mdat(path: &Path) -> bool {
+        let bytes = std::fs::read(path).expect("read mp4");
+        let find = |needle: &[u8]| {
+            bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+        };
+        match (find(b"moov"), find(b"mdat")) {
+            (Some(moov), Some(mdat)) => moov < mdat,
+            // A file with no mdat/moov isn't a valid MP4; fail loudly rather
+            // than passing vacuously.
+            _ => false,
+        }
+    }
+
+    fn assert_faststart(path: &Path) {
+        assert!(
+            moov_precedes_mdat(path),
+            "{} is not faststart: moov must precede mdat or players cannot \
+             begin playback until the whole file is fetched",
+            path.display()
+        );
+    }
+
+    /// The stream-copy trim fast path also writes a deliverable MP4, and
+    /// faststart applies to a remux just as it does to a re-encode.
+    #[tokio::test]
+    async fn integration_trim_fast_path_output_is_faststart() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        let out = dir.path().join("trimmed.mp4");
+        make_test_video(&input, 6.0).await.unwrap();
+
+        // One clip, speed 1.0, no effects → takes the `-c copy` fast path.
+        let plan = VideoEditPlan {
+            clips: vec![simple_clip(1.0, 4.0, 1.0)],
+            effects: None,
+        };
+        apply_edits(
+            input.to_str().unwrap(),
+            out.to_str().unwrap(),
+            &plan,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_faststart(&out);
+    }
+
+    /// Narration-only mux (`replace_audio = true`) is a deliverable whenever
+    /// the user exports without burn-in.
+    #[tokio::test]
+    async fn integration_narration_only_mux_is_faststart() {
+        if !ffmpeg_ok() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("v.mp4");
+        let audio = dir.path().join("a.mp4");
+        let out = dir.path().join("muxed.mp4");
+        make_test_video(&video, 5.0).await.unwrap();
+        make_test_video(&audio, 5.0).await.unwrap();
+
+        merge_audio_video(
+            video.to_str().unwrap(),
+            audio.to_str().unwrap(),
+            out.to_str().unwrap(),
+            true,
+            -8.0,
+            |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_faststart(&out);
     }
 
     /// Regression guard: a single clip with speed=1 and an overlay effect
