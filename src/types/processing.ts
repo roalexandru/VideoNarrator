@@ -30,4 +30,22 @@ export type ProgressEvent =
   | { kind: "segment_streamed"; segment: Segment }
   /** Terminal event: the full normalized script. Replaces streaming preview. */
   | { kind: "segments_replaced"; segments: Segment[] }
+  /**
+   * Emitted once after an export finishes, reporting whether the rendered file
+   * matches what was planned. Advisory: the export has already succeeded by the
+   * time this arrives, so a failing check is information, never an error.
+   */
+  | { kind: "export_verified"; report: VerificationReport }
   | { kind: "error"; message: string };
+
+/** One post-export check. `detail` is the human-readable result either way. */
+export interface ExportCheck {
+  id: string;
+  label: string;
+  status: "pass" | "fail" | "skipped";
+  detail: string;
+}
+
+export interface VerificationReport {
+  checks: ExportCheck[];
+}

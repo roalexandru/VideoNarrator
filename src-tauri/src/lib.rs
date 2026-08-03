@@ -11,6 +11,7 @@ mod doc_processor;
 mod elevenlabs_client;
 mod error;
 mod export_engine;
+mod export_verify;
 mod ffmpeg_progress;
 mod frame_cache;
 mod http_client;
