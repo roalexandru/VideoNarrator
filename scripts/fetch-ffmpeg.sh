@@ -49,10 +49,21 @@ OSX_INTEL_FFPROBE_BIN_SHA="5228e651e2bd67bb55819b27f6138351587b16d2b87446007bf35
 
 # Windows — pinned to a specific BtbN dated release + SHA-256 so a moving
 # `latest` tag or a compromised host can't land a different binary in a
-# user's build. Bump this manually when updating ffmpeg; there's a sidecar
-# .sha256 file on every BtbN asset if you want to re-verify the pin.
-BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-04-22-13-15/ffmpeg-n8.1-10-g7f5c90f77e-win64-gpl-8.1.zip"
-BTBN_ZIP_SHA="4ab68a170151f6ce8cb6d48df23f6f297bdb88efb93fa43051199b1f96263b83"
+# user's build. There's a sidecar .sha256 file on every BtbN asset if you want
+# to re-verify the pin.
+#
+# ⚠️ THIS PIN EXPIRES. BtbN deletes its dated `autobuild-*` releases after a few
+# months, so a pin that works today 404s later and breaks the Windows release
+# build (that is exactly what happened to the 2026-04-22 pin). When the Windows
+# "Fetch ffmpeg sidecars" step fails with a 404, bump both lines below:
+#   gh api 'repos/BtbN/FFmpeg-Builds/releases?per_page=1' \
+#     --jq '.[0].tag_name as $t | .[0].assets[]
+#           | select(.name|test("win64-gpl-8\\.1\\.zip$")) | "\($t)/\(.name)"'
+#   curl -fsSL -o /tmp/b.zip "<url>" && shasum -a 256 /tmp/b.zip
+# Keep the major.minor line (8.1) aligned with the macOS pins above so all three
+# platforms burn subtitles with the same libass/filter behavior.
+BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-03-14-02/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1.zip"
+BTBN_ZIP_SHA="20b16a056785b232f35363eba81c3fd6113d76ff39e46d98acfaf8440250467f"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 log() { printf '\e[1;36m[fetch-ffmpeg]\e[0m %s\n' "$*"; }
