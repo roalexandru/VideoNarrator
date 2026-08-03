@@ -697,12 +697,16 @@ pub async fn generate_narration(
     )
     .await
     {
-        Ok(f) => f,
+        Ok(extraction) => extraction,
         Err(e) => {
             let _ = tokio::fs::remove_dir_all(&work_dir_cleanup).await;
             return Err(e);
         }
     };
+    // The silence map is a by-product of anchor detection; keeping it lets the
+    // narration timeline avoid talking over the source's own audio.
+    let silence_spans = frames.silence_spans.clone();
+    let frames = frames.frames;
 
     if state.cancel_flag.load(Ordering::SeqCst) {
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
@@ -800,6 +804,12 @@ pub async fn generate_narration(
         &docs,
         &params.custom_prompt,
         &params.primary_language,
+    );
+    // Tell the model where the source is quiet, so it places segments in the
+    // gaps rather than being corrected into them afterwards.
+    let system_prompt = format!(
+        "{system_prompt}{}",
+        ai_client::describe_silence_windows(&silence_spans, video_metadata.duration_seconds)
     );
     // build_user_message reads frame files from disk and base64-encodes them (CPU+IO bound)
     let frames_clone = frames.clone();
@@ -909,6 +919,22 @@ pub async fn generate_narration(
     }
 
     let mut script = script?;
+
+    // Snap segment edges into the source's quiet stretches, then re-normalize:
+    // snapping can push an edge past a neighbour or under the minimum segment
+    // length, and `normalize_timeline` is what re-establishes those invariants.
+    // A no-op on silent screencasts, which report one span covering everything.
+    if !silence_spans.is_empty() {
+        let duration = script.total_duration_seconds;
+        script.segments = ai_client::normalize_timeline(
+            ai_client::snap_to_silence(
+                std::mem::take(&mut script.segments),
+                &silence_spans,
+                duration,
+            ),
+            duration,
+        );
+    }
 
     // The main LLM call above isn't itself interruptible (aborting mid-flight
     // would discard the streamed chunk the resume-retry path relies on), but a
