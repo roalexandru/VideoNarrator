@@ -1,5 +1,6 @@
 //! Multi-provider AI client supporting Claude and OpenAI for narration generation.
 
+use crate::contact_sheet;
 use crate::error::NarratorError;
 use crate::http_client;
 use crate::models::*;
@@ -968,6 +969,7 @@ pub fn build_user_message(
     description: &str,
     video_metadata: &VideoMetadata,
     language: &str,
+    tile: bool,
 ) -> Result<serde_json::Value, NarratorError> {
     let mut content = Vec::new();
 
@@ -1002,21 +1004,66 @@ pub fn build_user_message(
         "text": text_context
     }));
 
-    // Add frame images as base64.
-    //
+    content.extend(frame_content_parts(frames, tile)?);
+
+    Ok(serde_json::Value::Array(content))
+}
+
+/// Frames per contact sheet — one full grid.
+pub const FRAMES_PER_SHEET: usize =
+    (contact_sheet::DEFAULT_COLUMNS * contact_sheet::DEFAULT_COLUMNS) as usize;
+
+/// Render frames as model content parts.
+///
+/// `tile == false` is the historical shape: one labelled image per frame.
+/// `tile == true` groups them into contact sheets, so nine moments occupy one
+/// image slot instead of nine — which is what lets a long video be analysed in a
+/// handful of calls instead of thirty, each retaining full context.
+fn frame_content_parts(
+    frames: &[Frame],
+    tile: bool,
+) -> Result<Vec<serde_json::Value>, NarratorError> {
+    // Missing files are filtered first, preserving the historical
+    // skip-silently behaviour for a frame whose file vanished.
+    let present: Vec<Frame> = frames.iter().filter(|f| f.path.exists()).cloned().collect();
+    let mut parts = Vec::new();
+
+    if tile {
+        for group in present.chunks(FRAMES_PER_SHEET) {
+            let Some(sheet) = contact_sheet::build(
+                group,
+                contact_sheet::DEFAULT_COLUMNS,
+                contact_sheet::DEFAULT_CELL_WIDTH,
+            )?
+            else {
+                continue;
+            };
+            // The mapping text must precede the image, or the model reads the
+            // grid before being told how to index it.
+            parts.push(json!({"type": "text", "text": sheet.describe()}));
+            parts.push(json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": sheet.base64
+                }
+            }));
+        }
+        return Ok(parts);
+    }
+
     // Encoding is downscale + JPEG per frame — pure CPU that ran serially for up
-    // to 300 frames. Missing files are filtered first so the historical
-    // skip-silently behaviour is preserved, then the rest encode in parallel.
-    let present: Vec<&Frame> = frames.iter().filter(|f| f.path.exists()).collect();
+    // to 300 frames, now spread across cores.
     let paths: Vec<std::path::PathBuf> = present.iter().map(|f| f.path.clone()).collect();
     let encoded = crate::frame_cache::encode_frames_parallel(&paths)?;
 
     for (frame, b64) in present.iter().zip(encoded) {
-        content.push(json!({
+        parts.push(json!({
             "type": "text",
             "text": format!("[Frame {} at {:.1}s]", frame.index, frame.timestamp_seconds)
         }));
-        content.push(json!({
+        parts.push(json!({
             "type": "image",
             "source": {
                 "type": "base64",
@@ -1026,7 +1073,7 @@ pub fn build_user_message(
         }));
     }
 
-    Ok(serde_json::Value::Array(content))
+    Ok(parts)
 }
 
 /// Wrap an async API call with a periodic progress heartbeat so the UI doesn't
@@ -3688,7 +3735,14 @@ mod tests {
         };
 
         // Call with empty frames
-        let result = build_user_message(&[], "Test Video", "A test description", &metadata, "en");
+        let result = build_user_message(
+            &[],
+            "Test Video",
+            "A test description",
+            &metadata,
+            "en",
+            false,
+        );
         assert!(result.is_ok());
 
         let msg = result.unwrap();
@@ -4015,6 +4069,109 @@ mod tests {
         assert!(result.is_ok());
         let script = result.unwrap();
         assert_eq!(script.title, "Fenced");
+    }
+
+    // ── Contact-sheet tiling ───────────────────────────────────────────
+
+    /// Write `n` tiny JPEGs and return frames pointing at them.
+    fn tiled_test_frames(dir: &std::path::Path, n: usize) -> Vec<Frame> {
+        (0..n)
+            .map(|i| {
+                let path = dir.join(format!("t{i}.jpg"));
+                image::RgbImage::from_pixel(64, 36, image::Rgb([(i * 8) as u8, 0, 0]))
+                    .save(&path)
+                    .unwrap();
+                Frame {
+                    index: i,
+                    timestamp_seconds: i as f64 * 2.0,
+                    path,
+                    width: 64,
+                    height: 36,
+                }
+            })
+            .collect()
+    }
+
+    fn count_images(parts: &[serde_json::Value]) -> usize {
+        parts.iter().filter(|p| p["type"] == "image").count()
+    }
+
+    #[test]
+    fn tiling_collapses_nine_frames_into_one_image_slot() {
+        // This ratio is the entire point: image slots drive the chunk count.
+        let dir = tempfile::tempdir().unwrap();
+        let frames = tiled_test_frames(dir.path(), 9);
+
+        let untiled = frame_content_parts(&frames, false).unwrap();
+        assert_eq!(count_images(&untiled), 9);
+
+        let tiled = frame_content_parts(&frames, true).unwrap();
+        assert_eq!(count_images(&tiled), 1, "9 frames should be one sheet");
+        assert_eq!(FRAMES_PER_SHEET, 9);
+    }
+
+    #[test]
+    fn tiling_splits_across_sheets_when_frames_exceed_one_grid() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = tiled_test_frames(dir.path(), 20);
+        let tiled = frame_content_parts(&frames, true).unwrap();
+        // 20 frames at 9 per sheet → 3 sheets (9 + 9 + 2).
+        assert_eq!(count_images(&tiled), 3);
+    }
+
+    #[test]
+    fn tiling_puts_the_cell_mapping_before_its_image() {
+        // The model must be told how to index the grid before it sees it.
+        let dir = tempfile::tempdir().unwrap();
+        let frames = tiled_test_frames(dir.path(), 4);
+        let parts = frame_content_parts(&frames, true).unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image");
+        let text = parts[0]["text"].as_str().unwrap();
+        assert!(text.contains("left to right"), "{text}");
+        // Every frame must be addressable, or frame_refs break.
+        for i in 0..4 {
+            assert!(text.contains(&format!("frame {i} at")), "missing frame {i}");
+        }
+    }
+
+    #[test]
+    fn untiled_path_is_unchanged_by_the_tiling_feature() {
+        // Regression guard: the default path must still emit one labelled image
+        // per frame, in order.
+        let dir = tempfile::tempdir().unwrap();
+        let frames = tiled_test_frames(dir.path(), 3);
+        let parts = frame_content_parts(&frames, false).unwrap();
+        assert_eq!(parts.len(), 6, "text+image per frame");
+        assert_eq!(parts[0]["text"], "[Frame 0 at 0.0s]");
+        assert_eq!(parts[2]["text"], "[Frame 1 at 2.0s]");
+        assert_eq!(parts[4]["text"], "[Frame 2 at 4.0s]");
+    }
+
+    #[test]
+    fn both_paths_skip_a_frame_whose_file_vanished() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut frames = tiled_test_frames(dir.path(), 2);
+        frames.push(Frame {
+            index: 99,
+            timestamp_seconds: 50.0,
+            path: dir.path().join("never-written.jpg"),
+            width: 64,
+            height: 36,
+        });
+
+        let untiled = frame_content_parts(&frames, false).unwrap();
+        assert_eq!(count_images(&untiled), 2);
+
+        let tiled = frame_content_parts(&frames, true).unwrap();
+        assert_eq!(count_images(&tiled), 1);
+        assert!(!tiled[0]["text"].as_str().unwrap().contains("frame 99"));
+    }
+
+    #[test]
+    fn tiling_with_no_frames_emits_no_image_parts() {
+        assert!(frame_content_parts(&[], true).unwrap().is_empty());
+        assert!(frame_content_parts(&[], false).unwrap().is_empty());
     }
 
     // ── Silence-aware snapping ─────────────────────────────────────────

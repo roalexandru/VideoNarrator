@@ -881,8 +881,9 @@ pub async fn generate_narration(
     let description = params.description.clone();
     let vm = video_metadata.clone();
     let lang = params.primary_language.clone();
+    let tile = params.use_contact_sheets;
     let user_message = tokio::task::spawn_blocking(move || {
-        ai_client::build_user_message(&frames_clone, &title, &description, &vm, &lang)
+        ai_client::build_user_message(&frames_clone, &title, &description, &vm, &lang, tile)
     })
     .await
     .map_err(|e| NarratorError::ApiError(e.to_string()))??;

@@ -7,6 +7,7 @@ mod cancel;
 pub mod cli;
 mod commands;
 mod compositor;
+mod contact_sheet;
 mod doc_processor;
 mod elevenlabs_client;
 mod error;
