@@ -6,7 +6,7 @@ use crate::render;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
-    project_store, screen_recorder, video_edit, video_engine,
+    frame_cache, project_store, screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -655,88 +655,152 @@ pub async fn generate_narration(
     }
 
     let frames_dir = project_store::get_project_frames_dir(&project_id);
-    // Extract into a fresh temp dir and atomically swap it in on success. This
-    // (a) prevents stale frames from a denser prior run being scanned with
-    // fabricated timestamps, and (b) preserves a prior successful run's frames
-    // if this extraction fails or is cancelled.
-    let project_dir = frames_dir
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| frames_dir.clone());
-    tokio::fs::create_dir_all(&project_dir)
-        .await
-        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
-    let work_dir = project_dir.join(format!(".frames-{}.tmp", uuid::Uuid::new_v4()));
-    let _ = tokio::fs::remove_dir_all(&work_dir).await;
-    tokio::fs::create_dir_all(&work_dir)
-        .await
-        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
-    let channel_for_frames = channel.clone();
-    let channel_for_ticks = channel.clone();
-    let work_dir_cleanup = work_dir.clone();
-    let frames = match video_engine::extract_frames(
-        Path::new(&params.video_path),
-        &frame_config,
-        &work_dir,
-        move |frame| {
-            channel_for_frames
+    // Analysis is the expensive half of a regeneration and none of it depends on
+    // the prompt: two full-decode ffmpeg passes plus up to 300 individual frame
+    // extractions. When the source and the sampling settings are unchanged since
+    // the last run, reuse what is already on disk.
+    //
+    // Keyed on the source's content hash rather than mtime, so editing a video
+    // in place invalidates correctly.
+    let media_hash = compute_media_hash(params.video_path.clone()).await.ok();
+    let cached: Option<video_engine::FrameExtraction> = match media_hash.clone() {
+        Some(hash) => {
+            let dir = frames_dir.clone();
+            let cfg = frame_config.clone();
+            tokio::task::spawn_blocking(move || frame_cache::load(&dir, &hash, &cfg))
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+
+    if let Some(hit) = cached.as_ref() {
+        channel
+            .send(ProgressEvent::progress_msg(
+                25.0,
+                format!("Reusing {} extracted frames", hit.frames.len()),
+            ))
+            .ok();
+        // Replay the frame events so the filmstrip populates exactly as it does
+        // after a fresh extraction.
+        for frame in &hit.frames {
+            channel
                 .send(ProgressEvent::FrameExtracted {
                     frame: frame.clone(),
                 })
                 .ok();
-        },
-        move |fraction, message| {
-            // Frame extraction owns 0..25% of the global bar.
-            let percent = (fraction.clamp(0.0, 1.0)) * 25.0;
-            channel_for_ticks
-                .send(ProgressEvent::progress_msg(percent, message))
-                .ok();
-        },
-        Some(state.cancel_flag.clone()),
-    )
-    .await
-    {
-        Ok(extraction) => extraction,
-        Err(e) => {
-            let _ = tokio::fs::remove_dir_all(&work_dir_cleanup).await;
-            return Err(e);
+        }
+    }
+
+    let extraction = match cached {
+        Some(hit) => hit,
+        None => {
+            // Extract into a fresh temp dir and atomically swap it in on success.
+            // This (a) prevents stale frames from a denser prior run being
+            // scanned with fabricated timestamps, and (b) preserves a prior
+            // successful run's frames if this extraction fails or is cancelled.
+            let project_dir = frames_dir
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| frames_dir.clone());
+            tokio::fs::create_dir_all(&project_dir)
+                .await
+                .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
+            let work_dir = project_dir.join(format!(".frames-{}.tmp", uuid::Uuid::new_v4()));
+            let _ = tokio::fs::remove_dir_all(&work_dir).await;
+            tokio::fs::create_dir_all(&work_dir)
+                .await
+                .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
+
+            let channel_for_frames = channel.clone();
+            let channel_for_ticks = channel.clone();
+            let work_dir_cleanup = work_dir.clone();
+            let extracted = match video_engine::extract_frames(
+                Path::new(&params.video_path),
+                &frame_config,
+                &work_dir,
+                move |frame| {
+                    channel_for_frames
+                        .send(ProgressEvent::FrameExtracted {
+                            frame: frame.clone(),
+                        })
+                        .ok();
+                },
+                move |fraction, message| {
+                    // Frame extraction owns 0..25% of the global bar.
+                    let percent = (fraction.clamp(0.0, 1.0)) * 25.0;
+                    channel_for_ticks
+                        .send(ProgressEvent::progress_msg(percent, message))
+                        .ok();
+                },
+                Some(state.cancel_flag.clone()),
+            )
+            .await
+            {
+                Ok(extraction) => extraction,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir_all(&work_dir_cleanup).await;
+                    return Err(e);
+                }
+            };
+
+            if state.cancel_flag.load(Ordering::SeqCst) {
+                let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                return Err(NarratorError::Cancelled);
+            }
+
+            // Extraction succeeded — swap the temp dir in for the real frames
+            // dir and remap each frame path to its final location.
+            {
+                let work = work_dir.clone();
+                let final_dir = frames_dir.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || {
+                    project_store::promote_frames_dir(&work, &final_dir)
+                })
+                .await
+                .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
+                {
+                    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+                    return Err(e);
+                }
+            }
+
+            let promoted = video_engine::FrameExtraction {
+                frames: extracted
+                    .frames
+                    .into_iter()
+                    .map(|mut fr| {
+                        if let Ok(rel) = fr.path.strip_prefix(&work_dir) {
+                            fr.path = frames_dir.join(rel);
+                        }
+                        fr
+                    })
+                    .collect(),
+                silence_spans: extracted.silence_spans,
+            };
+
+            // Record what these frames are so an unchanged rerun can skip all of
+            // the above. Best-effort: a failure costs a re-extract, not the run.
+            if let Some(hash) = media_hash.clone() {
+                let dir = frames_dir.clone();
+                let cfg = frame_config.clone();
+                let snapshot = promoted.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    frame_cache::store(&dir, &hash, &cfg, &snapshot)
+                })
+                .await;
+            }
+
+            promoted
         }
     };
+
     // The silence map is a by-product of anchor detection; keeping it lets the
     // narration timeline avoid talking over the source's own audio.
-    let silence_spans = frames.silence_spans.clone();
-    let frames = frames.frames;
-
-    if state.cancel_flag.load(Ordering::SeqCst) {
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
-        return Err(NarratorError::Cancelled);
-    }
-
-    // Extraction succeeded — swap the temp dir in for the real frames dir and
-    // remap each frame path from the temp dir to its final location.
-    {
-        let work = work_dir.clone();
-        let final_dir = frames_dir.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            project_store::promote_frames_dir(&work, &final_dir)
-        })
-        .await
-        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?
-        {
-            let _ = tokio::fs::remove_dir_all(&work_dir).await;
-            return Err(e);
-        }
-    }
-    let frames: Vec<_> = frames
-        .into_iter()
-        .map(|mut fr| {
-            if let Ok(rel) = fr.path.strip_prefix(&work_dir) {
-                fr.path = frames_dir.join(rel);
-            }
-            fr
-        })
-        .collect();
+    let silence_spans = extraction.silence_spans;
+    let frames = extraction.frames;
 
     // Phase 2: Process documents — the 25%→30% slice of the global bar.
     channel
