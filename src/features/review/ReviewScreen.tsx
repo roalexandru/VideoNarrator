@@ -158,6 +158,9 @@ export function ReviewScreen() {
         { provider: aiProvider, model: aiModel, temperature: aiTemperature, reasoning_effort: aiReasoningEffort },
         configStyle,
         customPrompt || undefined,
+        // Records the instruction so a later regeneration honours it without
+        // the user having to say it again.
+        projectId || undefined,
       );
       setScript(activeLanguage, result);
       setShowRefineAll(false);
@@ -220,6 +223,7 @@ export function ReviewScreen() {
         instruction,
         context,
         { provider: aiProvider, model: aiModel, temperature: aiTemperature, reasoning_effort: aiReasoningEffort },
+        projectId || undefined,
       );
       updateSegmentText(activeLanguage, segmentIdx, refined);
       setRefiningIdx(null);

@@ -78,27 +78,33 @@ export const translateScript = (
     aiConfig,
   });
 
+/** Rewrite one segment. Passing `projectId` records the instruction as a
+ *  standing preference so future regenerations honour it. */
 export const refineSegment = (
   segmentText: string,
   instruction: string,
   context: string,
-  aiConfig: AiConfig
+  aiConfig: AiConfig,
+  projectId?: string,
 ) =>
   invoke<string>("refine_segment", {
     segmentText,
     instruction,
     context,
     aiConfig,
+    projectId,
   });
 
 /** Rewrite the entire narration script with a user instruction.
- *  Preserves timestamps + style; stays grounded in visual descriptions. */
+ *  Preserves timestamps + style; stays grounded in visual descriptions.
+ *  Passing `projectId` records the instruction as a standing preference. */
 export const refineScript = (
   script: NarrationScript,
   instruction: string,
   aiConfig: AiConfig,
   styleHint?: string,
   customPrompt?: string,
+  projectId?: string,
 ) =>
   invoke<NarrationScript>("refine_script", {
     script,
@@ -106,7 +112,34 @@ export const refineScript = (
     aiConfig,
     styleHint,
     customPrompt,
+    projectId,
   });
+
+/** A refinement instruction retained as a standing preference for a project. */
+export interface Preference {
+  id: string;
+  instruction: string;
+  source: "script_refinement" | "segment_refinement" | "manual";
+  active: boolean;
+  created_at: string;
+}
+
+/** Standing narration preferences accumulated from earlier refinements. */
+export const listPreferences = (projectId: string) =>
+  invoke<Preference[]>("list_preferences", { projectId });
+
+/** Toggle a preference without forgetting it, so it is not re-created when the
+ *  user next phrases the same instruction. */
+export const setPreferenceActive = (
+  projectId: string,
+  preferenceId: string,
+  active: boolean,
+) =>
+  invoke<void>("set_preference_active", { projectId, preferenceId, active });
+
+/** Delete a preference outright. */
+export const deletePreference = (projectId: string, preferenceId: string) =>
+  invoke<void>("delete_preference", { projectId, preferenceId });
 
 // Projects
 export const saveProject = (config: unknown) =>
