@@ -1,4 +1,4 @@
-import type { NarrationStyleId, Language, AiProvider, ModelId, TtsProvider } from "../types/config";
+import type { NarrationStyleId, Language, AiProvider, CurrentModelId, ReasoningEffort, TtsProvider } from "../types/config";
 import type { ExportFormat } from "../types/export";
 
 export const STYLES: {
@@ -58,35 +58,75 @@ export const LANGUAGES: Language[] = [
   { code: "pt-BR", label: "Portuguese (BR)", flag: "🇧🇷" },
 ];
 
+/**
+ * Model picker catalog — current generation only.
+ *
+ * `hint` is shown next to the label. Narration sends every sampled frame as an
+ * image, so per-token cost scales with video length far faster than in a
+ * text-only app; the hints exist so the tier tradeoff is visible at the point of
+ * choice rather than discovered on the bill.
+ *
+ * Ordered cheapest-capable first within each provider, with the recommended
+ * default listed first overall for that provider.
+ */
 export const PROVIDERS: {
   id: AiProvider;
   label: string;
-  models: { id: ModelId; label: string }[];
+  models: { id: CurrentModelId; label: string; hint?: string }[];
 }[] = [
   {
     id: "claude",
     label: "Anthropic (Claude)",
     models: [
-      { id: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
-      { id: "claude-opus-4-20250514", label: "Claude Opus 4" },
+      { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Recommended — best speed/quality balance" },
+      { id: "claude-opus-5", label: "Claude Opus 5", hint: "Deeper reasoning on complex footage" },
+      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest and cheapest" },
+      { id: "claude-fable-5", label: "Claude Fable 5", hint: "Most capable — premium pricing" },
     ],
   },
   {
     id: "openai",
     label: "OpenAI",
     models: [
-      { id: "gpt-4o", label: "GPT-4o" },
-      { id: "o3", label: "o3" },
+      { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "Recommended — the workhorse variant" },
+      { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "Mid-tier" },
+      { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", hint: "Budget variant" },
     ],
   },
   {
     id: "gemini",
     label: "Google (Gemini)",
     models: [
-      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+      { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", hint: "Recommended — strong multimodal, low cost" },
+      { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash" },
+      { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", hint: "Cheapest" },
+      { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", hint: "Most capable — preview" },
     ],
   },
+];
+
+/** Default model per provider — used when switching providers. */
+export const DEFAULT_MODEL_FOR_PROVIDER: Record<AiProvider, CurrentModelId> = {
+  claude: "claude-sonnet-5",
+  openai: "gpt-5.6-sol",
+  gemini: "gemini-3.6-flash",
+};
+
+/**
+ * Reasoning-depth choices. Every current frontier model exposes a thinking
+ * knob, but each vendor names it differently — one product-level choice is
+ * mapped per provider in the Rust client (and clamped where a provider's ladder
+ * is shorter, e.g. Gemini stops at `high`).
+ */
+export const REASONING_LEVELS: {
+  id: ReasoningEffort;
+  label: string;
+  hint: string;
+}[] = [
+  { id: "fast", label: "Fast", hint: "Least thinking — quickest and cheapest" },
+  { id: "balanced", label: "Balanced", hint: "Good default for most videos" },
+  { id: "thorough", label: "Thorough", hint: "More analysis before writing" },
+  { id: "max", label: "Maximum", hint: "Deepest reasoning — slowest and priciest" },
 ];
 
 export const ELEVEN_MODELS: { id: string; label: string }[] = [

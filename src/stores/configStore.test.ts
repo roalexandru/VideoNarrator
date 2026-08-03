@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useConfigStore } from "./configStore";
+import {
+  PROVIDERS,
+  DEFAULT_MODEL_FOR_PROVIDER,
+  REASONING_LEVELS,
+} from "../lib/constants";
 
 describe("configStore", () => {
   beforeEach(() => {
@@ -16,8 +21,9 @@ describe("configStore", () => {
     expect(state.maxFrames).toBe(30);
     expect(state.customPrompt).toBe("");
     expect(state.aiProvider).toBe("claude");
-    expect(state.model).toBe("claude-sonnet-4-20250514");
+    expect(state.model).toBe("claude-sonnet-5");
     expect(state.temperature).toBe(0.7);
+    expect(state.reasoningEffort).toBe("balanced");
     expect(state.ttsProvider).toBe("elevenlabs");
     expect(state.strictMode).toBe(false);
   });
@@ -82,5 +88,46 @@ describe("configStore", () => {
     expect(state.temperature).toBe(0.7);
     expect(state.aiProvider).toBe("claude");
     expect(state.strictMode).toBe(false);
+  });
+});
+
+describe("model catalog", () => {
+  it("offers only current-generation models, with a default per provider", () => {
+    for (const p of PROVIDERS) {
+      expect(p.models.length).toBeGreaterThan(0);
+      // No retired/legacy IDs in the picker — those stay type-valid only so
+      // older saved projects still load.
+      for (const m of p.models) {
+        expect(m.id).not.toMatch(/-2025\d{4}$|^gpt-4o$|^o3$|^gemini-2\.5/);
+      }
+      // The per-provider default must actually be offered by that provider.
+      const dflt = DEFAULT_MODEL_FOR_PROVIDER[p.id];
+      expect(p.models.map((m) => m.id)).toContain(dflt);
+    }
+  });
+
+  it("includes the GPT-5.6 Sol/Terra/Luna variants", () => {
+    const openai = PROVIDERS.find((p) => p.id === "openai")!;
+    const ids = openai.models.map((m) => m.id);
+    expect(ids).toEqual(
+      expect.arrayContaining(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]),
+    );
+  });
+
+  it("includes Claude Opus 5 and Sonnet 5", () => {
+    const claude = PROVIDERS.find((p) => p.id === "claude")!;
+    const ids = claude.models.map((m) => m.id);
+    expect(ids).toEqual(expect.arrayContaining(["claude-opus-5", "claude-sonnet-5"]));
+  });
+
+  it("exposes four reasoning levels including the store default", () => {
+    expect(REASONING_LEVELS.map((l) => l.id)).toEqual([
+      "fast",
+      "balanced",
+      "thorough",
+      "max",
+    ]);
+    const ids = REASONING_LEVELS.map((l) => l.id);
+    expect(ids).toContain(useConfigStore.getState().reasoningEffort);
   });
 });

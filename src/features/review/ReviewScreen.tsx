@@ -129,6 +129,7 @@ export function ReviewScreen() {
   const aiProvider = useConfigStore((s) => s.aiProvider);
   const aiModel = useConfigStore((s) => s.model);
   const aiTemperature = useConfigStore((s) => s.temperature);
+  const aiReasoningEffort = useConfigStore((s) => s.reasoningEffort);
   const configStyle = useConfigStore((s) => s.style);
   const customPrompt = useConfigStore((s) => s.customPrompt);
 
@@ -154,7 +155,7 @@ export function ReviewScreen() {
       const result = await refineScript(
         script,
         instr,
-        { provider: aiProvider, model: aiModel, temperature: aiTemperature },
+        { provider: aiProvider, model: aiModel, temperature: aiTemperature, reasoning_effort: aiReasoningEffort },
         configStyle,
         customPrompt || undefined,
       );
@@ -181,7 +182,7 @@ export function ReviewScreen() {
     if (!translateLang || !script || translating) return;
     setTranslating(true);
     try {
-      const result = await translateScript(script, translateLang, { provider: aiProvider, model: aiModel, temperature: aiTemperature });
+      const result = await translateScript(script, translateLang, { provider: aiProvider, model: aiModel, temperature: aiTemperature, reasoning_effort: aiReasoningEffort });
       setScript(translateLang, result);
       setActiveLanguage(translateLang);
       setShowTranslate(false);
@@ -218,7 +219,7 @@ export function ReviewScreen() {
         segments[segmentIdx].text,
         instruction,
         context,
-        { provider: aiProvider, model: aiModel, temperature: aiTemperature },
+        { provider: aiProvider, model: aiModel, temperature: aiTemperature, reasoning_effort: aiReasoningEffort },
       );
       updateSegmentText(activeLanguage, segmentIdx, refined);
       setRefiningIdx(null);

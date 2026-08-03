@@ -95,19 +95,47 @@ impl std::fmt::Display for AiProviderKind {
     }
 }
 
+/// Provider-agnostic reasoning depth.
+///
+/// Every current frontier model exposes a "how hard should you think" knob, but
+/// each vendor spells it differently — Anthropic `output_config.effort`, OpenAI
+/// `reasoning.effort`, Google `generationConfig.thinkingLevel`. We expose one
+/// product-level choice and map it per provider in `ai_client`, clamping to what
+/// each model actually accepts (Gemini, for example, tops out at `high`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    /// Least thinking: fastest and cheapest. Good for short, simple videos.
+    Fast,
+    /// Default — the cost/quality sweet spot for most narration.
+    #[default]
+    Balanced,
+    /// More deliberate analysis of the frames before writing.
+    Thorough,
+    /// Maximum reasoning depth. Slowest and most expensive.
+    Max,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
     pub provider: AiProviderKind,
     pub model: String,
     pub temperature: f32,
+    /// Absent in projects saved before reasoning selection existed — those load
+    /// as `Balanced`.
+    #[serde(default)]
+    pub reasoning_effort: ReasoningEffort,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             provider: AiProviderKind::Claude,
-            model: "claude-sonnet-4-20250514".to_string(),
+            // Successor to the previous default (`claude-sonnet-4-20250514`) per
+            // Anthropic's model rename table — same tier, current generation.
+            model: "claude-sonnet-5".to_string(),
             temperature: 0.7,
+            reasoning_effort: ReasoningEffort::Balanced,
         }
     }
 }

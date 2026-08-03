@@ -254,6 +254,7 @@ export default function App() {
         provider: cs.aiProvider,
         model: cs.model,
         temperature: cs.temperature,
+        reasoning_effort: cs.reasoningEffort,
       },
       custom_prompt: cs.customPrompt,
       created_at: ps.createdAt || now,
@@ -561,6 +562,9 @@ export default function App() {
       cs.setAiProvider(cfg.ai_config.provider as AiProvider);
       cs.setModel(cfg.ai_config.model as ModelId);
       cs.setTemperature(cfg.ai_config.temperature);
+      // Projects saved before reasoning selection existed have no value here —
+      // fall back to the default rather than writing `undefined` into the store.
+      cs.setReasoningEffort(cfg.ai_config.reasoning_effort ?? "balanced");
       cs.setCustomPrompt(cfg.custom_prompt);
 
       // Restore video edit clips if saved

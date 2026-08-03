@@ -5,6 +5,7 @@ import type {
   FrameDensity,
   AiProvider,
   ModelId,
+  ReasoningEffort,
   TtsProvider,
 } from "../types/config";
 
@@ -20,6 +21,8 @@ interface ConfigStore {
   aiProvider: AiProvider;
   model: ModelId;
   temperature: number;
+  /** Provider-agnostic thinking depth; mapped per vendor in the Rust client. */
+  reasoningEffort: ReasoningEffort;
   ttsProvider: TtsProvider;
   /** Run an extra critique+refine pass after the initial narration. Catches
    *  segments whose text doesn't match what's visible at that timestamp, at
@@ -38,6 +41,7 @@ interface ConfigStore {
   setAiProvider: (provider: AiProvider) => void;
   setModel: (model: ModelId) => void;
   setTemperature: (temp: number) => void;
+  setReasoningEffort: (effort: ReasoningEffort) => void;
   setTtsProvider: (provider: TtsProvider) => void;
   setStrictMode: (enabled: boolean) => void;
   reset: () => void;
@@ -52,8 +56,9 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   maxFrames: 30,
   customPrompt: "",
   aiProvider: "claude",
-  model: "claude-sonnet-4-20250514",
+  model: "claude-sonnet-5",
   temperature: 0.7,
+  reasoningEffort: "balanced",
   ttsProvider: "elevenlabs",
   strictMode: false,
 
@@ -80,6 +85,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   setAiProvider: (provider) => set({ aiProvider: provider }),
   setModel: (model) => set({ model }),
   setTemperature: (temp) => set({ temperature: temp }),
+  setReasoningEffort: (effort) => set({ reasoningEffort: effort }),
   setTtsProvider: (provider) => set({ ttsProvider: provider }),
   setStrictMode: (enabled) => set({ strictMode: enabled }),
   reset: () =>
@@ -92,8 +98,9 @@ export const useConfigStore = create<ConfigStore>((set) => ({
       maxFrames: 30,
       customPrompt: "",
       aiProvider: "claude",
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-5",
       temperature: 0.7,
+      reasoningEffort: "balanced",
       ttsProvider: "elevenlabs",
       strictMode: false,
     }),
