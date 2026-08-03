@@ -33,6 +33,39 @@ use crate::process_utils::CommandNoWindow;
 use crate::video_edit::EditClip;
 use crate::video_engine;
 
+/// Fade applied at both edges of every spliced audio segment.
+///
+/// Concatenating audio at an arbitrary sample means the waveform jumps
+/// discontinuously at the join, which is audible as a click or pop. 30 ms is
+/// long enough to remove the discontinuity and short enough that speech onset
+/// is not perceptibly softened.
+pub(crate) const SPLICE_FADE_SECONDS: f64 = 0.03;
+
+/// Build the `afade` in/out pair for a spliced segment of `dur` seconds.
+///
+/// The fade shrinks to `dur / 2` on segments shorter than
+/// `2 × SPLICE_FADE_SECONDS`. Without that, the fade-in window `(0..d)` and the
+/// fade-out window `(dur-d..dur)` overlap and ffmpeg multiplies the two
+/// envelopes in the overlap, producing an audible double-attenuation dip in the
+/// middle of an already-short segment. Shrinking makes fade-in end exactly where
+/// fade-out begins, keeping the no-pop property without the dip.
+///
+/// Shared by the narration concat (`tts_pack`) and the edit-timeline concat
+/// (`render_timeline_audio`) so the two splice paths cannot drift apart.
+pub(crate) fn splice_fade_filters(dur: f64) -> String {
+    if !dur.is_finite() {
+        // There is no end to anchor a fade-out to. Callers always pass a finite
+        // clip duration, but formatting `dur - fade_d` here would emit
+        // `st=inf`, which ffmpeg rejects outright and would fail the whole
+        // render — so degrade to a fade-in only.
+        return format!("afade=t=in:d={SPLICE_FADE_SECONDS:.3}");
+    }
+    let dur = dur.max(0.0);
+    let fade_d = (dur / 2.0).clamp(0.0, SPLICE_FADE_SECONDS);
+    let fade_out_start = (dur - fade_d).max(0.0);
+    format!("afade=t=in:d={fade_d:.3},afade=t=out:st={fade_out_start:.3}:d={fade_d:.3}")
+}
+
 /// Per-clip output duration (mirrors the compositor's `clip_output_duration`).
 fn clip_output_duration(c: &EditClip) -> f64 {
     match c.clip_type.as_deref() {
@@ -132,6 +165,13 @@ pub async fn render_timeline_audio(
             for tempo in atempo_factors(clip.speed) {
                 chain.push_str(&format!(",atempo={tempo}"));
             }
+            // Fade both edges before the concat. A trim lands on an arbitrary
+            // sample, so without this every cut point in the edit timeline can
+            // click — the same defect the narration concat already guards
+            // against, via the same helper. Placed after `atempo` so the fade
+            // is measured against the clip's *output* duration.
+            chain.push(',');
+            chain.push_str(&splice_fade_filters(out_dur));
             chain.push_str(&format!("[{label}]"));
             filters.push(chain);
             any_real_audio = true;
@@ -470,6 +510,97 @@ impl Drop for ScopedRemove {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Splice fades ────────────────────────────────────────────────────────
+
+    #[test]
+    fn splice_fade_uses_the_full_window_on_a_normal_segment() {
+        let f = splice_fade_filters(5.0);
+        assert_eq!(f, "afade=t=in:d=0.030,afade=t=out:st=4.970:d=0.030");
+    }
+
+    #[test]
+    fn splice_fade_shrinks_so_the_windows_only_touch() {
+        // Below 2×30 ms the two windows would overlap and ffmpeg would multiply
+        // both envelopes, dipping the middle of an already-short segment.
+        let f = splice_fade_filters(0.04);
+        assert!(f.contains("afade=t=in:d=0.020"), "got {f}");
+        // fade-out starts exactly where fade-in ends: 0.04 - 0.02 = 0.02
+        assert!(f.contains("afade=t=out:st=0.020:d=0.020"), "got {f}");
+    }
+
+    #[test]
+    fn splice_fade_at_exactly_twice_the_window_still_uses_full_fades() {
+        let f = splice_fade_filters(2.0 * SPLICE_FADE_SECONDS);
+        assert!(f.contains("afade=t=in:d=0.030"), "got {f}");
+        assert!(f.contains("afade=t=out:st=0.030:d=0.030"), "got {f}");
+    }
+
+    #[test]
+    fn splice_fade_never_emits_a_negative_start() {
+        // A zero/degenerate duration must not produce `st=-0.030`, which
+        // ffmpeg rejects.
+        for dur in [0.0, 0.001, 0.01] {
+            let f = splice_fade_filters(dur);
+            assert!(
+                !f.contains("st=-"),
+                "negative fade start for dur={dur}: {f}"
+            );
+        }
+    }
+
+    #[test]
+    fn splice_fade_handles_a_non_finite_duration() {
+        // Defensive: an infinite duration must still yield a valid expression
+        // rather than `st=inf`.
+        let f = splice_fade_filters(f64::INFINITY);
+        assert!(!f.contains("inf"), "got {f}");
+        assert!(!f.contains("NaN"), "got {f}");
+    }
+
+    #[test]
+    fn splice_fade_is_a_single_valid_filter_pair() {
+        let f = splice_fade_filters(3.0);
+        assert_eq!(f.matches("afade=").count(), 2);
+        assert!(!f.contains(' '), "filter args must be whitespace-free");
+        for part in f.split(',') {
+            assert!(!part.trim().is_empty(), "empty element in {f}");
+        }
+    }
+
+    #[test]
+    fn timeline_clip_chain_fades_after_atempo_and_before_the_label() {
+        // Ordering matters twice over: the fade must be measured against the
+        // clip's *output* duration (so it comes after atempo), and it must be
+        // inside the chain rather than after the output label.
+        let clip = EditClip {
+            end_seconds: 4.0,
+            speed: 2.0,
+            ..sample_clip()
+        };
+        let out_dur = clip_output_duration(&clip);
+        assert!((out_dur - 2.0).abs() < 1e-9, "4s at 2x is 2s");
+
+        let fade = splice_fade_filters(out_dur);
+        // The fade-out is placed against the 2s output length, not the 4s source.
+        assert!(fade.contains("st=1.970"), "got {fade}");
+    }
+
+    fn sample_clip() -> EditClip {
+        EditClip {
+            start_seconds: 0.0,
+            end_seconds: 1.0,
+            speed: 1.0,
+            skip_frames: false,
+            fps_override: None,
+            clip_type: None,
+            freeze_source_time: None,
+            freeze_duration: None,
+            image_duration: None,
+            input_path: None,
+            zoom_pan: None,
+        }
+    }
 
     #[test]
     fn atempo_passthrough() {

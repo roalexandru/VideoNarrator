@@ -661,13 +661,16 @@ pub async fn merge_audio_video_with_cancel(
         // expects. Padding (above) already aligns things when narration is
         // LONGER than video; we don't need a second guardrail.
         on_progress(0.0, Some("Replacing audio track".to_string()));
+        // Narration is the whole audio track here, so it is what gets
+        // normalized to the streaming target.
+        let (norm_audio, _norm_cleanup) = normalized_for_mux(Path::new(audio_path)).await;
         let mut cmd = Command::new(ffmpeg.as_os_str());
         cmd.no_window().args([
             "-y",
             "-i",
             effective_video.as_ref(),
             "-i",
-            audio_path,
+            &norm_audio.to_string_lossy(),
             "-c:v",
             "copy",
             "-c:a",
@@ -706,6 +709,7 @@ pub async fn merge_audio_video_with_cancel(
     // stderr-string path below.
     if let Ok(false) = video_engine::probe_has_audio_stream(Path::new(video_path)).await {
         tracing::warn!("Source has no audio — falling back to narration-only mux");
+        let (norm_audio, _norm_cleanup) = normalized_for_mux(Path::new(audio_path)).await;
         let mut cmd = Command::new(ffmpeg.as_os_str());
         cmd.no_window().args([
             "-y",
@@ -715,7 +719,7 @@ pub async fn merge_audio_video_with_cancel(
             "-i",
             effective_video.as_ref(),
             "-i",
-            audio_path,
+            &norm_audio.to_string_lossy(),
             "-c:v",
             "copy",
             "-c:a",
@@ -767,6 +771,7 @@ pub async fn merge_audio_video_with_cancel(
             // original" but there's nothing to mix — produce a narration-only
             // mux and signal it so the UI can warn the user.
             tracing::warn!("Source has no audio — falling back to narration-only mux");
+            let (norm_audio, _norm_cleanup) = normalized_for_mux(Path::new(audio_path)).await;
             let mut cmd = Command::new(ffmpeg.as_os_str());
             cmd.no_window().args([
                 "-y",
@@ -776,7 +781,7 @@ pub async fn merge_audio_video_with_cancel(
                 "-i",
                 video_path,
                 "-i",
-                audio_path,
+                &norm_audio.to_string_lossy(),
                 "-c:v",
                 "copy",
                 "-c:a",
@@ -808,7 +813,14 @@ pub async fn merge_audio_video_with_cancel(
         )));
     }
 
-    on_progress(70.0, Some("Encoding final audio".to_string()));
+    on_progress(70.0, Some("Normalizing loudness".to_string()));
+
+    // Normalize AFTER the mix: ducking and the narration/original gains both
+    // change the level, so measuring either stream on its own would correct to
+    // the wrong target.
+    let (final_audio, _norm_cleanup) = normalized_for_mux(&mixed_wav).await;
+
+    on_progress(80.0, Some("Encoding final audio".to_string()));
 
     // Mux: video stream copied through, audio = the mixed WAV → AAC.
     let mut cmd = Command::new(ffmpeg.as_os_str());
@@ -822,7 +834,7 @@ pub async fn merge_audio_video_with_cancel(
             effective_video.as_ref(),
             "-i",
         ])
-        .arg(&mixed_wav)
+        .arg(&final_audio)
         .args([
             "-map",
             "0:v:0",
@@ -861,6 +873,25 @@ impl Drop for TempCleanup {
         for p in &self.0 {
             let _ = std::fs::remove_file(p);
         }
+    }
+}
+
+/// Normalize `audio` to the streaming loudness target and return the path the
+/// mux should use, plus a guard owning any temp file created.
+///
+/// Falls back to `audio` unchanged whenever normalization is skipped or fails
+/// (see `loudness` for the policy). The guard must stay alive until the mux
+/// finishes, or the normalized WAV is deleted out from under ffmpeg.
+///
+/// Called on the *final* audio for each mux path — after mixing, never before,
+/// since mixing changes the level that needs correcting.
+async fn normalized_for_mux(audio: &Path) -> (PathBuf, TempCleanup) {
+    let candidate =
+        std::env::temp_dir().join(format!("_narrator_loudnorm_{}.wav", uuid::Uuid::new_v4()));
+    match crate::loudness::normalize_to(audio, &candidate).await {
+        Ok(true) => (candidate.clone(), TempCleanup(vec![candidate])),
+        // Skipped or failed: keep the original and leave nothing to clean up.
+        _ => (audio.to_path_buf(), TempCleanup(Vec::new())),
     }
 }
 

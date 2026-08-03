@@ -39,21 +39,13 @@ pub struct NarrationConcatStats {
     pub actual_timings: Vec<crate::export_engine::ActualTiming>,
 }
 
-/// Fade duration applied to the head and tail of each TTS segment before
-/// concat, to suppress the clicks/pops that show up at splice boundaries when
-/// MP3 frames start/end on non-zero samples.
-const FADE_SECONDS: f64 = 0.03;
-
 /// Build the per-segment ffmpeg filter chain: optional atempo compression
 /// followed by afade in/out. Pure function so it can be unit-tested without
 /// invoking ffmpeg.
 ///
-/// Fade duration auto-shrinks to `effective_dur / 2` when the segment is
-/// shorter than `2 × FADE_SECONDS`. Without this, the fade-in window (0..d)
-/// and fade-out window (dur-d..dur) overlap and ffmpeg multiplies the two
-/// envelopes in the overlap region, producing a double-attenuation dip. The
-/// shrink makes fade-in finish exactly when fade-out begins, preserving the
-/// "no pop at splice" property without introducing an audible dip.
+/// The fade pair (including its short-segment shrink) comes from
+/// `compositor::audio::splice_fade_filters` — see there for why the shrink
+/// matters.
 fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
     let mut parts: Vec<String> = Vec::new();
     if applied_speed > 1.0 + f64::EPSILON {
@@ -61,10 +53,7 @@ fn build_segment_filter(applied_speed: f64, effective_dur: f64) -> String {
             parts.push(format!("atempo={f:.4}"));
         }
     }
-    let fade_d = (effective_dur / 2.0).clamp(0.0, FADE_SECONDS);
-    parts.push(format!("afade=t=in:d={fade_d:.3}"));
-    let fade_out_start = (effective_dur - fade_d).max(0.0);
-    parts.push(format!("afade=t=out:st={fade_out_start:.3}:d={fade_d:.3}"));
+    parts.push(crate::compositor::audio::splice_fade_filters(effective_dur));
     parts.join(",")
 }
 
