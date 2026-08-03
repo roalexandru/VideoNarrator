@@ -480,10 +480,17 @@ fn parse_frame_rate(rate: &str) -> f64 {
 /// If that yields too few anchors (static slideshows, screencasts, very
 /// short clips) we fall back to the fixed-interval path that matches the
 /// historical behaviour.
-pub async fn extract_frames(
+/// `anchor_override`, when supplied with at least `MIN_ANCHORS` entries, bypasses
+/// scene detection entirely — used by the model-driven selection path, where the
+/// timestamps were already chosen from a survey and re-deriving them would waste
+/// a full decode pass. Silence detection still runs, because the narration
+/// timeline needs that map however the frames were picked.
+#[allow(clippy::too_many_arguments)]
+pub async fn extract_frames_with_anchors(
     video_path: &Path,
     config: &FrameConfig,
     output_dir: &Path,
+    anchor_override: Option<Vec<f64>>,
     on_frame: impl Fn(Frame) + Send + Sync + 'static,
     on_tick: impl Fn(f64, String) + Send + Sync + 'static,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -511,6 +518,40 @@ pub async fn extract_frames(
     // meaningful — fewer than that and the LLM can't tell scene structure
     // from a handful of samples.
     const MIN_ANCHORS: usize = 3;
+
+    // Model-chosen anchors skip scene detection entirely — re-deriving anchors
+    // we already have would waste a full decode pass. Silence detection still
+    // runs, because the narration timeline needs the map however frames were
+    // picked.
+    if let Some(anchors) = anchor_override.filter(|a| a.len() >= MIN_ANCHORS) {
+        on_tick(
+            0.05,
+            format!("Extracting {} model-selected frames", anchors.len()),
+        );
+        let silence_spans = match probe_has_audio_stream(video_path).await {
+            Ok(true) => detect_silence_spans(&ffmpeg, video_path, &cancel_flag)
+                .await
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let frames = extract_frames_at_anchors(
+            &ffmpeg,
+            video_path,
+            &anchors,
+            &metadata,
+            output_dir,
+            on_frame,
+            on_tick,
+            cancel_flag,
+            hdr,
+        )
+        .await?;
+        return Ok(FrameExtraction {
+            frames,
+            silence_spans,
+        });
+    }
+
     // Silence spans survive the fixed-interval fallback: they describe the
     // audio, not the sampling strategy, and the narration timeline needs them
     // either way.
@@ -574,6 +615,80 @@ pub async fn extract_frames(
         frames,
         silence_spans,
     })
+}
+
+/// Extract a dense, low-resolution survey of the whole video in ONE ffmpeg pass.
+///
+/// Deliberately unlike [`extract_frames_at_anchors`], which spawns a process per
+/// anchor and pays a two-step seek each time for frame accuracy. A survey needs
+/// coverage, not precision: a single `fps=` filter pass over one decode is orders
+/// of magnitude cheaper, and being a few frames off does not matter when the
+/// output is "which timestamps deserve a closer look".
+///
+/// Frames are scaled to `width` and written as `survey_%04d.jpg`.
+pub async fn extract_survey_frames(
+    video_path: &Path,
+    output_dir: &Path,
+    target_count: usize,
+    width: u32,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Vec<Frame>, NarratorError> {
+    let ffmpeg = detect_ffmpeg()?;
+    tokio::fs::create_dir_all(output_dir)
+        .await
+        .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
+
+    let metadata = probe_video(video_path).await?;
+    let (fps, _) = crate::frame_selection::plan_survey(metadata.duration_seconds, target_count);
+    let hdr = needs_hdr_tonemap(video_path).await;
+
+    // Tone map first (if needed), then select, then scale — same ordering rule as
+    // the full-resolution paths.
+    let filter = prepend_hdr_tonemap(&format!("fps={fps:.6},scale={width}:-2"), hdr);
+    let pattern = output_dir.join("survey_%04d.jpg");
+
+    let mut cmd = Command::new(ffmpeg.as_os_str());
+    cmd.no_window()
+        .args(["-nostats", "-hide_banner", "-y", "-i"])
+        .arg(video_path.as_os_str())
+        .args(["-vf", &filter, "-q:v", "4"])
+        .arg(pattern.as_os_str());
+    let output = output_with_cancel(&mut cmd, &cancel).await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(NarratorError::FfmpegFailed(
+            stderr.lines().rev().take(3).collect::<Vec<_>>().join("\n"),
+        ));
+    }
+
+    // Map each emitted file back to the timestamp it represents. ffmpeg numbers
+    // them 1..N in order, and `fps=` spaces them evenly at 1/fps.
+    let interval = if fps > 0.0 { 1.0 / fps } else { 1.0 };
+    let mut frames = Vec::new();
+    for i in 0.. {
+        let path = output_dir.join(format!("survey_{:04}.jpg", i + 1));
+        if !path.is_file() {
+            break;
+        }
+        let Some((w, h)) = get_image_dimensions(&path) else {
+            continue;
+        };
+        frames.push(Frame {
+            index: i,
+            timestamp_seconds: (i as f64 * interval).min(metadata.duration_seconds.max(0.0)),
+            path,
+            width: w,
+            height: h,
+        });
+    }
+
+    tracing::info!(
+        "survey pass: {} frames at {width}px over {:.1}s (one decode)",
+        frames.len(),
+        metadata.duration_seconds
+    );
+    Ok(frames)
 }
 
 /// What one extraction pass learned about the source.

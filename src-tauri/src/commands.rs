@@ -6,8 +6,8 @@ use crate::render;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
-    export_verify, frame_cache, preferences, project_store, screen_recorder, video_edit,
-    video_engine,
+    export_verify, frame_cache, frame_selection, preferences, project_store, screen_recorder,
+    video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -715,13 +715,37 @@ pub async fn generate_narration(
                 .await
                 .map_err(|e| NarratorError::FrameExtractionError(e.to_string()))?;
 
+            // Optional survey pass: one cheap low-resolution decode of the whole
+            // video, tiled and shown to the model, so it picks which moments earn
+            // the expensive frame-accurate extraction. Any failure here returns
+            // None and the normal anchor path runs unchanged.
+            let selected_moments = if params.use_model_frame_selection {
+                channel
+                    .send(ProgressEvent::progress_msg(
+                        2.0,
+                        "Surveying the video to choose key moments",
+                    ))
+                    .ok();
+                survey_and_select(
+                    &params,
+                    provider.as_ref(),
+                    &work_dir,
+                    &frame_config,
+                    state.cancel_flag.clone(),
+                )
+                .await
+            } else {
+                None
+            };
+
             let channel_for_frames = channel.clone();
             let channel_for_ticks = channel.clone();
             let work_dir_cleanup = work_dir.clone();
-            let extracted = match video_engine::extract_frames(
+            let extracted = match video_engine::extract_frames_with_anchors(
                 Path::new(&params.video_path),
                 &frame_config,
                 &work_dir,
+                selected_moments,
                 move |frame| {
                     channel_for_frames
                         .send(ProgressEvent::FrameExtracted {
@@ -2337,6 +2361,63 @@ pub async fn list_project_frames(project_id: String) -> Result<Vec<ProjectFrame>
     .await
     .map_err(|e| NarratorError::ProjectError(e.to_string()))??;
     Ok(frames)
+}
+
+/// Run the survey pass and return the timestamps the model chose.
+///
+/// Returns `None` on any failure, which makes the caller fall back to the normal
+/// scene/silence anchor path. Survey frames go in a `survey/` subdirectory of the
+/// extraction work dir, so they are cleaned up with it and never promoted
+/// alongside the real frames.
+async fn survey_and_select(
+    params: &GenerationParams,
+    provider: &dyn ai_client::AiProvider,
+    work_dir: &Path,
+    frame_config: &FrameConfig,
+    cancel: Arc<AtomicBool>,
+) -> Option<Vec<f64>> {
+    // Probed here rather than passed in: the caller's `video_metadata` is not
+    // resolved until after extraction.
+    let duration = video_engine::probe_video(Path::new(&params.video_path))
+        .await
+        .ok()?
+        .duration_seconds;
+
+    let survey_dir = work_dir.join("survey");
+    let survey_frames = match video_engine::extract_survey_frames(
+        Path::new(&params.video_path),
+        &survey_dir,
+        frame_selection::SURVEY_FRAME_COUNT,
+        frame_selection::SURVEY_FRAME_WIDTH,
+        Some(cancel),
+    )
+    .await
+    {
+        Ok(frames) => frames,
+        Err(e) => {
+            tracing::warn!("survey extraction failed, using anchor detection: {e}");
+            return None;
+        }
+    };
+
+    // The survey pass runs before silence detection, so it has no map to share.
+    let moments = frame_selection::select_moments(
+        provider,
+        &survey_frames,
+        duration,
+        frame_config.max_frames,
+        &[],
+    )
+    .await?;
+
+    for moment in &moments {
+        tracing::debug!("survey picked {:.1}s — {}", moment.timestamp, moment.reason);
+    }
+    // Survey JPEGs have served their purpose; drop them before the real
+    // extraction writes into the same work dir.
+    let _ = tokio::fs::remove_dir_all(&survey_dir).await;
+
+    Some(moments.into_iter().map(|m| m.timestamp).collect())
 }
 
 // ── Export commands ──

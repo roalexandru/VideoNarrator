@@ -453,6 +453,20 @@ pub struct GenerationParams {
     /// opt-in rather than silently changing every generation.
     #[serde(default)]
     pub use_contact_sheets: bool,
+    /// Let the model choose which moments to extract at full resolution.
+    ///
+    /// Replaces the even-spaced subsample in `merge_anchors` with a cheap survey
+    /// pass: one low-resolution decode covering the whole video, tiled into
+    /// contact sheets, and one structured call asking which timestamps carry
+    /// meaningful change. Only the chosen moments then pay the expensive
+    /// frame-accurate extraction.
+    ///
+    /// Off by default: it adds an API call before any narration is generated,
+    /// and the quality win depends on the model picking well — which is worth
+    /// measuring on real footage before it becomes the default. Any failure in
+    /// the survey falls back to today's even-spaced selection.
+    #[serde(default)]
+    pub use_model_frame_selection: bool,
 }
 
 // ── Export ──
