@@ -7,7 +7,7 @@ use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, cost_estimate, doc_processor, elevenlabs_client,
     export_engine, export_verify, frame_cache, frame_selection, preferences, project_store,
-    screen_recorder, video_edit, video_engine,
+    screen_recorder, screen_text, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -904,8 +904,26 @@ pub async fn generate_narration(
             .await
             .unwrap_or_default()
     };
+    // Read what is actually on screen. Runs over the full-resolution frames on
+    // disk, not the downscaled copies sent to the model, since recovering small
+    // UI text is the entire point.
+    let screen_text_block = if params.use_screen_text {
+        channel
+            .send(ProgressEvent::progress_msg(28.0, "Reading on-screen text"))
+            .ok();
+        let frames_for_ocr = frames.clone();
+        tokio::task::spawn_blocking(move || {
+            let backend = screen_text::platform_backend();
+            screen_text::build_text_layer(&frames_for_ocr, backend.as_ref())
+        })
+        .await
+        .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     let system_prompt = format!(
-        "{system_prompt}{}{preference_block}",
+        "{system_prompt}{}{preference_block}{screen_text_block}",
         ai_client::describe_silence_windows(&silence_spans, video_metadata.duration_seconds)
     );
     // build_user_message reads frame files from disk and base64-encodes them (CPU+IO bound)

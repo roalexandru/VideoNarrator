@@ -27,6 +27,7 @@ mod project_store;
 mod render;
 mod response_schema;
 mod screen_recorder;
+mod screen_text;
 mod script_validator;
 mod secure_store;
 mod speech_rate;
