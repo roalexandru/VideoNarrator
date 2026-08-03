@@ -102,25 +102,15 @@ impl AiProvider for ClaudeProvider {
                 })
                 .unwrap_or_default();
             Ok(text)
-        } else if status.as_u16() == 429 || status.as_u16() == 529 {
-            Err(NarratorError::RateLimited)
         } else {
             let error_text = resp.text().await.unwrap_or_default();
             tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-            let api_msg = parse_api_error_message(&error_text);
-            let hint = match status.as_u16() {
-                401 | 403 => "Check that your Anthropic API key is valid.",
-                400 => "The request was rejected — usually a model or parameter mismatch.",
-                _ => "See the details below.",
-            };
-            let detail: String = if api_msg.is_empty() {
-                truncate_chars(&error_text, 240).into_owned()
-            } else {
-                api_msg
-            };
-            Err(NarratorError::ApiError(format!(
-                "Claude API error (HTTP {status}). {hint}\n\n{detail}"
-            )))
+            Err(classify_error_response(
+                status.as_u16(),
+                &error_text,
+                "Claude",
+                "Anthropic",
+            ))
         }
     }
 
@@ -156,6 +146,96 @@ fn parse_api_error_message(body: &str) -> String {
         .ok()
         .and_then(|v| v["error"]["message"].as_str().map(|s| s.to_string()))
         .unwrap_or_default()
+}
+
+/// Best-effort: does this error body describe a billing / credit / quota
+/// problem rather than a transient rate limit? Providers surface these
+/// inconsistently and often UNDER a 429 — OpenAI returns `insufficient_quota`,
+/// Anthropic a low-credit-balance message — so we classify by content, not
+/// status alone. A billing problem is permanent until the user acts: treating
+/// it as a rate limit shows "wait and try again" and sends users in circles.
+fn looks_like_billing_error(body: &str) -> bool {
+    let m = body.to_lowercase();
+    m.contains("credit balance")
+        || m.contains("insufficient_quota")
+        || m.contains("insufficient quota")
+        || m.contains("insufficient funds")
+        || m.contains("insufficient credit")
+        || m.contains("out of credits")
+        || m.contains("billing")
+        || m.contains("payment")
+        || m.contains("exceeded your current quota")
+        || m.contains("plans & billing")
+        || m.contains("purchase credits")
+        || m.contains("spending limit")
+        || m.contains("spend limit")
+        || m.contains("\"billing_error\"")
+}
+
+/// Turn a 402/429/529 response into the right error. 402 is always a billing
+/// problem; 429/529 are rate limits UNLESS the body reads as billing/quota.
+/// Reads the body so the provider's own explanation reaches the user instead
+/// of a generic message. `provider` labels the message ("Claude" / "OpenAI" …).
+fn classify_rate_or_billing(status: u16, body: &str, provider: &str) -> NarratorError {
+    let api_msg = parse_api_error_message(body);
+    let detail = if api_msg.is_empty() {
+        truncate_chars(body, 240).into_owned()
+    } else {
+        api_msg
+    };
+    if status == 402 || looks_like_billing_error(&detail) || looks_like_billing_error(body) {
+        let detail = if detail.trim().is_empty() {
+            "your account has no usable credit".to_string()
+        } else {
+            detail
+        };
+        NarratorError::InsufficientCredit(format!(
+            "{provider} rejected the request — {detail} \
+             Add credit or fix billing in the provider's console, then try again."
+        ))
+    } else {
+        NarratorError::RateLimited
+    }
+}
+
+/// Turn any non-success HTTP status + body into the right `NarratorError`.
+/// Shared by all three providers so their error semantics stay identical:
+///   - billing/credit/quota wording on ANY status → `InsufficientCredit`
+///     (Anthropic ships low-credit as a 400, OpenAI as a 429, so the status
+///     alone can't decide — classification keys off the body)
+///   - a plain 402 → `InsufficientCredit`
+///   - a plain 429/529 → `RateLimited` (transient, retryable)
+///   - everything else → a generic, provider-labelled `ApiError` with a hint
+///
+/// `provider` names the product for the message ("Claude"); `key_vendor` names
+/// whose key the 401/403 hint should point at ("Anthropic").
+fn classify_error_response(
+    status: u16,
+    body: &str,
+    provider: &str,
+    key_vendor: &str,
+) -> NarratorError {
+    // Billing on any status, then plain rate limits, then the generic path.
+    if status == 402 || looks_like_billing_error(body) {
+        return classify_rate_or_billing(status, body, provider);
+    }
+    if matches!(status, 429 | 529) {
+        return NarratorError::RateLimited;
+    }
+    let api_msg = parse_api_error_message(body);
+    let hint = match status {
+        401 | 403 => format!("Check that your {key_vendor} API key is valid."),
+        400 => "The request was rejected — usually a model or parameter mismatch.".to_string(),
+        _ => "See the details below.".to_string(),
+    };
+    let detail = if api_msg.is_empty() {
+        truncate_chars(body, 240).into_owned()
+    } else {
+        api_msg
+    };
+    NarratorError::ApiError(format!(
+        "{provider} API error (HTTP {status}). {hint}\n\n{detail}"
+    ))
 }
 
 pub struct OpenAiProvider {
@@ -250,28 +330,15 @@ impl AiProvider for OpenAiProvider {
                 .unwrap_or("")
                 .to_string();
             Ok(text)
-        } else if status.as_u16() == 429 {
-            Err(NarratorError::RateLimited)
         } else {
             let error_text = resp.text().await.unwrap_or_default();
             tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-            let api_msg = parse_api_error_message(&error_text);
-            // 401/403 really is auth; 400 etc. is usually a malformed
-            // request (model, temperature, etc.) — don't say "check
-            // your key" when it's actually a shape problem.
-            let hint = match status.as_u16() {
-                401 | 403 => "Check that your OpenAI API key is valid.",
-                400 => "The request was rejected — usually a model or parameter mismatch.",
-                _ => "See the details below.",
-            };
-            let detail: String = if api_msg.is_empty() {
-                truncate_chars(&error_text, 240).into_owned()
-            } else {
-                api_msg
-            };
-            Err(NarratorError::ApiError(format!(
-                "OpenAI API error (HTTP {status}). {hint}\n\n{detail}"
-            )))
+            Err(classify_error_response(
+                status.as_u16(),
+                &error_text,
+                "OpenAI",
+                "OpenAI",
+            ))
         }
     }
 
@@ -370,25 +437,15 @@ impl AiProvider for GeminiProvider {
                 .unwrap_or("")
                 .to_string();
             Ok(text)
-        } else if status.as_u16() == 429 {
-            Err(NarratorError::RateLimited)
         } else {
             let error_text = resp.text().await.unwrap_or_default();
             tracing::error!("API error ({status}): {}", truncate_chars(&error_text, 400));
-            let api_msg = parse_api_error_message(&error_text);
-            let hint = match status.as_u16() {
-                401 | 403 => "Check that your Google API key is valid.",
-                400 => "The request was rejected — usually a model or parameter mismatch.",
-                _ => "See the details below.",
-            };
-            let detail: String = if api_msg.is_empty() {
-                truncate_chars(&error_text, 240).into_owned()
-            } else {
-                api_msg
-            };
-            Err(NarratorError::ApiError(format!(
-                "Gemini API error (HTTP {status}). {hint}\n\n{detail}"
-            )))
+            Err(classify_error_response(
+                status.as_u16(),
+                &error_text,
+                "Gemini",
+                "Google",
+            ))
         }
     }
 
@@ -639,6 +696,7 @@ async fn generate_chunked(
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<String, NarratorError> {
     let parts = user_message
         .as_array()
@@ -833,13 +891,17 @@ async fn generate_chunked(
 
         let chunk_label = format!("Analyzing batch {} of {num_chunks}", chunk_idx + 1);
         let chunk_fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0);
-        let response = with_heartbeat(
-            &on_progress,
-            chunk_fraction,
-            chunk_label,
-            generate_with_retry(provider, system_prompt, chunk_message),
-        )
-        .await?;
+        // `RetryContext` owns both the in-flight heartbeat and the rate-limit
+        // countdown, so we no longer wrap this in `with_heartbeat` — that would
+        // repaint "· Ns elapsed" over the countdown message every 1.5s.
+        let ctx = on_progress.clone().map(|cb| RetryContext {
+            on_progress: cb,
+            fraction: chunk_fraction,
+            label: chunk_label,
+            cancel: cancel.clone(),
+        });
+        let response =
+            generate_with_retry(provider, system_prompt, chunk_message, ctx.as_ref()).await?;
 
         // Parse the chunk response
         let json_text = response
@@ -1212,6 +1274,11 @@ fn contains_status_code(msg: &str, code: u16) -> bool {
 /// status codes 429/529 as isolated numbers, and the textual variants
 /// providers use.
 fn is_rate_limit_error(err: &NarratorError) -> bool {
+    // A billing/credit problem is permanent until the user acts — never retry
+    // it, even if its detail text happens to mention a limit.
+    if matches!(err, NarratorError::InsufficientCredit(_)) {
+        return false;
+    }
     if matches!(err, NarratorError::RateLimited) {
         return true;
     }
@@ -1250,11 +1317,29 @@ fn prepend_retry_feedback(user_message: serde_json::Value, feedback: &str) -> se
     }
 }
 
+/// Progress + cancellation context for `generate_with_retry`. When present, the
+/// retry wrapper reports a live per-second countdown during rate-limit backoff
+/// ("Rate limited — retrying in 42s") instead of leaving the bar frozen on the
+/// caller's last label, and it checks the cancel flag each second so Cancel is
+/// honored mid-wait rather than after the full 110s of backoff has elapsed. It
+/// also drives the in-flight `· Ns elapsed` heartbeat, so callers pass this
+/// INSTEAD of wrapping the call in `with_heartbeat` (doing both would let the
+/// heartbeat clobber the countdown message every 1.5s).
+struct RetryContext {
+    on_progress: ProgressCallback,
+    /// Narration-stage fraction (0..=1) to hold the bar at while retrying.
+    fraction: f64,
+    /// Label for the in-flight heartbeat ("Analyzing batch 1 of 2").
+    label: String,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
 /// Call an AI provider with exponential backoff on rate limit errors.
 async fn generate_with_retry(
     provider: &dyn AiProvider,
     system_prompt: &str,
     user_message: serde_json::Value,
+    ctx: Option<&RetryContext>,
 ) -> Result<String, NarratorError> {
     let max_retries = 4;
     let delays = [5, 15, 30, 60]; // seconds — aggressive backoff for rate limits
@@ -1265,9 +1350,41 @@ async fn generate_with_retry(
             tracing::warn!(
                 "Rate limited by API provider. Waiting {delay_secs}s before retry (attempt {attempt}/{max_retries})"
             );
-            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            match ctx {
+                // Visible, cancellable countdown: emit one message per second so
+                // the user sees the wait tick down and can Cancel it.
+                Some(c) => {
+                    for remaining in (1..=delay_secs).rev() {
+                        if crate::cancel::is_cancelled(&c.cancel) {
+                            return Err(NarratorError::Cancelled);
+                        }
+                        (c.on_progress)(
+                            c.fraction,
+                            Some(format!(
+                                "Rate limited — retrying in {remaining}s (attempt {attempt} of {max_retries})"
+                            )),
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+                None => tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await,
+            }
         }
-        match provider.generate(system_prompt, user_message.clone()).await {
+        // Run the call, driving the in-flight heartbeat when we have a context.
+        let call = provider.generate(system_prompt, user_message.clone());
+        let outcome = match ctx {
+            Some(c) => {
+                with_heartbeat(
+                    &Some(c.on_progress.clone()),
+                    c.fraction,
+                    c.label.clone(),
+                    call,
+                )
+                .await
+            }
+            None => call.await,
+        };
+        match outcome {
             Ok(text) => return Ok(text),
             Err(e) if is_rate_limit_error(&e) && attempt < max_retries => {
                 tracing::warn!("Rate limit error: {e}");
@@ -1299,6 +1416,7 @@ pub async fn generate_narration(
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<NarrationScript, NarratorError> {
     // First pass.
     let mut script = generate_narration_once(
@@ -1308,6 +1426,7 @@ pub async fn generate_narration(
         resume_segments.clone(),
         on_segment.clone(),
         on_progress.clone(),
+        cancel.clone(),
     )
     .await?;
 
@@ -1356,6 +1475,7 @@ pub async fn generate_narration(
             Vec::new(),
             None,
             on_progress,
+            cancel.clone(),
         )
         .await
         {
@@ -1408,6 +1528,7 @@ async fn generate_narration_once(
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<NarrationScript, NarratorError> {
     // Check if the message has too many image parts — if so, chunk it
     let parts = user_message.as_array();
@@ -1425,6 +1546,7 @@ async fn generate_narration_once(
             resume_segments,
             on_segment.clone(),
             on_progress.clone(),
+            cancel.clone(),
         )
         .await?
     } else {
@@ -1435,7 +1557,15 @@ async fn generate_narration_once(
         if let Some(cb) = on_progress.as_ref() {
             cb(0.05, Some("Generating narration with AI…".to_string()));
         }
-        generate_with_retry(provider, system_prompt, user_message).await?
+        // Same visible/cancellable backoff as the chunked path, anchored at the
+        // 5% kickoff mark.
+        let ctx = on_progress.clone().map(|cb| RetryContext {
+            on_progress: cb,
+            fraction: 0.05,
+            label: "Generating narration with AI…".to_string(),
+            cancel: cancel.clone(),
+        });
+        generate_with_retry(provider, system_prompt, user_message, ctx.as_ref()).await?
     };
 
     // Try to parse the JSON response
@@ -1638,7 +1768,7 @@ pub async fn polish_script(
         .map_err(|e| NarratorError::SerializationError(e.to_string()))?;
     let user_message = json!(script_json);
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
+    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
     let json_text = response_text
         .trim()
         .trim_start_matches("```json")
@@ -1682,7 +1812,7 @@ pub async fn translate_script(
 
     let user_message = json!(script_json);
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
+    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
 
     let json_text = response_text
         .trim()
@@ -2046,7 +2176,7 @@ async fn run_critique(
     // Goes through the same retry layer as every other AI call. Without this,
     // critique would skip the rate-limit backoff and surface a transient 429
     // as "self-critique skipped".
-    let response = generate_with_retry(provider, system_prompt, user_message).await?;
+    let response = generate_with_retry(provider, system_prompt, user_message, None).await?;
     parse_critique_response(&response)
 }
 
@@ -2149,7 +2279,7 @@ pub async fn refine_segment(
         Instruction: {instruction}"
     ));
 
-    let response = generate_with_retry(provider, system_prompt, user_message).await?;
+    let response = generate_with_retry(provider, system_prompt, user_message, None).await?;
 
     // Clean up: remove any accidental quotes, markdown, or explanations
     let refined = response
@@ -2256,7 +2386,7 @@ pub async fn refine_script(
         script_json
     ));
 
-    let response_text = generate_with_retry(provider, &system_prompt, user_message).await?;
+    let response_text = generate_with_retry(provider, &system_prompt, user_message, None).await?;
     let json_text = response_text
         .trim()
         .trim_start_matches("```json")
@@ -2650,6 +2780,173 @@ mod tests {
         }
     }
 
+    // Always reports a rate limit, to exercise the retry backoff path.
+    struct AlwaysRateLimited;
+
+    #[async_trait]
+    impl AiProvider for AlwaysRateLimited {
+        async fn generate(
+            &self,
+            _system_prompt: &str,
+            _user_message: serde_json::Value,
+        ) -> Result<String, NarratorError> {
+            Err(NarratorError::RateLimited)
+        }
+        fn name(&self) -> &str {
+            "always-rate-limited"
+        }
+        fn model(&self) -> &str {
+            "mock-v1"
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_backoff_emits_countdown_and_honors_cancel() {
+        use std::sync::Mutex;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_from_cb = cancel.clone();
+        let messages: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let messages_cb = messages.clone();
+        // Flip the cancel flag as soon as the first countdown message lands.
+        // The loop checks the flag at the top of each 1s tick, so this proves
+        // the wait is interruptible mid-backoff instead of blocking the full 5s
+        // (and that a visible message is emitted before the sleep).
+        let cb: ProgressCallback = Arc::new(move |_frac, msg| {
+            if let Some(m) = msg {
+                messages_cb.lock().unwrap().push(m);
+                cancel_from_cb.store(true, Ordering::SeqCst);
+            }
+        });
+        let ctx = RetryContext {
+            on_progress: cb,
+            fraction: 0.3,
+            label: "Analyzing batch 1 of 2".to_string(),
+            cancel: Some(cancel),
+        };
+
+        let result = generate_with_retry(&AlwaysRateLimited, "sys", json!("msg"), Some(&ctx)).await;
+
+        // First call rate-limits → backoff; cancel set during the countdown
+        // surfaces Cancelled rather than exhausting all four retries.
+        assert!(matches!(result, Err(NarratorError::Cancelled)));
+        let msgs = messages.lock().unwrap();
+        assert!(
+            msgs.iter().any(|m| m.contains("Rate limited — retrying")),
+            "expected a visible rate-limit countdown message, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn test_billing_vs_rate_limit_classification() {
+        // OpenAI surfaces no-credit as a 429 with insufficient_quota.
+        let openai_quota = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota"}}"#;
+        assert!(matches!(
+            classify_rate_or_billing(429, openai_quota, "OpenAI"),
+            NarratorError::InsufficientCredit(_)
+        ));
+
+        // Anthropic returns low-credit as a 400 invalid_request_error, NOT a
+        // 402/429 — classification must key off the body, not the status.
+        let anthropic_credit = r#"{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}"#;
+        assert!(matches!(
+            classify_rate_or_billing(400, anthropic_credit, "Claude"),
+            NarratorError::InsufficientCredit(_)
+        ));
+        assert!(looks_like_billing_error(anthropic_credit));
+
+        // A 402 is always billing, even with an empty/opaque body.
+        assert!(matches!(
+            classify_rate_or_billing(402, "", "Claude"),
+            NarratorError::InsufficientCredit(_)
+        ));
+
+        // A genuine rate limit stays retryable.
+        let real_rate_limit = r#"{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit."}}"#;
+        let classified = classify_rate_or_billing(429, real_rate_limit, "Claude");
+        assert!(matches!(classified, NarratorError::RateLimited));
+
+        // Billing errors must never enter the retry backoff; rate limits must.
+        assert!(!is_rate_limit_error(&NarratorError::InsufficientCredit(
+            "out of credit".into()
+        )));
+        assert!(is_rate_limit_error(&NarratorError::RateLimited));
+
+        // Cross-language contract: the serialized error (error.rs serializes via
+        // Display) MUST carry this exact prefix — the frontend's toUserMessage /
+        // isBillingError key off "credit or billing problem". Don't change one
+        // side without the other.
+        assert!(NarratorError::InsufficientCredit("x".into())
+            .to_string()
+            .starts_with("API credit or billing problem:"));
+    }
+
+    /// Exercises the exact status→variant wiring each provider now shares,
+    /// using the real error bodies the three vendors return. This is the seam
+    /// that misclassified a no-credit account as a rate limit.
+    #[test]
+    fn test_classify_error_response_wiring() {
+        // OpenAI: no-credit is a 429 with insufficient_quota → billing, retryable=false.
+        let openai_429 = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}"#;
+        let e = classify_error_response(429, openai_429, "OpenAI", "OpenAI");
+        assert!(matches!(e, NarratorError::InsufficientCredit(_)));
+        assert!(!is_rate_limit_error(&e), "billing must not be retried");
+        assert!(e.to_string().to_lowercase().contains("billing"));
+
+        // Anthropic: no-credit is a 400 invalid_request_error → billing.
+        let anthropic_400 = r#"{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}"#;
+        assert!(matches!(
+            classify_error_response(400, anthropic_400, "Claude", "Anthropic"),
+            NarratorError::InsufficientCredit(_)
+        ));
+
+        // Anthropic 402 billing_error (empty/opaque body still classifies).
+        assert!(matches!(
+            classify_error_response(402, "", "Claude", "Anthropic"),
+            NarratorError::InsufficientCredit(_)
+        ));
+
+        // A genuine per-minute rate limit stays retryable.
+        let claude_429 = r#"{"error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your per-minute rate limit."}}"#;
+        let e = classify_error_response(429, claude_429, "Claude", "Anthropic");
+        assert!(matches!(e, NarratorError::RateLimited));
+        assert!(is_rate_limit_error(&e));
+
+        // 529 overloaded is transient/retryable.
+        assert!(is_rate_limit_error(&classify_error_response(
+            529,
+            r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            "Claude",
+            "Anthropic"
+        )));
+
+        // 401 → auth hint naming the right vendor, NOT retried, NOT billing.
+        let e = classify_error_response(
+            401,
+            r#"{"error":{"message":"invalid x-api-key"}}"#,
+            "Claude",
+            "Anthropic",
+        );
+        assert!(matches!(e, NarratorError::ApiError(_)));
+        assert!(e.to_string().contains("Anthropic API key"));
+        assert!(!is_rate_limit_error(&e));
+
+        // 400 model/param mismatch → generic ApiError, not billing.
+        let e = classify_error_response(
+            400,
+            r#"{"error":{"message":"model: unknown model 'xyz'"}}"#,
+            "OpenAI",
+            "OpenAI",
+        );
+        assert!(matches!(e, NarratorError::ApiError(_)));
+        assert!(e.to_string().contains("mismatch"));
+
+        // 500 → generic server error, retryable via the 5xx text path.
+        assert!(matches!(
+            classify_error_response(500, "internal error", "Gemini", "Google"),
+            NarratorError::ApiError(_)
+        ));
+    }
+
     #[tokio::test]
     async fn test_generate_narration_parse_valid_json() {
         let valid_response = r#"{
@@ -2701,6 +2998,7 @@ mod tests {
             vec![],
             None,
             None,
+            None,
         )
         .await;
 
@@ -2732,6 +3030,7 @@ mod tests {
             vec![],
             None,
             None,
+            None,
         )
         .await;
 
@@ -2756,6 +3055,7 @@ mod tests {
             "test",
             "en",
             vec![],
+            None,
             None,
             None,
         )
@@ -3154,9 +3454,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2, &r3, &polish_response]);
 
         let msg = user_msg_with_frames(25, 1.0);
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // 3 chunk calls + 1 polish call
         assert_eq!(provider.captured().len(), 4);
@@ -3196,9 +3506,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0); // 2 chunks
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // The "backwards jump" segment must NOT appear before chunk1's segments
         for w in result.segments.windows(2) {
@@ -3219,9 +3539,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let calls = provider.captured();
         assert_eq!(calls.len(), 2);
@@ -3259,9 +3589,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         // The out-of-range segment shouldn't survive
         assert!(
@@ -3289,9 +3629,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(provider.captured().len(), 1);
         assert_eq!(result.segments.len(), 3);
@@ -3310,9 +3660,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let calls = provider.captured();
         assert_eq!(calls.len(), 2);
@@ -3491,9 +3851,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .expect("must not panic on multibyte text");
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("must not panic on multibyte text");
         // Monotonic order preserved
         for w in result.segments.windows(2) {
             assert!(w[0].end_seconds <= w[1].start_seconds + 0.01);
@@ -3511,9 +3881,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].text, "only segment");
     }
@@ -3532,9 +3912,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(3, 5.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "ja", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "ja",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.segments.len(), 3);
         assert_eq!(result.segments[0].text, "セグメント 1 🎬");
     }
@@ -3546,9 +3936,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&resp]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // Exactly one call — confirms the threshold check is `>` not `>=`
         assert_eq!(provider.captured().len(), 1);
     }
@@ -3561,9 +3961,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(MAX_FRAMES_PER_CALL + 1, 1.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(provider.captured().len(), 2);
     }
 
@@ -3584,8 +3994,18 @@ mod tests {
         }
         let msg = serde_json::Value::Array(parts);
 
-        let result =
-            generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None).await;
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(
             result.is_ok(),
             "should still succeed with unparseable timestamps"
@@ -3599,9 +4019,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, "NOT JSON AT ALL"]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let err = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap_err();
+        let err = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
         let err_str = err.to_string();
         assert!(
             err_str.contains("chunk 2") || err_str.contains("parse"),
@@ -3617,9 +4047,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let first_call_text: String = provider.captured()[0]
             .as_array()
             .unwrap()
@@ -3642,9 +4082,19 @@ mod tests {
         let provider = ScriptedProvider::new(vec![&r1, &r2]);
         let msg = user_msg_with_frames(15, 2.0);
 
-        let result = generate_narration(&provider, "sys", msg, "test", "en", vec![], None, None)
-            .await
-            .unwrap();
+        let result = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         // Should succeed with empty segments — not crash
         assert_eq!(result.segments.len(), 0);
     }
@@ -3679,9 +4129,19 @@ mod tests {
             sink.lock().unwrap().push((f, m));
         });
 
-        generate_narration(&provider, "sys", msg, "test", "en", vec![], None, Some(cb))
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            vec![],
+            None,
+            Some(cb),
+            None,
+        )
+        .await
+        .unwrap();
 
         let ticks = captured.lock().unwrap();
         assert!(!ticks.is_empty(), "no progress ticks were captured");
@@ -3775,9 +4235,19 @@ mod tests {
             sink.lock().unwrap().push((f, m));
         });
 
-        generate_narration(&provider, "sys", msg, "test", "en", resume, None, Some(cb))
-            .await
-            .unwrap();
+        generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            resume,
+            None,
+            Some(cb),
+            None,
+        )
+        .await
+        .unwrap();
 
         let ticks = captured.lock().unwrap();
         // The first emitted tick should be the resume-cutoff jump, not 0.0.

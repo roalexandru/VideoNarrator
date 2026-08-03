@@ -29,6 +29,33 @@ export function isContextOverflowError(raw: unknown): boolean {
 }
 
 /**
+ * True when the error is a billing / credit / quota problem rather than a
+ * transient rate limit. This is PERMANENT until the user adds credit or fixes
+ * billing, so — like context overflow — callers must skip the rate-limit
+ * cooldown (a "wait 30s and retry" loop can never succeed) and show a
+ * different, actionable message. Providers are inconsistent: Anthropic says
+ * "credit balance too low", OpenAI returns a 429 with "insufficient_quota",
+ * and our backend wraps both as "API credit or billing problem: …".
+ */
+export function isBillingError(raw: unknown): boolean {
+  const msg = typeof raw === "string" ? raw : raw instanceof Error ? raw.message : String(raw);
+  const lower = msg.toLowerCase();
+  return (
+    lower.includes("credit or billing problem") ||
+    lower.includes("credit balance") ||
+    lower.includes("insufficient_quota") ||
+    lower.includes("insufficient quota") ||
+    lower.includes("insufficient credit") ||
+    lower.includes("out of credits") ||
+    lower.includes("exceeded your current quota") ||
+    lower.includes("purchase credits") ||
+    lower.includes("quota") ||
+    lower.includes("billing") ||
+    hasHttpStatus(lower, [402])
+  );
+}
+
+/**
  * True when `lower` contains any of the given HTTP status codes as an
  * isolated number — i.e. with non-digit boundaries on either side. Without
  * this, a backend message like "Description must be 5000 characters or fewer"
@@ -83,14 +110,23 @@ export function toUserMessage(raw: unknown): string {
     return "Authentication failed. Check your API key in Settings.";
   }
 
+  // ── Quota / billing ── (checked BEFORE rate limiting: providers often
+  // surface a no-credit account as a 429 with "insufficient_quota", and this
+  // is permanent — routing it to the rate-limit "wait and retry" message sends
+  // users in circles.)
+  if (isBillingError(raw)) {
+    // The backend builds an actionable, provider-labelled message for these
+    // ("API credit or billing problem: …") — surface it directly rather than
+    // flattening it to something vaguer.
+    if (lower.includes("credit or billing problem")) {
+      return msg.replace(/^api credit or billing problem:\s*/i, "").trim();
+    }
+    return "Your API account is out of credit or has a billing problem. Add credit or update billing in your provider's console, then try again — waiting won't help.";
+  }
+
   // ── Rate limiting ──
   if (hasHttpStatus(lower, [429]) || lower.includes("rate limit") || lower.includes("too many requests")) {
     return "Too many requests — the API provider is rate limiting you. Wait a moment and try again.";
-  }
-
-  // ── Quota / billing ──
-  if (hasHttpStatus(lower, [402]) || lower.includes("quota") || lower.includes("insufficient") || lower.includes("billing")) {
-    return "API quota exceeded or billing issue. Check your account balance with the provider.";
   }
 
   // ── Network errors ──

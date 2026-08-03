@@ -896,6 +896,7 @@ pub async fn generate_narration(
         params.resume_segments.clone(),
         Some(on_segment),
         Some(on_progress_cb),
+        Some(state.cancel_flag.clone()),
     )
     .await;
 

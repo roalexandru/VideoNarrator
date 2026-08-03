@@ -9,7 +9,7 @@ import { startGeneration, cancelGeneration, applyVideoEdits, getHomeDir, getProv
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { buildEditPlan, resolveEditedVideo } from "../../lib/buildEditPlan";
 import { trackEvent, trackError, resetErrorCount } from "../telemetry/analytics";
-import { toUserMessage, isContextOverflowError } from "../../lib/errorMessages";
+import { toUserMessage, isContextOverflowError, isBillingError } from "../../lib/errorMessages";
 import { recommendedMaxFrames, isReasoningModel } from "../../lib/frameBudget";
 import { Button } from "../../components/ui/Button";
 import { ProgressBar } from "../../components/ui/ProgressBar";
@@ -72,12 +72,16 @@ export function ProcessingScreen() {
     // On resume we send them to the backend so completed chunks aren't re-billed.
     const resumeSegments = resume ? useProcessingStore.getState().streamingSegments : [];
     if (resume) {
-      // Preserve streamingSegments; explicitly reset progress (setProgress
+      // Preserve streamingSegments (sent back as resume_segments so completed
+      // chunks aren't re-billed); explicitly reset progress (setProgress
       // treats 0 as explicit reset), clear error + statusMessage so the UI
-      // unblocks.
+      // unblocks. Clear frames too: the backend re-extracts and re-emits every
+      // frame on resume, so keeping the prior run's grid would append
+      // duplicates (19 → 38 → …).
       proc.setError(null);
       proc.setProgress(0);
       proc.setStatusMessage(null);
+      proc.clearFrames();
     } else {
       proc.reset();
     }
@@ -271,11 +275,12 @@ export function ProcessingScreen() {
       proc.setError(errMsg);
       proc.setPhase("error");
       // Rate-limit: enforce a cooldown so rapid retries don't hammer the API.
-      // Context-overflow: do NOT cool down — retry with the same payload will
-      // always fail. The user must change settings (density, docs, model) first.
+      // Context-overflow AND billing/credit: do NOT cool down — retry with the
+      // same payload (or the same empty account) will always fail. The user
+      // must change settings (density, docs, model) or add credit first.
       const errStr = String(err).toLowerCase();
       const isRateLimit = errStr.includes("rate limit") || errStr.includes("429") || errStr.includes("too many requests");
-      if (isRateLimit && !isContextOverflowError(err)) {
+      if (isRateLimit && !isContextOverflowError(err) && !isBillingError(err)) {
         setRateLimitCooldown(30);
       }
     }

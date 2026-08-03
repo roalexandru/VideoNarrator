@@ -19,6 +19,10 @@ interface ProcessingStore {
   setProgress: (pct: number) => void;
   setStatusMessage: (msg: string | null) => void;
   appendFrame: (frame: Frame) => void;
+  /** Drop the extracted-frame grid without touching segments. The resume/retry
+   *  flow calls this before re-running: the backend re-extracts and re-emits
+   *  every frame, so keeping the old ones would append duplicates (19 → 38 …). */
+  clearFrames: () => void;
   appendSegment: (segment: Segment) => void;
   /** Replace the streaming preview with the final, normalized segment list.
    *  Used for the terminal `segments_replaced` progress event so the UI
@@ -49,6 +53,7 @@ export const useProcessingStore = create<ProcessingStore>((set) => ({
   setStatusMessage: (statusMessage) => set({ statusMessage }),
   appendFrame: (frame) =>
     set((state) => ({ frames: [...state.frames, frame] })),
+  clearFrames: () => set({ frames: [] }),
   appendSegment: (segment) =>
     set((state) => ({
       streamingSegments: [...state.streamingSegments, segment],

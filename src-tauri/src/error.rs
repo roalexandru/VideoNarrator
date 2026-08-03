@@ -33,6 +33,13 @@ pub enum NarratorError {
     #[error("Rate limited by API provider. Please wait and try again.")]
     RateLimited,
 
+    /// Billing / credit / quota problem (e.g. Anthropic "credit balance too low",
+    /// OpenAI `insufficient_quota`). Distinct from `RateLimited` because it is
+    /// NOT transient — retrying can't fix it, so it must never enter the
+    /// rate-limit backoff or show a "wait and try again" message.
+    #[error("API credit or billing problem: {0}")]
+    InsufficientCredit(String),
+
     #[error("Project error: {0}")]
     ProjectError(String),
 
