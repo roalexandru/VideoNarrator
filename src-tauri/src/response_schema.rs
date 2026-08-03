@@ -193,6 +193,44 @@ pub fn critique() -> ResponseSchema {
     }
 }
 
+/// Schema for the frame-selection survey pass.
+///
+/// The survey call picks *timestamps*, nothing else — asking for narration in
+/// the same call produces a worse version of both.
+pub fn frame_selection() -> ResponseSchema {
+    ResponseSchema {
+        name: "frame_selection",
+        description: "Choose the video timestamps that deserve a closer look.",
+        schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["moments"],
+            "properties": {
+                "moments": {
+                    "type": "array",
+                    "description": "Selected moments, in ascending time order.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["timestamp", "reason"],
+                        "properties": {
+                            "timestamp": {
+                                "type": "number",
+                                "minimum": 0,
+                                "description": "Seconds from the start of the video."
+                            },
+                            "reason": {
+                                "type": "string",
+                                "description": "Short, concrete reason this moment matters."
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    }
+}
+
 /// Rewrite a canonical schema into Gemini's `responseSchema` dialect.
 ///
 /// Gemini accepts an OpenAPI 3.0 subset, which differs from JSON Schema in
@@ -272,7 +310,7 @@ mod tests {
     /// checked structurally rather than trusted by eye.
     #[test]
     fn canonical_schemas_satisfy_openai_strict_mode() {
-        for named in [narration_script(), critique()] {
+        for named in [narration_script(), critique(), frame_selection()] {
             let mut checked = 0;
             for_each_object(&named.schema, &mut |obj| {
                 checked += 1;
@@ -307,7 +345,7 @@ mod tests {
     /// Anthropic tool names are constrained to `^[a-zA-Z0-9_-]{1,64}$`.
     #[test]
     fn schema_names_are_valid_anthropic_tool_names() {
-        for named in [narration_script(), critique()] {
+        for named in [narration_script(), critique(), frame_selection()] {
             assert!(!named.name.is_empty() && named.name.len() <= 64);
             assert!(
                 named

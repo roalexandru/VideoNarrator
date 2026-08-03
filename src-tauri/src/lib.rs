@@ -15,6 +15,7 @@ mod export_engine;
 mod export_verify;
 mod ffmpeg_progress;
 mod frame_cache;
+mod frame_selection;
 mod http_client;
 mod loudness;
 mod menu;
