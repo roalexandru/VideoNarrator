@@ -6,7 +6,8 @@ use crate::render;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
-    export_verify, frame_cache, project_store, screen_recorder, video_edit, video_engine,
+    export_verify, frame_cache, preferences, project_store, screen_recorder, video_edit,
+    video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -871,8 +872,16 @@ pub async fn generate_narration(
     );
     // Tell the model where the source is quiet, so it places segments in the
     // gaps rather than being corrected into them afterwards.
+    // Standing preferences from earlier refinements on this project, so the next
+    // draft honours them without the user re-teaching the model.
+    let preference_block = {
+        let dir = project_store::get_project_dir(&project_id);
+        tokio::task::spawn_blocking(move || preferences::load(&dir).prompt_block())
+            .await
+            .unwrap_or_default()
+    };
     let system_prompt = format!(
-        "{system_prompt}{}",
+        "{system_prompt}{}{preference_block}",
         ai_client::describe_silence_windows(&silence_spans, video_metadata.duration_seconds)
     );
     // build_user_message reads frame files from disk and base64-encodes them (CPU+IO bound)
@@ -1180,6 +1189,7 @@ pub async fn refine_segment(
     instruction: String,
     context: String,
     ai_config: AiConfig,
+    project_id: Option<String>,
 ) -> Result<String, NarratorError> {
     let keys = state.api_keys.lock().await;
     let api_key = keys
@@ -1188,7 +1198,103 @@ pub async fn refine_segment(
         .clone();
     drop(keys);
     let provider = ai_client::create_provider(&ai_config, api_key);
-    ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await
+    let refined =
+        ai_client::refine_segment(provider.as_ref(), &segment_text, &instruction, &context).await?;
+    // Only recorded once the refinement succeeded: an instruction that errored
+    // out should not become a standing preference.
+    record_preference(
+        project_id.as_deref(),
+        &instruction,
+        preferences::PreferenceSource::SegmentRefinement,
+    );
+    Ok(refined)
+}
+
+/// Append a refine instruction to a project's standing preferences.
+///
+/// Best-effort and non-fatal throughout: the refinement the user asked for has
+/// already succeeded, so a persistence problem must not surface as a failure.
+fn record_preference(
+    project_id: Option<&str>,
+    instruction: &str,
+    source: preferences::PreferenceSource,
+) {
+    let Some(project_id) = project_id else { return };
+    if project_store::validate_project_id(project_id).is_err() {
+        return;
+    }
+    let project_dir = project_store::get_project_dir(project_id);
+    let mut store = preferences::load(&project_dir);
+    if store
+        .record(
+            instruction,
+            source,
+            &chrono::Utc::now().to_rfc3339(),
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .is_none()
+    {
+        return;
+    }
+    if let Err(e) = preferences::save(&project_dir, &store) {
+        tracing::warn!("could not persist narration preference: {e}");
+    }
+}
+
+/// List a project's standing narration preferences.
+#[tauri::command]
+pub async fn list_preferences(
+    project_id: String,
+) -> Result<Vec<preferences::Preference>, NarratorError> {
+    project_store::validate_project_id(&project_id)?;
+    let dir = project_store::get_project_dir(&project_id);
+    tokio::task::spawn_blocking(move || preferences::load(&dir).entries)
+        .await
+        .map_err(|e| NarratorError::ProjectError(e.to_string()))
+}
+
+/// Turn one preference on or off without forgetting it.
+///
+/// Deactivating rather than deleting means a preference the user dismissed is not
+/// re-created the next time they phrase the same instruction.
+#[tauri::command]
+pub async fn set_preference_active(
+    project_id: String,
+    preference_id: String,
+    active: bool,
+) -> Result<(), NarratorError> {
+    project_store::validate_project_id(&project_id)?;
+    let dir = project_store::get_project_dir(&project_id);
+    tokio::task::spawn_blocking(move || {
+        let mut store = preferences::load(&dir);
+        if active {
+            if let Some(entry) = store.entries.iter_mut().find(|e| e.id == preference_id) {
+                entry.active = true;
+            }
+        } else {
+            store.deactivate(&preference_id);
+        }
+        preferences::save(&dir, &store)
+    })
+    .await
+    .map_err(|e| NarratorError::ProjectError(e.to_string()))?
+}
+
+/// Delete a preference outright.
+#[tauri::command]
+pub async fn delete_preference(
+    project_id: String,
+    preference_id: String,
+) -> Result<(), NarratorError> {
+    project_store::validate_project_id(&project_id)?;
+    let dir = project_store::get_project_dir(&project_id);
+    tokio::task::spawn_blocking(move || {
+        let mut store = preferences::load(&dir);
+        store.remove(&preference_id);
+        preferences::save(&dir, &store)
+    })
+    .await
+    .map_err(|e| NarratorError::ProjectError(e.to_string()))?
 }
 
 /// Whole-script AI refinement. Rewrites the entire narration to satisfy a
@@ -1201,6 +1307,7 @@ pub async fn refine_script(
     ai_config: AiConfig,
     style_hint: Option<String>,
     custom_prompt: Option<String>,
+    project_id: Option<String>,
 ) -> Result<NarrationScript, NarratorError> {
     let keys = state.api_keys.lock().await;
     let api_key = keys
@@ -1210,14 +1317,20 @@ pub async fn refine_script(
     drop(keys);
     let provider = ai_client::create_provider(&ai_config, api_key);
     let style = style_hint.as_deref().unwrap_or("professional narration");
-    ai_client::refine_script(
+    let refined = ai_client::refine_script(
         provider.as_ref(),
         &script,
         &instruction,
         style,
         custom_prompt.as_deref(),
     )
-    .await
+    .await?;
+    record_preference(
+        project_id.as_deref(),
+        &instruction,
+        preferences::PreferenceSource::ScriptRefinement,
+    );
+    Ok(refined)
 }
 
 #[tauri::command]

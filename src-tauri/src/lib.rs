@@ -19,6 +19,7 @@ mod http_client;
 mod loudness;
 mod menu;
 mod models;
+mod preferences;
 mod process_utils;
 mod project_store;
 mod render;
@@ -166,6 +167,9 @@ pub fn run() {
             commands::export_script,
             commands::burn_subtitles,
             commands::list_styles,
+            commands::list_preferences,
+            commands::set_preference_active,
+            commands::delete_preference,
             commands::get_telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::track_event,

@@ -363,11 +363,16 @@ fn find_next_version(scripts_dir: &Path, language: &str) -> u32 {
     max_version + 1
 }
 
+/// Directory holding everything about one project.
+///
+/// Callers must have validated `project_id` — see [`validate_project_id`] — since
+/// this joins it straight onto `~/.narrator/projects/`.
+pub fn get_project_dir(project_id: &str) -> PathBuf {
+    get_narrator_dir().join("projects").join(project_id)
+}
+
 pub fn get_project_frames_dir(project_id: &str) -> PathBuf {
-    get_narrator_dir()
-        .join("projects")
-        .join(project_id)
-        .join("frames")
+    get_project_dir(project_id).join("frames")
 }
 
 /// Atomically replace `final_dir` with the freshly-extracted `work_dir`.
