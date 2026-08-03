@@ -4,6 +4,7 @@ use clap::Subcommand;
 use serde_json::{json, Value};
 
 use crate::error::NarratorError;
+use crate::models::RenderQuality;
 use crate::render::{self, SubtitleStyle, VideoEditPlan};
 
 use super::{build_reporter, read_json_arg, ProgressMode};
@@ -72,7 +73,9 @@ pub async fn run(cmd: RenderCmd, progress: ProgressMode) -> Result<Value, Narrat
             output,
         } => {
             let plan: VideoEditPlan = read_json_arg(&plan)?;
-            let path = render::apply_edits(&input, &output, &plan, reporter, None).await?;
+            let path =
+                render::apply_edits(&input, &output, &plan, RenderQuality::Final, reporter, None)
+                    .await?;
             Ok(json!({ "output_path": path }))
         }
         RenderCmd::BurnSubs {

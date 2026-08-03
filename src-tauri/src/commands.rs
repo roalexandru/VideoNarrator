@@ -5,9 +5,9 @@ use crate::models::*;
 use crate::render;
 use crate::secure_store;
 use crate::{
-    ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
-    export_verify, frame_cache, frame_selection, preferences, project_store, screen_recorder,
-    video_edit, video_engine,
+    ai_client, azure_tts_client, builtin_tts, cost_estimate, doc_processor, elevenlabs_client,
+    export_engine, export_verify, frame_cache, frame_selection, preferences, project_store,
+    screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -2227,6 +2227,11 @@ pub async fn apply_video_edits(
     edits: video_edit::VideoEditPlan,
     channel: Channel<ProgressEvent>,
     state: tauri::State<'_, AppState>,
+    // `quality` omitted means `Final`, so existing callers render the
+    // deliverable exactly as before. `Preview`/`Draft` trade resolution and
+    // compression for speed when the user is only checking that an edit looks
+    // right.
+    quality: Option<RenderQuality>,
 ) -> Result<String, NarratorError> {
     // Fresh flag for this operation; the frontend Cancel button flips it via
     // `cancel_video_operation`.
@@ -2244,6 +2249,7 @@ pub async fn apply_video_edits(
         &input_path,
         &output_path,
         &edits,
+        quality.unwrap_or_default(),
         channel_reporter(channel),
         Some(state.cancel_flag.clone()),
     )
@@ -2418,6 +2424,59 @@ async fn survey_and_select(
     let _ = tokio::fs::remove_dir_all(&survey_dir).await;
 
     Some(moments.into_iter().map(|m| m.timestamp).collect())
+}
+
+/// Forecast what a generation will cost before it starts.
+///
+/// Pure arithmetic over the settings plus a duration probe — no API calls, so the
+/// Processing screen can call it on every settings change. `cached_frames` is
+/// resolved here rather than guessed by the frontend, since only the backend
+/// knows whether the frame cache will hit.
+#[tauri::command]
+pub async fn estimate_generation_cost(
+    video_path: String,
+    project_id: String,
+    frame_config: FrameConfig,
+    use_contact_sheets: bool,
+    use_model_frame_selection: bool,
+    strict_mode: bool,
+) -> Result<cost_estimate::GenerationEstimate, NarratorError> {
+    let duration = video_engine::probe_video(Path::new(&video_path))
+        .await
+        .map(|m| m.duration_seconds)
+        .unwrap_or(0.0);
+
+    // Would the frame cache hit? Cheap to answer, and it changes the forecast the
+    // user sees: extraction skipped, token cost unchanged.
+    let cached_frames = match (
+        project_store::validate_project_id(&project_id),
+        compute_media_hash(video_path.clone()).await,
+    ) {
+        (Ok(()), Ok(hash)) => {
+            let dir = project_store::get_project_frames_dir(&project_id);
+            let cfg = frame_config.clone();
+            tokio::task::spawn_blocking(move || frame_cache::load(&dir, &hash, &cfg).is_some())
+                .await
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    Ok(cost_estimate::estimate(
+        &frame_config,
+        cost_estimate::EstimateInputs {
+            duration_seconds: duration,
+            images_per_request: ai_client::MAX_FRAMES_PER_CALL,
+            frames_per_sheet: ai_client::FRAMES_PER_SHEET,
+            tiled: use_contact_sheets,
+            model_selection: use_model_frame_selection,
+            // The real constant now that model-driven selection has landed, so
+            // the estimate can't drift from what the survey pass actually does.
+            survey_frame_count: frame_selection::SURVEY_FRAME_COUNT,
+            strict_mode,
+            cached_frames,
+        },
+    ))
 }
 
 // ── Export commands ──

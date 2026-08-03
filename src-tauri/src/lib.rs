@@ -8,6 +8,7 @@ pub mod cli;
 mod commands;
 mod compositor;
 mod contact_sheet;
+mod cost_estimate;
 mod doc_processor;
 mod elevenlabs_client;
 mod error;
@@ -171,6 +172,7 @@ pub fn run() {
             commands::list_preferences,
             commands::set_preference_active,
             commands::delete_preference,
+            commands::estimate_generation_cost,
             commands::get_telemetry_enabled,
             commands::set_telemetry_enabled,
             commands::track_event,
