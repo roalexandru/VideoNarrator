@@ -657,6 +657,14 @@ pub enum ProgressEvent {
     /// stream.
     #[serde(rename = "segments_replaced")]
     SegmentsReplaced { segments: Vec<Segment> },
+    /// Emitted once after an export finishes, reporting whether the rendered
+    /// file matches what was planned. Advisory — the export has already
+    /// succeeded by the time this arrives, so a failing check is information,
+    /// not an error.
+    #[serde(rename = "export_verified")]
+    ExportVerified {
+        report: crate::export_verify::VerificationReport,
+    },
     #[serde(rename = "error")]
     Error { message: String },
 }

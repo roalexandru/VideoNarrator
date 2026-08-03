@@ -6,7 +6,7 @@ use crate::render;
 use crate::secure_store;
 use crate::{
     ai_client, azure_tts_client, builtin_tts, doc_processor, elevenlabs_client, export_engine,
-    frame_cache, project_store, screen_recorder, video_edit, video_engine,
+    export_verify, frame_cache, project_store, screen_recorder, video_edit, video_engine,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -2327,6 +2327,22 @@ pub async fn burn_subtitles(
 
     let srt_content = export_engine::build_burn_srt(&script, actual_timings.as_deref());
 
+    // Pick a timestamp where a caption is definitely on screen, for the
+    // post-export burn check. The midpoint of a segment is safest: its edges may
+    // have been nudged by normalization or by measured TTS timings.
+    let caption_timestamp = script
+        .segments
+        .first()
+        .map(|s| {
+            let (start, end) = actual_timings
+                .as_deref()
+                .and_then(|ts| ts.iter().find(|t| t.segment_index == s.index))
+                .map(|t| (t.start_seconds, t.end_seconds))
+                .unwrap_or((s.start_seconds, s.end_seconds));
+            0.5 * (start + end)
+        })
+        .filter(|t| t.is_finite() && *t >= 0.0);
+
     // Write SRT to a unique temp file. A shared path next to the output
     // used to race between concurrent exports and could survive a failed
     // burn as a stale file visible to the user.
@@ -2334,6 +2350,7 @@ pub async fn burn_subtitles(
         std::env::temp_dir().join(format!("_narrator_burn_srt_{}.srt", uuid::Uuid::new_v4()));
     tokio::fs::write(&srt_path, &srt_content).await?;
 
+    let verify_channel = channel.clone();
     let result = render::burn_subtitles(
         &video_path,
         &srt_path.to_string_lossy(),
@@ -2348,6 +2365,33 @@ pub async fn burn_subtitles(
     // caller-supplied intermediate if the burn actually succeeded — keep
     // the intermediate around on error so the user has something to inspect.
     let _ = tokio::fs::remove_file(&srt_path).await;
+
+    // Verify BEFORE the intermediate is deleted: proving the burn changed the
+    // pixels requires comparing against the pre-burn video, which is exactly the
+    // file `cleanup_intermediate` removes.
+    if result.is_ok() {
+        let intent = export_verify::ExportIntent {
+            expected_duration: script.total_duration_seconds,
+            narration_expected: true,
+            burn_check: caption_timestamp.map(|t| (std::path::PathBuf::from(&video_path), t)),
+        };
+        match export_verify::verify_export(Path::new(&output_path), &intent).await {
+            Ok(report) => {
+                for check in &report.checks {
+                    if let export_verify::CheckStatus::Fail(detail) = &check.status {
+                        tracing::warn!("export check '{}' failed: {detail}", check.id);
+                    }
+                }
+                verify_channel
+                    .send(ProgressEvent::ExportVerified { report })
+                    .ok();
+            }
+            // Verification is advisory; a probe failure must not fail an export
+            // the user already has on disk.
+            Err(e) => tracing::warn!("export verification could not run: {e}"),
+        }
+    }
+
     if result.is_ok() {
         if let Some(path) = cleanup_intermediate {
             if is_safe_intermediate_path(&path, &output_path) {
