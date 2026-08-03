@@ -508,6 +508,7 @@ pub struct GenerationParams {
     /// opt-in rather than silently changing every generation.
     #[serde(default)]
     pub use_contact_sheets: bool,
+
     /// Let the model choose which moments to extract at full resolution.
     ///
     /// Replaces the even-spaced subsample in `merge_anchors` with a cheap survey
@@ -522,6 +523,18 @@ pub struct GenerationParams {
     /// the survey falls back to today's even-spaced selection.
     #[serde(default)]
     pub use_model_frame_selection: bool,
+    /// Read the text visible on screen and give it to the model.
+    ///
+    /// The system prompt already asks the model to read terminals and code
+    /// editors, but a 1024 px downscaled JPEG often cannot deliver that. OCR over
+    /// the full-resolution frames makes it reliable — the difference between
+    /// "runs a command" and "runs `pnpm tauri dev`".
+    ///
+    /// Off by default: it costs an OCR pass over every frame and adds up to
+    /// ~10 KB to the prompt, and only macOS has a recognizer wired up so far.
+    /// Where no backend exists the flag is inert rather than broken.
+    #[serde(default)]
+    pub use_screen_text: bool,
 }
 
 // ── Export ──

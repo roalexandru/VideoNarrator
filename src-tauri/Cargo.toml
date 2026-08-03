@@ -71,7 +71,25 @@ windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "W
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem"] }
-objc2-foundation = { version = "0.3", features = ["NSString"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSArray", "NSDictionary"] }
+# On-screen text recognition via the Vision framework (see screen_text.rs).
+# Nothing is bundled: Vision ships with macOS.
+objc2 = "0.6"
+objc2-vision = { version = "0.3", features = [
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "objc2-core-graphics",
+    "block2",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGImage",
+    "CGDataProvider",
+    "CGColorSpace",
+    "CGBase",
+] }
+objc2-core-foundation = { version = "0.3", features = ["CFData", "CFBase"] }
 
 [profile.release]
 opt-level = 3
