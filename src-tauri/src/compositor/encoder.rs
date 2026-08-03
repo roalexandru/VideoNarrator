@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 
 use crate::error::NarratorError;
+use crate::models::RenderQuality;
 use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 
@@ -54,8 +55,18 @@ impl Encoder {
         height: u32,
         fps: f64,
         audio_source: Option<&Path>,
+        quality: RenderQuality,
     ) -> Result<Self, NarratorError> {
-        Self::start_inner(output_path, width, height, fps, audio_source, "aac").await
+        Self::start_inner(
+            output_path,
+            width,
+            height,
+            fps,
+            audio_source,
+            "aac",
+            quality,
+        )
+        .await
     }
 
     async fn start_inner(
@@ -65,6 +76,7 @@ impl Encoder {
         fps: f64,
         audio_source: Option<&Path>,
         audio_codec: &str,
+        quality: RenderQuality,
     ) -> Result<Self, NarratorError> {
         let ffmpeg = video_engine::detect_ffmpeg()?;
         let size_arg = format!("{width}x{height}");
@@ -123,9 +135,9 @@ impl Encoder {
                 // whatever we emit straight into the user's final export, so
                 // this IS the delivered video. Same reasoning as burn_subtitles.
                 "-preset",
-                "medium",
+                quality.preset(),
                 "-crf",
-                "18",
+                quality.crf(),
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -148,9 +160,9 @@ impl Encoder {
                 // See the audio branch above: visually lossless CRF 18 instead
                 // of true-lossless CRF 0, which produced huge, undecodable files.
                 "-preset",
-                "medium",
+                quality.preset(),
                 "-crf",
-                "18",
+                quality.crf(),
                 "-pix_fmt",
                 "yuv420p",
                 "-an",

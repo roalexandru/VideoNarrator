@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crate::error::NarratorError;
-use crate::models::{ProgressEvent, VideoMetadata};
+use crate::models::{ProgressEvent, RenderQuality, VideoMetadata};
 use crate::{video_edit, video_engine};
 
 /// Optional cooperative-cancel flag; `None` disables cancellation (CLI/tests).
@@ -101,11 +101,13 @@ pub async fn apply_edits(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
+    quality: RenderQuality,
     reporter: Arc<dyn ProgressReporter>,
     cancel: CancelFlag,
 ) -> Result<String, NarratorError> {
     let on_progress = forward_percent_msg(&reporter);
-    video_edit::apply_edits_with_cancel(input_path, output_path, plan, on_progress, cancel).await
+    video_edit::apply_edits_with_cancel(input_path, output_path, plan, quality, on_progress, cancel)
+        .await
 }
 
 /// Mux narration audio into an existing video. `replace_audio = true` swaps

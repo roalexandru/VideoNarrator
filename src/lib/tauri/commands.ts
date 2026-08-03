@@ -283,8 +283,52 @@ export interface VideoEditPlan {
     zoomPan?: { startRegion: { x: number; y: number; width: number; height: number }; endRegion: { x: number; y: number; width: number; height: number }; easing: string };
   }[];
 }
-export const applyVideoEdits = (inputPath: string, outputPath: string, edits: VideoEditPlan, channel: Channel<import("../../types/processing").ProgressEvent>) =>
-  invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel });
+/** How much encode time to spend. `final` is the deliverable and the default;
+ *  `preview` (720p) and `draft` (480p) trade quality for speed when the user is
+ *  only checking that an edit looks right. */
+export type RenderQuality = "final" | "preview" | "draft";
+
+export const applyVideoEdits = (
+  inputPath: string,
+  outputPath: string,
+  edits: VideoEditPlan,
+  channel: Channel<import("../../types/processing").ProgressEvent>,
+  quality?: RenderQuality,
+) =>
+  invoke<string>("apply_video_edits", { inputPath, outputPath, edits, channel, quality });
+
+/** Rough forecast of what a generation will cost, for the pre-flight panel.
+ *  No API calls — safe to call on every settings change. */
+export interface GenerationEstimate {
+  frame_count: number;
+  image_count: number;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  includes_survey: boolean;
+  reuses_cached_frames: boolean;
+  /** Ready-made one-line summary, formatted (and tested) backend-side. */
+  summary: string;
+}
+
+export const estimateGenerationCost = (
+  videoPath: string,
+  projectId: string,
+  frameConfig: { density: string; scene_threshold: number; max_frames: number },
+  options?: {
+    useContactSheets?: boolean;
+    useModelFrameSelection?: boolean;
+    strictMode?: boolean;
+  },
+) =>
+  invoke<GenerationEstimate>("estimate_generation_cost", {
+    videoPath,
+    projectId,
+    frameConfig,
+    useContactSheets: options?.useContactSheets ?? false,
+    useModelFrameSelection: options?.useModelFrameSelection ?? false,
+    strictMode: options?.strictMode ?? false,
+  });
 
 /** Cancel an in-flight video operation (edit render / audio merge / subtitle burn). */
 export const cancelVideoOperation = () => invoke<void>("cancel_video_operation");

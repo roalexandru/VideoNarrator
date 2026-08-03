@@ -11,7 +11,7 @@
 use crate::cancel::{check_cancelled, is_cancelled, kill_child_after_cancel, output_with_cancel};
 use crate::error::NarratorError;
 use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
-use crate::models::ZoomPanEffect;
+use crate::models::{RenderQuality, ZoomPanEffect};
 use crate::process_utils::CommandNoWindow;
 use crate::video_engine;
 use serde::{Deserialize, Serialize};
@@ -434,7 +434,15 @@ pub async fn apply_edits(
     plan: &VideoEditPlan,
     on_progress: impl Fn(f64, Option<String>) + Send + Sync,
 ) -> Result<String, NarratorError> {
-    apply_edits_with_cancel(input_path, output_path, plan, on_progress, None).await
+    apply_edits_with_cancel(
+        input_path,
+        output_path,
+        plan,
+        RenderQuality::Final,
+        on_progress,
+        None,
+    )
+    .await
 }
 
 /// Cancellable variant of [`apply_edits`]. The GUI passes `AppState.cancel_flag`;
@@ -443,6 +451,7 @@ pub async fn apply_edits_with_cancel(
     input_path: &str,
     output_path: &str,
     plan: &VideoEditPlan,
+    quality: RenderQuality,
     on_progress: impl Fn(f64, Option<String>) + Send + Sync,
     cancel: CancelFlag,
 ) -> Result<String, NarratorError> {
@@ -570,6 +579,7 @@ pub async fn apply_edits_with_cancel(
         Path::new(input_path),
         Path::new(output_path),
         plan,
+        quality,
         &on_progress,
         cancel,
     )

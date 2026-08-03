@@ -31,6 +31,7 @@ use std::path::Path;
 use tiny_skia::Pixmap;
 
 use crate::error::NarratorError;
+use crate::models::RenderQuality;
 use crate::video_edit::{EditClip, OverlayEffect, SpotlightData, VideoEditPlan};
 use crate::video_engine;
 
@@ -187,10 +188,39 @@ fn clip_output_duration(clip: &EditClip) -> f64 {
 ///
 /// All "Reinitializing filters" failure modes are gone: there is no
 /// time-varying ffmpeg filtergraph at any layer.
+/// Fit `(width, height)` under `max_height`, preserving aspect ratio.
+///
+/// Both results are forced even: libx264 with yuv420p requires even dimensions,
+/// and an odd value is a hard encode failure rather than a rounding artifact.
+/// Never upscales — a 480p source rendered at "preview" stays 480p.
+pub(crate) fn scaled_dimensions(width: u32, height: u32, max_height: Option<u32>) -> (u32, u32) {
+    let width = width.max(2);
+    let height = height.max(2);
+    let Some(cap) = max_height else {
+        return (even(width), even(height));
+    };
+    if height <= cap {
+        return (even(width), even(height));
+    }
+    let scale = cap as f64 / height as f64;
+    let scaled_w = ((width as f64) * scale).round() as u32;
+    (even(scaled_w.max(2)), even(cap.max(2)))
+}
+
+/// Round down to the nearest even number, with a floor of 2.
+fn even(v: u32) -> u32 {
+    if v < 2 {
+        2
+    } else {
+        v - (v % 2)
+    }
+}
+
 pub async fn run_pipeline(
     input_path: &Path,
     output_path: &Path,
     plan: &VideoEditPlan,
+    quality: RenderQuality,
     on_progress: &(impl Fn(f64, Option<String>) + Send + Sync),
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(), NarratorError> {
@@ -200,8 +230,11 @@ pub async fn run_pipeline(
     crate::cancel::check_cancelled(&cancel)?;
 
     let meta = video_engine::probe_video(input_path).await?;
-    let width = meta.width.max(2);
-    let height = meta.height.max(2);
+    // Preview tiers downscale, which is what actually makes them fast on a 4K
+    // source — a cheaper CRF alone still pays full-resolution decode, effects,
+    // and compositing per frame. `Final` returns None and keeps source
+    // resolution, so the deliverable is never silently degraded.
+    let (width, height) = scaled_dimensions(meta.width, meta.height, quality.max_height());
     let fps = if meta.fps > 0.0 && meta.fps.is_finite() {
         meta.fps.min(MAX_OUTPUT_FPS)
     } else {
@@ -254,9 +287,15 @@ pub async fn run_pipeline(
     // Start one encoder for the whole render. Audio is muxed via -c:a copy
     // (PCM WAV → AAC happens automatically in the encoder by default; we
     // pass `-c:a aac` here too for explicitness).
-    let mut encoder =
-        encoder::Encoder::start_with_aac(output_path, width, height, fps, audio_path.as_deref())
-            .await?;
+    let mut encoder = encoder::Encoder::start_with_aac(
+        output_path,
+        width,
+        height,
+        fps,
+        audio_path.as_deref(),
+        quality,
+    )
+    .await?;
 
     let mut canvas = Pixmap::new(width, height)
         .ok_or_else(|| NarratorError::ExportError(format!("canvas alloc {width}x{height}")))?;
@@ -475,7 +514,66 @@ pub async fn run_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{EasingPreset, ZoomPanEffect, ZoomRegion};
+    use crate::models::{EasingPreset, RenderQuality, ZoomPanEffect, ZoomRegion};
+
+    // ── Render-quality scaling ──────────────────────────────────────────
+
+    #[test]
+    fn final_quality_keeps_source_resolution() {
+        // The deliverable must never be silently downscaled.
+        assert_eq!(
+            scaled_dimensions(3840, 2160, RenderQuality::Final.max_height()),
+            (3840, 2160)
+        );
+        assert_eq!(
+            scaled_dimensions(1920, 1080, RenderQuality::Final.max_height()),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn preview_downscales_4k_to_720p_preserving_aspect() {
+        let (w, h) = scaled_dimensions(3840, 2160, RenderQuality::Preview.max_height());
+        assert_eq!(h, 720);
+        assert_eq!(w, 1280, "16:9 must stay 16:9");
+    }
+
+    #[test]
+    fn preview_never_upscales_a_small_source() {
+        // A 480p source at "preview" stays 480p rather than being blown up.
+        assert_eq!(
+            scaled_dimensions(854, 480, RenderQuality::Preview.max_height()),
+            (854, 480)
+        );
+    }
+
+    #[test]
+    fn scaled_dimensions_are_always_even() {
+        // libx264 with yuv420p rejects odd dimensions outright — this is an
+        // encode failure, not a rounding artifact.
+        for (w, h) in [(1919, 1081), (1081, 1919), (3, 3), (721, 405)] {
+            for cap in [None, Some(720), Some(480)] {
+                let (sw, sh) = scaled_dimensions(w, h, cap);
+                assert_eq!(sw % 2, 0, "width {sw} odd for {w}x{h} cap {cap:?}");
+                assert_eq!(sh % 2, 0, "height {sh} odd for {w}x{h} cap {cap:?}");
+                assert!(sw >= 2 && sh >= 2);
+            }
+        }
+    }
+
+    #[test]
+    fn portrait_sources_scale_by_height_too() {
+        // 1080x1920 phone capture → 405x720, which then evens to 404x720.
+        let (w, h) = scaled_dimensions(1080, 1920, Some(720));
+        assert_eq!(h, 720);
+        assert!((w as i32 - 404).abs() <= 2, "expected ~404, got {w}");
+    }
+
+    #[test]
+    fn degenerate_dimensions_do_not_produce_a_zero_size() {
+        assert_eq!(scaled_dimensions(0, 0, None), (2, 2));
+        assert_eq!(scaled_dimensions(1, 1, Some(720)), (2, 2));
+    }
 
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Pixmap {
         let mut p = Pixmap::new(w, h).unwrap();

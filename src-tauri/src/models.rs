@@ -147,6 +147,61 @@ pub struct ProviderKeyStatus {
     pub models: Vec<String>,
 }
 
+// ── Render quality ──
+
+/// How much encode time to spend on a render.
+///
+/// Every render was previously final-quality, so checking whether a zoom looked
+/// right cost the same as producing the deliverable. A preview tier makes the
+/// iterate-on-edits loop cheap; the final tier is unchanged, so nothing the user
+/// ships is affected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderQuality {
+    /// Visually lossless and universally playable. What gets delivered.
+    #[default]
+    Final,
+    /// Fast enough to iterate on, good enough to judge framing and timing.
+    Preview,
+    /// Fastest possible — for confirming a change landed at all.
+    Draft,
+}
+
+impl RenderQuality {
+    /// libx264 `-crf`. Higher is smaller and lossier.
+    pub fn crf(self) -> &'static str {
+        match self {
+            // Matches the previous hard-coded value; see `encoder.rs` for why
+            // not CRF 0 (huge files, undecodable on some consumer players).
+            RenderQuality::Final => "18",
+            RenderQuality::Preview => "24",
+            RenderQuality::Draft => "30",
+        }
+    }
+
+    /// libx264 `-preset`. Faster presets trade compression for speed.
+    pub fn preset(self) -> &'static str {
+        match self {
+            RenderQuality::Final => "medium",
+            RenderQuality::Preview => "veryfast",
+            RenderQuality::Draft => "ultrafast",
+        }
+    }
+
+    /// Height ceiling, or `None` to keep the source resolution.
+    ///
+    /// Downscaling is what makes a preview genuinely fast on a 4K source; the
+    /// final tier never downscales, because that would silently degrade the
+    /// deliverable.
+    pub fn max_height(self) -> Option<u32> {
+        match self {
+            RenderQuality::Final => None,
+            RenderQuality::Preview => Some(720),
+            RenderQuality::Draft => Some(480),
+        }
+    }
+}
+
 // ── Narration Script ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
