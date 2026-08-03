@@ -163,6 +163,32 @@ pub struct NarrationScript {
     pub speech_rate_report: Option<Vec<crate::speech_rate::SegmentOverflow>>,
 }
 
+/// A stretch of the source audio quiet enough to place narration over.
+///
+/// Produced by `video_engine`'s `silencedetect` pass. The pass already ran to
+/// pick frame anchors; keeping the spans instead of collapsing them to
+/// midpoints lets the narration timeline avoid talking over existing audio.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SilenceSpan {
+    pub start: f64,
+    pub end: f64,
+}
+
+impl SilenceSpan {
+    pub fn duration(&self) -> f64 {
+        (self.end - self.start).max(0.0)
+    }
+
+    pub fn midpoint(&self) -> f64 {
+        0.5 * (self.start + self.end)
+    }
+
+    /// True when `t` falls inside the span.
+    pub fn contains(&self, t: f64) -> bool {
+        t >= self.start && t <= self.end
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     #[serde(default)]

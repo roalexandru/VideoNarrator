@@ -1384,6 +1384,189 @@ fn clamp_chunk_segments(segments: Vec<Segment>, chunk_start: f64, chunk_end: f64
         .collect()
 }
 
+// ── Silence-aware segment edges ──────────────────────────────────────────────
+//
+// Segment times are invented by the model and only *normalized* afterwards;
+// nothing tied them to anything observable in the source. When the recording
+// carries audio of its own — app sounds, background music, a presenter
+// mid-demo — narration starts and stops wherever the model guessed, frequently
+// on top of that audio.
+//
+// The `silencedetect` pass already knows where the quiet stretches are. Snapping
+// each segment edge into a nearby gap costs nothing extra and makes narration
+// land in the holes instead of over the content.
+
+/// Shortest gap a segment edge may be snapped into.
+///
+/// Below this a gap is mid-phrase — inside a word or between two syllables —
+/// and starting to speak there sounds like an interruption.
+pub const MIN_SNAP_GAP: f64 = 0.15;
+
+/// Gap width at or above which a snap is unambiguously safe.
+///
+/// Gaps between `MIN_SNAP_GAP` and this are still used, but only when no
+/// cleaner gap is in range.
+pub const CLEAN_SNAP_GAP: f64 = 0.40;
+
+/// How far an edge may travel to reach a gap.
+///
+/// Bounded because the model chose these times to match what is on screen;
+/// dragging an edge a long way to find silence would desynchronise narration
+/// from the visuals it describes.
+pub const SNAP_SEARCH_WINDOW: f64 = 1.0;
+
+/// Inset from a gap's own edge, absorbing `silencedetect` boundary imprecision
+/// so the snap lands solidly inside the quiet rather than on its lip.
+pub const SNAP_PAD: f64 = 0.05;
+
+/// Fraction of the video that must be silent before the source counts as
+/// "effectively silent" and snapping is skipped entirely.
+///
+/// A fully silent screencast reports one enormous span covering the whole
+/// timeline. Snapping into that is meaningless — every edge would "succeed" and
+/// nothing would improve — so the whole pass is skipped, which is also the
+/// honest no-op case for our most common input.
+const EFFECTIVELY_SILENT_FRACTION: f64 = 0.95;
+
+/// True when the source is silent enough that snapping cannot help.
+pub fn is_effectively_silent(spans: &[SilenceSpan], video_duration: f64) -> bool {
+    if video_duration <= 0.0 {
+        return true;
+    }
+    let silent: f64 = spans.iter().map(SilenceSpan::duration).sum();
+    silent / video_duration >= EFFECTIVELY_SILENT_FRACTION
+}
+
+/// Find a point inside a usable gap near `t`, or `None` to leave `t` alone.
+///
+/// Prefers gaps at least `CLEAN_SNAP_GAP` wide, and among equally clean
+/// candidates the one requiring the smallest move.
+fn snap_point(t: f64, spans: &[SilenceSpan]) -> Option<f64> {
+    let mut best: Option<(bool, f64, f64)> = None; // (is_clean, distance, target)
+
+    for span in spans {
+        let width = span.duration();
+        if width < MIN_SNAP_GAP {
+            continue;
+        }
+        // Aim `SNAP_PAD` inside the gap, but never past its midpoint — on a
+        // gap barely wider than 2×SNAP_PAD the padded points would cross.
+        let target = if span.contains(t) {
+            // Already inside a usable gap: nothing to gain by moving.
+            return None;
+        } else if t < span.start {
+            (span.start + SNAP_PAD).min(span.midpoint())
+        } else {
+            (span.end - SNAP_PAD).max(span.midpoint())
+        };
+
+        let distance = (target - t).abs();
+        if distance > SNAP_SEARCH_WINDOW {
+            continue;
+        }
+        let is_clean = width >= CLEAN_SNAP_GAP;
+        let better = match best {
+            None => true,
+            // A clean gap always beats a merely-usable one; otherwise closer wins.
+            Some((best_clean, best_dist, _)) => match (is_clean, best_clean) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => distance < best_dist,
+            },
+        };
+        if better {
+            best = Some((is_clean, distance, target));
+        }
+    }
+
+    best.map(|(_, _, target)| target)
+}
+
+/// Nudge every segment edge into a nearby silence gap.
+///
+/// Returns `segments` untouched when there is no usable silence map. Callers
+/// must still run [`normalize_timeline`] afterwards: snapping can push an edge
+/// past a neighbour or below the minimum segment length, and normalization is
+/// what re-establishes those invariants.
+pub fn snap_to_silence(
+    mut segments: Vec<Segment>,
+    spans: &[SilenceSpan],
+    video_duration: f64,
+) -> Vec<Segment> {
+    if spans.is_empty() || is_effectively_silent(spans, video_duration) {
+        return segments;
+    }
+
+    let mut moved = 0usize;
+    for seg in &mut segments {
+        if let Some(start) = snap_point(seg.start_seconds, spans) {
+            // Never let a snap invert or collapse the segment.
+            if start < seg.end_seconds - 0.3 {
+                seg.start_seconds = start.max(0.0);
+                moved += 1;
+            }
+        }
+        if let Some(end) = snap_point(seg.end_seconds, spans) {
+            if end > seg.start_seconds + 0.3 {
+                seg.end_seconds = end.min(video_duration.max(0.0));
+                moved += 1;
+            }
+        }
+    }
+
+    if moved > 0 {
+        tracing::info!(
+            "snapped {moved} segment edge(s) into silence gaps across {} spans",
+            spans.len()
+        );
+    }
+    segments
+}
+
+/// Render the usable silence gaps as a prompt block.
+///
+/// Gives the model the same information the snap pass uses, so it can place
+/// segments well in the first place rather than being corrected afterwards.
+/// Returns an empty string when there is nothing useful to say.
+pub fn describe_silence_windows(spans: &[SilenceSpan], video_duration: f64) -> String {
+    if spans.is_empty() || is_effectively_silent(spans, video_duration) {
+        return String::new();
+    }
+    let usable: Vec<&SilenceSpan> = spans
+        .iter()
+        .filter(|s| s.duration() >= MIN_SNAP_GAP)
+        .collect();
+    if usable.is_empty() {
+        return String::new();
+    }
+
+    // Cap the list: a chatty source can produce hundreds of gaps, and the
+    // widest ones are the ones worth spending tokens on.
+    const MAX_LISTED: usize = 40;
+    let mut listed: Vec<&&SilenceSpan> = usable.iter().collect();
+    listed.sort_by(|a, b| b.duration().total_cmp(&a.duration()));
+    listed.truncate(MAX_LISTED);
+    listed.sort_by(|a, b| a.start.total_cmp(&b.start));
+
+    let windows: Vec<String> = listed
+        .iter()
+        .map(|s| format!("{:.2}-{:.2}", s.start, s.end))
+        .collect();
+
+    format!(
+        "\n\n## EXISTING AUDIO IN THIS VIDEO\n\n\
+         The source already has its own audio, so narration must not talk over \
+         it. These are the quiet windows (seconds), widest {} of {} shown:\n\n\
+         {}\n\n\
+         Start and end each segment inside one of these windows wherever the \
+         visuals allow. A segment that begins mid-sentence over existing speech \
+         makes both tracks unintelligible.",
+        listed.len(),
+        usable.len(),
+        windows.join(", ")
+    )
+}
+
 /// Normalize a timeline of segments: filter malformed, sort, dedupe, resolve overlaps.
 /// This is the defensive last-line post-processor that guarantees monotonic timestamps.
 pub fn normalize_timeline(mut segments: Vec<Segment>, video_duration: f64) -> Vec<Segment> {
@@ -3713,6 +3896,170 @@ mod tests {
         assert!(result.is_ok());
         let script = result.unwrap();
         assert_eq!(script.title, "Fenced");
+    }
+
+    // ── Silence-aware snapping ─────────────────────────────────────────
+
+    fn span(start: f64, end: f64) -> SilenceSpan {
+        SilenceSpan { start, end }
+    }
+
+    #[test]
+    fn snap_moves_an_edge_into_a_nearby_clean_gap() {
+        // Segment starts at 5.0, mid-speech; a 1s gap sits at 4.5-5.5.
+        let spans = vec![span(4.5, 5.5)];
+        let out = snap_to_silence(vec![seg(0, 5.0, 20.0, "hi")], &spans, 60.0);
+        // 5.0 is already inside the gap, so nothing should move.
+        assert_eq!(out[0].start_seconds, 5.0);
+
+        // Now start just outside the gap.
+        let out = snap_to_silence(vec![seg(0, 5.8, 20.0, "hi")], &spans, 60.0);
+        // Snaps back into the gap, padded in from the 5.5 edge.
+        assert!(
+            out[0].start_seconds < 5.8 && out[0].start_seconds >= 5.0,
+            "expected snap into 4.5-5.5, got {}",
+            out[0].start_seconds
+        );
+    }
+
+    #[test]
+    fn snap_ignores_gaps_narrower_than_the_floor() {
+        // A 100ms gap is mid-phrase — starting to speak there interrupts a word.
+        let spans = vec![span(5.0, 5.1)];
+        let out = snap_to_silence(vec![seg(0, 5.5, 20.0, "hi")], &spans, 60.0);
+        assert_eq!(
+            out[0].start_seconds, 5.5,
+            "must not snap to a sub-150ms gap"
+        );
+    }
+
+    #[test]
+    fn snap_uses_a_usable_gap_when_no_clean_one_is_in_range() {
+        // 250ms: inside the usable band (150-400ms) but not clean (>=400ms).
+        let spans = vec![span(5.0, 5.25)];
+        let out = snap_to_silence(vec![seg(0, 5.6, 20.0, "hi")], &spans, 60.0);
+        assert!(
+            out[0].start_seconds < 5.6,
+            "a usable gap should still be used, got {}",
+            out[0].start_seconds
+        );
+    }
+
+    #[test]
+    fn snap_prefers_a_clean_gap_over_a_closer_usable_one() {
+        // A 200ms gap is nearer, but a 1s gap is also within the search window.
+        // Cleanliness must win over proximity.
+        let spans = vec![span(9.8, 10.0), span(10.4, 11.4)];
+        let out = snap_to_silence(vec![seg(0, 10.2, 30.0, "hi")], &spans, 60.0);
+        assert!(
+            out[0].start_seconds > 10.2,
+            "expected the clean 10.4-11.4 gap, got {}",
+            out[0].start_seconds
+        );
+    }
+
+    #[test]
+    fn snap_refuses_to_move_an_edge_beyond_the_search_window() {
+        // The only gap is 10s away — moving there would desync narration from
+        // the visuals the model described.
+        let spans = vec![span(30.0, 31.0)];
+        let out = snap_to_silence(vec![seg(0, 5.0, 20.0, "hi")], &spans, 60.0);
+        assert_eq!(out[0].start_seconds, 5.0);
+        assert_eq!(out[0].end_seconds, 20.0);
+    }
+
+    #[test]
+    fn snap_is_a_no_op_on_an_effectively_silent_source() {
+        // A silent screencast reports one span covering the whole timeline.
+        // Every edge would "snap" and nothing would improve — skip entirely.
+        let spans = vec![span(0.0, 60.0)];
+        assert!(is_effectively_silent(&spans, 60.0));
+        let segs = vec![seg(0, 5.0, 20.0, "hi"), seg(1, 25.0, 40.0, "there")];
+        let out = snap_to_silence(segs.clone(), &spans, 60.0);
+        for (before, after) in segs.iter().zip(out.iter()) {
+            assert_eq!(before.start_seconds, after.start_seconds);
+            assert_eq!(before.end_seconds, after.end_seconds);
+        }
+    }
+
+    #[test]
+    fn snap_is_a_no_op_without_a_silence_map() {
+        let segs = vec![seg(0, 5.0, 20.0, "hi")];
+        let out = snap_to_silence(segs.clone(), &[], 60.0);
+        assert_eq!(out[0].start_seconds, segs[0].start_seconds);
+    }
+
+    #[test]
+    fn snap_never_inverts_or_collapses_a_segment() {
+        // A gap sitting past the segment's own end must not drag the start
+        // across it.
+        let spans = vec![span(19.5, 20.5)];
+        let out = snap_to_silence(vec![seg(0, 19.9, 20.1, "tiny")], &spans, 60.0);
+        assert!(
+            out[0].end_seconds > out[0].start_seconds,
+            "segment inverted: {:?}..{:?}",
+            out[0].start_seconds,
+            out[0].end_seconds
+        );
+    }
+
+    #[test]
+    fn snap_keeps_edges_inside_the_video() {
+        let spans = vec![span(58.0, 62.0)];
+        let out = snap_to_silence(vec![seg(0, 50.0, 59.0, "end")], &spans, 60.0);
+        assert!(
+            out[0].end_seconds <= 60.0,
+            "end ran past the video: {}",
+            out[0].end_seconds
+        );
+    }
+
+    #[test]
+    fn effectively_silent_is_false_for_a_normally_speaking_source() {
+        // ~13% silence over a minute: a real talking-head recording.
+        let spans = vec![span(5.0, 6.0), span(20.0, 22.0), span(40.0, 45.0)];
+        assert!(!is_effectively_silent(&spans, 60.0));
+    }
+
+    #[test]
+    fn effectively_silent_handles_a_zero_length_video() {
+        assert!(is_effectively_silent(&[], 0.0));
+    }
+
+    #[test]
+    fn silence_prompt_block_lists_windows_and_caps_length() {
+        let spans: Vec<SilenceSpan> = (0..100)
+            .map(|i| span(i as f64 * 2.0, i as f64 * 2.0 + 0.5))
+            .collect();
+        let block = describe_silence_windows(&spans, 400.0);
+        assert!(block.contains("EXISTING AUDIO"));
+        // Capped so a chatty source can't flood the prompt.
+        assert!(block.matches('-').count() <= 60, "window list not capped");
+        assert!(block.contains("of 100 shown") || block.contains("of 100"));
+    }
+
+    #[test]
+    fn silence_prompt_block_is_empty_when_it_would_mislead() {
+        // Silent screencast: claiming "the source already has audio" is wrong.
+        assert!(describe_silence_windows(&[span(0.0, 60.0)], 60.0).is_empty());
+        assert!(describe_silence_windows(&[], 60.0).is_empty());
+        // Only sub-floor gaps: nothing actionable to report.
+        assert!(describe_silence_windows(&[span(5.0, 5.05)], 60.0).is_empty());
+    }
+
+    #[test]
+    fn snapped_segments_survive_normalization() {
+        // Snapping can push edges around; normalize_timeline is what restores
+        // ordering and the minimum-length floor. Composed as the pipeline does.
+        let spans = vec![span(9.6, 10.4), span(19.6, 20.4)];
+        let segs = vec![seg(0, 10.0, 20.0, "one"), seg(1, 20.1, 30.0, "two")];
+        let snapped = snap_to_silence(segs, &spans, 60.0);
+        let out = normalize_timeline(snapped, 60.0);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].end_seconds <= out[1].start_seconds + 1e-9);
+        for s in &out {
+            assert!(s.end_seconds > s.start_seconds);
+        }
     }
 
     // ── normalize_timeline ─────────────────────────────────────────────

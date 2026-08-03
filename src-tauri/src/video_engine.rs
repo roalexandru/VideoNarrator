@@ -3,7 +3,7 @@
 use crate::cancel::{check_cancelled, is_cancelled, kill_child_after_cancel, output_with_cancel};
 use crate::error::NarratorError;
 use crate::ffmpeg_progress::{extract_time_from_ffmpeg_line, parse_ffmpeg_time};
-use crate::models::{Frame, FrameConfig, VideoMetadata};
+use crate::models::{Frame, FrameConfig, SilenceSpan, VideoMetadata};
 use crate::process_utils::CommandNoWindow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -487,7 +487,7 @@ pub async fn extract_frames(
     on_frame: impl Fn(Frame) + Send + Sync + 'static,
     on_tick: impl Fn(f64, String) + Send + Sync + 'static,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<Vec<Frame>, NarratorError> {
+) -> Result<FrameExtraction, NarratorError> {
     let ffmpeg = detect_ffmpeg()?;
 
     // Ensure output dir exists
@@ -511,7 +511,11 @@ pub async fn extract_frames(
     // meaningful — fewer than that and the LLM can't tell scene structure
     // from a handful of samples.
     const MIN_ANCHORS: usize = 3;
-    if let Ok(anchors) = detect_anchors(
+    // Silence spans survive the fixed-interval fallback: they describe the
+    // audio, not the sampling strategy, and the narration timeline needs them
+    // either way.
+    let mut silence_spans: Vec<SilenceSpan> = Vec::new();
+    match detect_anchors(
         &ffmpeg,
         video_path,
         &metadata,
@@ -521,30 +525,38 @@ pub async fn extract_frames(
     )
     .await
     {
-        if anchors.len() >= MIN_ANCHORS {
-            return extract_frames_at_anchors(
-                &ffmpeg,
-                video_path,
-                &anchors,
-                &metadata,
-                output_dir,
-                on_frame,
-                on_tick,
-                cancel_flag,
-                hdr,
-            )
-            .await;
+        Ok((anchors, spans)) => {
+            silence_spans = spans;
+            if anchors.len() >= MIN_ANCHORS {
+                let frames = extract_frames_at_anchors(
+                    &ffmpeg,
+                    video_path,
+                    &anchors,
+                    &metadata,
+                    output_dir,
+                    on_frame,
+                    on_tick,
+                    cancel_flag,
+                    hdr,
+                )
+                .await?;
+                return Ok(FrameExtraction {
+                    frames,
+                    silence_spans,
+                });
+            }
+            tracing::info!(
+                "anchor-based sampling found only {} frames (< {}), falling back to fixed interval",
+                anchors.len(),
+                MIN_ANCHORS
+            );
         }
-        tracing::info!(
-            "anchor-based sampling found only {} frames (< {}), falling back to fixed interval",
-            anchors.len(),
-            MIN_ANCHORS
-        );
-    } else {
-        tracing::warn!("anchor detection failed, falling back to fixed interval");
+        Err(_) => {
+            tracing::warn!("anchor detection failed, falling back to fixed interval");
+        }
     }
 
-    extract_frames_fixed_interval(
+    let frames = extract_frames_fixed_interval(
         &ffmpeg,
         video_path,
         &metadata,
@@ -557,7 +569,22 @@ pub async fn extract_frames(
         },
         hdr,
     )
-    .await
+    .await?;
+    Ok(FrameExtraction {
+        frames,
+        silence_spans,
+    })
+}
+
+/// What one extraction pass learned about the source.
+///
+/// The silence map is a by-product of anchor detection that used to be thrown
+/// away. Returning it means the narration timeline can avoid placing speech
+/// over existing audio without paying for a second decode pass.
+#[derive(Debug, Clone, Default)]
+pub struct FrameExtraction {
+    pub frames: Vec<Frame>,
+    pub silence_spans: Vec<SilenceSpan>,
 }
 
 struct ExtractionControl {
@@ -587,11 +614,29 @@ pub(crate) fn parse_showinfo_timestamps(stderr: &str) -> Vec<f64> {
     out
 }
 
-/// Parse `silencedetect` stderr lines (`silence_start:` / `silence_end:`)
-/// into midpoint timestamps — those land in the quiet gap between phrases,
-/// which is usually a good narration anchor because the frame there is
-/// stable and shows the speaker finishing a thought.
-pub(crate) fn parse_silence_midpoints(stderr: &str) -> Vec<f64> {
+/// Parse `silencedetect` stderr into full silence spans.
+///
+/// Spans, not midpoints: the narration timeline needs to know how *wide* each
+/// quiet stretch is, so it can place a segment edge inside one instead of
+/// starting a sentence over existing speech. Anchor selection collapses these
+/// to midpoints separately.
+pub(crate) fn parse_silence_spans(stderr: &str) -> Vec<SilenceSpan> {
+    let (starts, ends) = parse_silence_events(stderr);
+    // Pair positionally. silencedetect always logs a start before its matching
+    // end, but a run can finish with an unterminated silence (ending at EOF)
+    // that has no `silence_end` line — ignore those unpaired trailing starts.
+    let pairs = starts.len().min(ends.len());
+    (0..pairs)
+        .map(|i| SilenceSpan {
+            start: starts[i],
+            end: ends[i],
+        })
+        .filter(|s| s.start.is_finite() && s.end.is_finite() && s.end > s.start)
+        .collect()
+}
+
+/// Extract the raw `silence_start:` / `silence_end:` timestamp lists.
+fn parse_silence_events(stderr: &str) -> (Vec<f64>, Vec<f64>) {
     let mut starts: Vec<f64> = Vec::new();
     let mut ends: Vec<f64> = Vec::new();
     for line in stderr.lines() {
@@ -613,15 +658,7 @@ pub(crate) fn parse_silence_midpoints(stderr: &str) -> Vec<f64> {
             }
         }
     }
-    // Pair starts with ends positionally. A silencedetect pass always logs
-    // starts before the matching end, but runs may finish with an unterminated
-    // silence (ending at EOF) that has no `silence_end` line. Ignore unpaired
-    // trailing starts.
-    let pairs = starts.len().min(ends.len());
-    (0..pairs)
-        .map(|i| 0.5 * (starts[i] + ends[i]))
-        .filter(|t| t.is_finite() && *t >= 0.0)
-        .collect()
+    (starts, ends)
 }
 
 /// Merge candidate anchor timestamps, drop near-duplicates (within `min_gap`
@@ -674,7 +711,7 @@ async fn detect_anchors(
     config: &FrameConfig,
     on_tick: Arc<dyn Fn(f64, String) + Send + Sync>,
     cancel: &Option<Arc<AtomicBool>>,
-) -> Result<Vec<f64>, NarratorError> {
+) -> Result<(Vec<f64>, Vec<SilenceSpan>), NarratorError> {
     check_cancelled(cancel)?;
     // Emit a more informative label so the user knows what's happening
     // during the ffmpeg detect passes (which can each run for many seconds
@@ -690,24 +727,34 @@ async fn detect_anchors(
     on_tick(0.10, format!("Found {} scene changes", scene.len()));
     check_cancelled(cancel)?;
 
-    let silence = match probe_has_audio_stream(video_path).await {
+    let silence_spans = match probe_has_audio_stream(video_path).await {
         Ok(true) => {
             on_tick(0.12, "Detecting silence boundaries".to_string());
-            let found = detect_silence_boundaries(ffmpeg, video_path, cancel)
+            let found = detect_silence_spans(ffmpeg, video_path, cancel)
                 .await
                 .unwrap_or_default();
-            on_tick(0.20, format!("Found {} silence boundaries", found.len()));
+            on_tick(0.20, format!("Found {} silence spans", found.len()));
             found
         }
         _ => Vec::new(),
     };
-    // `detect_silence_boundaries` swallows its own errors via unwrap_or_default,
+    // `detect_silence_spans` swallows its own errors via unwrap_or_default,
     // so re-check here to make sure a cancel during that pass propagates.
     check_cancelled(cancel)?;
 
+    // Anchors keep the historical ≥0.5 s threshold even though detection now
+    // runs wider (see `SILENCE_MIN_DURATION`): a 0.2 s inter-word gap is a
+    // useful narration window but a poor frame anchor, and loosening it here
+    // would change which frames the model sees.
+    let anchor_midpoints: Vec<f64> = silence_spans
+        .iter()
+        .filter(|s| s.duration() >= ANCHOR_MIN_SILENCE)
+        .map(SilenceSpan::midpoint)
+        .collect();
+
     let anchors = merge_anchors(
         scene,
-        silence,
+        anchor_midpoints,
         metadata.duration_seconds,
         config.max_frames,
         1.0,
@@ -718,7 +765,7 @@ async fn detect_anchors(
         metadata.duration_seconds,
         config.scene_threshold
     );
-    Ok(anchors)
+    Ok((anchors, silence_spans))
 }
 
 async fn detect_scene_changes(
@@ -746,20 +793,41 @@ async fn detect_scene_changes(
     Ok(parse_showinfo_timestamps(&stderr))
 }
 
-async fn detect_silence_boundaries(
+/// Shortest silence `silencedetect` will report, in seconds.
+///
+/// Was 0.5, which is far above the inter-phrase pauses narration can actually
+/// use. 0.15 is the floor of the usable band (see `ai_client`'s snap ladder):
+/// anything shorter is mid-phrase and unsafe to start speaking over.
+const SILENCE_MIN_DURATION: f64 = 0.15;
+
+/// Minimum silence duration that still makes a good *frame anchor*.
+///
+/// Deliberately stricter than `SILENCE_MIN_DURATION`: a 0.2 s inter-word gap is
+/// a fine narration window but a poor place to sample a frame, and this
+/// preserves the anchor behaviour that predates span detection.
+const ANCHOR_MIN_SILENCE: f64 = 0.5;
+
+// Detection must stay at least as loose as the narrowest gap the snap pass will
+// use, or the usable 150-400 ms band is invisible to it. Checked at compile time
+// so the two constants cannot drift apart in a later edit.
+const _: () = assert!(SILENCE_MIN_DURATION <= crate::ai_client::MIN_SNAP_GAP);
+const _: () = assert!(ANCHOR_MIN_SILENCE > SILENCE_MIN_DURATION);
+
+async fn detect_silence_spans(
     ffmpeg: &Path,
     video_path: &Path,
     cancel: &Option<Arc<AtomicBool>>,
-) -> Result<Vec<f64>, NarratorError> {
+) -> Result<Vec<SilenceSpan>, NarratorError> {
+    let filter = format!("silencedetect=n=-30dB:d={SILENCE_MIN_DURATION}");
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window()
         .args(["-nostats", "-hide_banner", "-i"])
         .arg(video_path.as_os_str())
-        .args(["-af", "silencedetect=n=-30dB:d=0.5", "-f", "null", "-"]);
+        .args(["-af", &filter, "-f", "null", "-"]);
     let output = output_with_cancel(&mut cmd, cancel).await?;
     // silencedetect writes detection lines to stderr even on success.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    Ok(parse_silence_midpoints(&stderr))
+    Ok(parse_silence_spans(&stderr))
 }
 
 /// Coarse-seek window (seconds) subtracted from an anchor timestamp before
@@ -1484,30 +1552,69 @@ mod tests {
     }
 
     #[test]
-    fn silence_midpoints_pairs_starts_with_ends() {
+    fn silence_spans_pair_starts_with_ends() {
         let stderr = r#"
 [silencedetect @ 0x7f] silence_start: 1.0
 [silencedetect @ 0x7f] silence_end: 2.0 | silence_duration: 1.0
 [silencedetect @ 0x7f] silence_start: 10.5
 [silencedetect @ 0x7f] silence_end: 11.5 | silence_duration: 1.0
 "#;
-        let mids = parse_silence_midpoints(stderr);
-        assert_eq!(mids.len(), 2);
-        assert!((mids[0] - 1.5).abs() < 1e-9);
-        assert!((mids[1] - 11.0).abs() < 1e-9);
+        let spans = parse_silence_spans(stderr);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            spans[0],
+            SilenceSpan {
+                start: 1.0,
+                end: 2.0
+            }
+        );
+        assert_eq!(
+            spans[1],
+            SilenceSpan {
+                start: 10.5,
+                end: 11.5
+            }
+        );
+        // Midpoints still derivable — anchor selection depends on them.
+        assert!((spans[0].midpoint() - 1.5).abs() < 1e-9);
+        assert!((spans[1].midpoint() - 11.0).abs() < 1e-9);
+        assert!((spans[0].duration() - 1.0).abs() < 1e-9);
     }
 
     #[test]
-    fn silence_midpoints_drops_unpaired_trailing_start() {
+    fn silence_spans_drop_unpaired_trailing_start() {
         // silencedetect occasionally leaves an open silence at EOF without
-        // emitting a silence_end line. Treat that as "no midpoint available."
+        // emitting a silence_end line. Treat that as "no span available."
         let stderr = r#"
 [silencedetect @ 0x7f] silence_start: 1.0
 [silencedetect @ 0x7f] silence_end: 2.0 | silence_duration: 1.0
 [silencedetect @ 0x7f] silence_start: 99.0
 "#;
-        let mids = parse_silence_midpoints(stderr);
-        assert_eq!(mids, vec![1.5]);
+        let spans = parse_silence_spans(stderr);
+        assert_eq!(
+            spans,
+            vec![SilenceSpan {
+                start: 1.0,
+                end: 2.0
+            }]
+        );
+    }
+
+    #[test]
+    fn silence_spans_reject_zero_and_inverted_ranges() {
+        // A degenerate span would divide by zero in the snap ladder.
+        let stderr = r#"
+[silencedetect @ 0x7f] silence_start: 5.0
+[silencedetect @ 0x7f] silence_end: 5.0 | silence_duration: 0.0
+"#;
+        assert!(parse_silence_spans(stderr).is_empty());
+    }
+
+    #[test]
+    fn silence_spans_are_empty_for_output_with_no_detections() {
+        // A fully-loud source produces no silencedetect lines at all.
+        assert!(parse_silence_spans("Input #0, mov\n  Duration: 00:01:00.00\n").is_empty());
+        assert!(parse_silence_spans("").is_empty());
     }
 
     #[test]
