@@ -13,6 +13,7 @@ mod error;
 mod export_engine;
 mod ffmpeg_progress;
 mod http_client;
+mod loudness;
 mod menu;
 mod models;
 mod process_utils;
