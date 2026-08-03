@@ -961,23 +961,28 @@ pub fn build_user_message(
         "text": text_context
     }));
 
-    // Add frame images as base64
-    for frame in frames {
-        if frame.path.exists() {
-            let b64 = video_engine::frame_to_base64(&frame.path)?;
-            content.push(json!({
-                "type": "text",
-                "text": format!("[Frame {} at {:.1}s]", frame.index, frame.timestamp_seconds)
-            }));
-            content.push(json!({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": b64
-                }
-            }));
-        }
+    // Add frame images as base64.
+    //
+    // Encoding is downscale + JPEG per frame — pure CPU that ran serially for up
+    // to 300 frames. Missing files are filtered first so the historical
+    // skip-silently behaviour is preserved, then the rest encode in parallel.
+    let present: Vec<&Frame> = frames.iter().filter(|f| f.path.exists()).collect();
+    let paths: Vec<std::path::PathBuf> = present.iter().map(|f| f.path.clone()).collect();
+    let encoded = crate::frame_cache::encode_frames_parallel(&paths)?;
+
+    for (frame, b64) in present.iter().zip(encoded) {
+        content.push(json!({
+            "type": "text",
+            "text": format!("[Frame {} at {:.1}s]", frame.index, frame.timestamp_seconds)
+        }));
+        content.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": b64
+            }
+        }));
     }
 
     Ok(serde_json::Value::Array(content))

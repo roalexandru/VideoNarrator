@@ -12,6 +12,7 @@ mod elevenlabs_client;
 mod error;
 mod export_engine;
 mod ffmpeg_progress;
+mod frame_cache;
 mod http_client;
 mod loudness;
 mod menu;
