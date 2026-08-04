@@ -72,9 +72,17 @@ vi.mock("@tauri-apps/api/event", () => ({
 /**
  * Sets up default mock IPC handlers for every known Tauri command.
  * Call this in `beforeEach` for component tests that trigger IPC.
+ *
+ * `overrides` replaces individual commands while every other command keeps its
+ * default. Use it when a test needs a command to change its answer over time
+ * (config edited mid-test) or to record the payloads it was called with.
  */
-export function setupDefaultMocks() {
+export function setupDefaultMocks(
+  overrides?: Record<string, (payload?: unknown) => unknown>,
+) {
   mockIPC((cmd, payload) => {
+    const override = overrides?.[cmd];
+    if (override) return override(payload);
     switch (cmd) {
       case "check_ffmpeg":
         return "/usr/local/bin/ffmpeg";
