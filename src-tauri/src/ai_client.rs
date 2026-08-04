@@ -1141,6 +1141,7 @@ async fn generate_chunked(
     system_prompt: &str,
     user_message: &serde_json::Value,
     image_count: usize,
+    video_duration: f64,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
@@ -1270,7 +1271,15 @@ async fn generate_chunked(
             .last()
             .map(|s| s.end_seconds)
             .unwrap_or(if chunk_idx == 0 { 0.0 } else { chunk_first_ts });
-        let chunk_end_time = next_chunk_first_ts.unwrap_or(chunk_last_ts + 30.0);
+        // The final chunk runs to the end of the video, not just to its last
+        // frame. Sampling stops before the end (the last anchor on a 220 s video
+        // landed at 210 s), so bounding the chunk at its last frame leaves the
+        // tail permanently unnarrated.
+        let chunk_end_time = match next_chunk_first_ts {
+            Some(next) => next,
+            None if video_duration > chunk_last_ts => video_duration,
+            None => chunk_last_ts + 30.0,
+        };
 
         // Build the message for this chunk
         let mut chunk_content = text_parts.clone();
@@ -1338,7 +1347,12 @@ async fn generate_chunked(
         );
 
         let chunk_label = format!("Analyzing batch {} of {num_chunks}", chunk_idx + 1);
-        let chunk_fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0);
+        // Chunks own 0..CHUNK_SPAN of the narration band, leaving headroom for the
+        // post-chunk passes (polish, stretch, merge). Previously chunks consumed
+        // the whole band, so the bar hit 99% and then sat there for up to 90s
+        // while polish ran — its heartbeat reported a *lower* fraction, which the
+        // frontend's monotonic clamp discarded entirely.
+        let chunk_fraction = (chunk_idx as f64 / num_chunks as f64).clamp(0.0, 1.0) * CHUNK_SPAN;
         // `RetryContext` owns both the in-flight heartbeat and the rate-limit
         // countdown, so we no longer wrap this in `with_heartbeat` — that would
         // repaint "· Ns elapsed" over the countdown message every 1.5s.
@@ -1376,7 +1390,15 @@ async fn generate_chunked(
         if merged_script.is_none() {
             let base = NarrationScript {
                 title: chunk_script.title.clone(),
-                total_duration_seconds: chunk_script.total_duration_seconds,
+                // NOT `chunk_script.total_duration_seconds`. The first chunk only
+                // sees its own frames and reports that slice's length, which the
+                // final `normalize_timeline` then used as a hard cutoff —
+                // deleting every later chunk's segments.
+                total_duration_seconds: if video_duration > 0.0 {
+                    video_duration
+                } else {
+                    chunk_script.total_duration_seconds
+                },
                 segments: Vec::new(),
                 metadata: chunk_script.metadata.clone(),
                 speech_rate_report: None,
@@ -1422,7 +1444,8 @@ async fn generate_chunked(
         // Close out this chunk. No message — the UI keeps the "Analyzing
         // batch X of N" label until the next chunk starts.
         if let Some(cb) = on_progress.as_ref() {
-            let fraction = ((chunk_idx + 1) as f64 / num_chunks as f64).clamp(0.0, 1.0);
+            let fraction =
+                ((chunk_idx + 1) as f64 / num_chunks as f64).clamp(0.0, 1.0) * CHUNK_SPAN;
             cb(fraction, None);
         }
     }
@@ -1451,9 +1474,38 @@ async fn generate_chunked(
     }
 
     if let Some(mut script) = merged_script {
-        // Final normalization pass (guarantees monotonic, non-overlapping, re-indexed)
-        let normalized = normalize_timeline(all_segments, script.total_duration_seconds);
+        // Final normalization pass (guarantees monotonic, non-overlapping, re-indexed).
+        // Bounded by the measured video length — see the header comment above for
+        // why the model's figure must not be used here.
+        let bound = if video_duration > 0.0 {
+            video_duration
+        } else {
+            script.total_duration_seconds
+        };
+        let before = all_segments.len();
+        let normalized = normalize_timeline(all_segments, bound);
+        if normalized.len() < before {
+            tracing::warn!(
+                "chunked merge: normalize dropped {} of {before} segments against a {bound:.1}s bound",
+                before - normalized.len()
+            );
+        }
         script.segments = normalized;
+
+        // Coverage guard. Silent truncation is the failure mode that shipped a
+        // 53 s script for a 220 s video, so make it loud rather than trusting the
+        // pipeline to be correct.
+        if bound > 0.0 {
+            let covered = script.segments.last().map(|s| s.end_seconds).unwrap_or(0.0);
+            if covered < bound * 0.6 {
+                tracing::error!(
+                    "narration covers only {covered:.1}s of a {bound:.1}s video ({:.0}%) \
+                     across {} segment(s) — this indicates dropped chunks, not a short script",
+                    covered / bound * 100.0,
+                    script.segments.len()
+                );
+            }
+        }
         // Return as JSON string (same format as single-call response)
         serde_json::to_string(&script)
             .map_err(|e| NarratorError::ApiError(format!("Failed to serialize merged script: {e}")))
@@ -2053,6 +2105,35 @@ async fn generate_with_retry(
 /// real per-chunk ticks on the chunked path).
 pub const MAX_FRAMES_PER_CALL: usize = 10;
 
+/// Share of the narration progress band consumed by the per-chunk API calls.
+///
+/// The remainder is reserved for the passes that run *after* the last chunk —
+/// polish (up to 90 s), timeline stretch, short-segment merge. Without this
+/// reservation the bar reached the top of the band and froze there, because the
+/// frontend clamps progress monotonically forward and every later report was
+/// numerically lower.
+const CHUNK_SPAN: f64 = 0.85;
+
+/// Fraction reported while the polish pass runs.
+const POLISH_FRACTION: f64 = 0.90;
+
+/// Fraction reported once polish is done and the final passes run.
+const FINALIZE_FRACTION: f64 = 0.96;
+
+// The post-chunk fractions must sit ABOVE the chunk ceiling. The frontend clamps
+// progress monotonic-forward, so a lower value is silently discarded — which is
+// precisely how the bar came to freeze at the top of the band during polish.
+const _: () = assert!(POLISH_FRACTION > CHUNK_SPAN);
+const _: () = assert!(FINALIZE_FRACTION > POLISH_FRACTION);
+
+/// Generate a narration script.
+///
+/// `video_duration` is the **authoritative** length of the video, measured by
+/// ffprobe. It is deliberately not derived from the model's
+/// `total_duration_seconds`: on the chunked path the first chunk only ever sees
+/// its own slice of frames, so it reports that slice's length. Trusting it made
+/// `normalize_timeline` delete every segment past the first chunk — a 3:40 video
+/// silently shipping 53 seconds of narration.
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_narration(
     provider: &dyn AiProvider,
@@ -2060,6 +2141,7 @@ pub async fn generate_narration(
     user_message: serde_json::Value,
     style: &str,
     language: &str,
+    video_duration: f64,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
@@ -2070,6 +2152,7 @@ pub async fn generate_narration(
         provider,
         system_prompt,
         user_message.clone(),
+        video_duration,
         resume_segments.clone(),
         on_segment.clone(),
         on_progress.clone(),
@@ -2119,6 +2202,7 @@ pub async fn generate_narration(
             provider,
             system_prompt,
             retry_message,
+            video_duration,
             Vec::new(),
             None,
             on_progress,
@@ -2172,6 +2256,7 @@ async fn generate_narration_once(
     provider: &dyn AiProvider,
     system_prompt: &str,
     user_message: serde_json::Value,
+    video_duration: f64,
     resume_segments: Vec<Segment>,
     on_segment: Option<SegmentCallback>,
     on_progress: Option<ProgressCallback>,
@@ -2190,6 +2275,7 @@ async fn generate_narration_once(
             system_prompt,
             &user_message,
             image_count,
+            video_duration,
             resume_segments,
             on_segment.clone(),
             on_progress.clone(),
@@ -2252,11 +2338,27 @@ async fn generate_narration_once(
     // This guarantees monotonic, non-overlapping segments regardless of AI output shape.
     // (For the chunked path this is also applied inside generate_chunked, so running it
     // again here is idempotent and cheap.)
-    let duration = if script.total_duration_seconds > 0.0 {
+    // The measured video length wins over whatever the model reported. On the
+    // chunked path the model's figure describes one chunk's slice, and using it
+    // here deleted every segment past that slice. Fall back to its value only
+    // when we genuinely have no measurement.
+    let duration = if video_duration > 0.0 {
+        video_duration
+    } else if script.total_duration_seconds > 0.0 {
         script.total_duration_seconds
     } else {
         script.segments.last().map(|s| s.end_seconds).unwrap_or(0.0) + 60.0
     };
+    if (script.total_duration_seconds - duration).abs() > 1.0 {
+        tracing::warn!(
+            "model reported total_duration_seconds={:.1} but the video is {:.1}s — using the measured value",
+            script.total_duration_seconds,
+            duration
+        );
+    }
+    // Pin the header to the truth so every downstream consumer (stretch
+    // heuristics, export, the Review UI) agrees with the actual video.
+    script.total_duration_seconds = duration;
     script.segments = normalize_timeline(std::mem::take(&mut script.segments), duration);
 
     // Merge sub-2.5s fragments into their neighbors. Humans can't comfortably
@@ -2264,6 +2366,12 @@ async fn generate_narration_once(
     // speeds up unnaturally or overruns when a slot is this short. Merging
     // upfront avoids the audio/video desync downstream.
     script.segments = merge_short_segments(std::mem::take(&mut script.segments), 2.5);
+
+    // Keep the bar moving through the tail. These passes are fast, but polish
+    // (below) is not, and a frozen bar reads as a hung app.
+    if let Some(cb) = on_progress.as_ref() {
+        cb(FINALIZE_FRACTION, Some("Finalizing timeline".to_string()));
+    }
 
     // Chunked generation is prone to producing a choppy, fragmented script
     // because each chunk only sees a 10-frame window. A single polish pass
@@ -2286,7 +2394,14 @@ async fn generate_narration_once(
         let polish_label = "Polishing narration".to_string();
         let polish_with_deadline =
             tokio::time::timeout(POLISH_TIMEOUT, polish_script(provider, &script, 2.5));
-        match with_heartbeat(&on_progress, 0.98, polish_label, polish_with_deadline).await {
+        match with_heartbeat(
+            &on_progress,
+            POLISH_FRACTION,
+            polish_label,
+            polish_with_deadline,
+        )
+        .await
+        {
             Ok(Ok(polished)) => {
                 tracing::info!(
                     "AI polish: {} → {} segments",
@@ -4000,6 +4115,7 @@ mod tests {
             json!("user message"),
             "technical",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4032,6 +4148,7 @@ mod tests {
             json!("user message"),
             "technical",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4059,6 +4176,7 @@ mod tests {
             json!("user message"),
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4643,6 +4761,134 @@ mod tests {
         }
     }
 
+    // ── Duration authority (regression: v0.10.0 coverage collapse) ──────────
+    //
+    // Shipped bug: on the chunked path the merged script took
+    // `total_duration_seconds` from the FIRST chunk's response. That chunk only
+    // sees its own frames, so on a 220 s video it reported 53.2 s — and the final
+    // `normalize_timeline` then deleted every segment starting past 54.2 s.
+    // A 3:40 video shipped 5 segments covering 0:00–0:53.
+
+    #[tokio::test]
+    async fn a_short_first_chunk_duration_must_not_truncate_the_script() {
+        // Four chunks over a 220 s video. Chunk 1 claims the video is only 53.2 s
+        // long — exactly what the model did in production.
+        let provider = ScriptedProvider::new(vec![
+            &chunk_response_json("Demo", 53.2, &[(0.0, 8.5, "one"), (11.0, 19.0, "two")]),
+            &chunk_response_json("Demo", 53.2, &[(60.0, 70.0, "three")]),
+            &chunk_response_json("Demo", 53.2, &[(120.0, 130.0, "four")]),
+            &chunk_response_json("Demo", 53.2, &[(190.0, 205.0, "five")]),
+        ]);
+        // 40 frames at 5.5 s → 4 chunks of 10, spanning 0–214 s.
+        let msg = user_msg_with_frames(40, 5.5);
+
+        let script = generate_narration(
+            &provider,
+            "sys",
+            msg,
+            "test",
+            "en",
+            220.3,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("generation succeeds");
+
+        // The header must report the real video length, not the model's claim.
+        assert!(
+            (script.total_duration_seconds - 220.3).abs() < 0.01,
+            "header says {:.1}s, expected the measured 220.3s",
+            script.total_duration_seconds
+        );
+
+        // Segments from the later chunks must survive.
+        let last_end = script.segments.last().map(|s| s.end_seconds).unwrap_or(0.0);
+        assert!(
+            last_end > 150.0,
+            "narration stops at {last_end:.1}s of a 220s video — later chunks were dropped again"
+        );
+        assert!(
+            script.segments.len() >= 4,
+            "expected segments from all four chunks, got {}",
+            script.segments.len()
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_segments_when_bounded_by_the_real_duration() {
+        // The mechanism itself: the bound is what decides whether later segments
+        // live or die.
+        let segs = vec![
+            seg(0, 0.0, 8.0, "early"),
+            seg(1, 60.0, 70.0, "middle"),
+            seg(2, 190.0, 205.0, "late"),
+        ];
+        // Bounded by the model's short claim → the later two are deleted.
+        assert_eq!(normalize_timeline(segs.clone(), 53.2).len(), 1);
+        // Bounded by the real video length → all survive.
+        assert_eq!(normalize_timeline(segs, 220.3).len(), 3);
+    }
+
+    #[tokio::test]
+    async fn measured_duration_wins_on_the_single_call_path_too() {
+        let provider = ScriptedProvider::new(vec![&chunk_response_json(
+            "Demo",
+            30.0,
+            &[(0.0, 10.0, "one"), (100.0, 110.0, "two")],
+        )]);
+        let script = generate_narration(
+            &provider,
+            "sys",
+            user_msg_with_frames(3, 5.0),
+            "test",
+            "en",
+            220.3,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("generation succeeds");
+
+        assert!((script.total_duration_seconds - 220.3).abs() < 0.01);
+        assert_eq!(
+            script.segments.len(),
+            2,
+            "the 100s segment must not be filtered by a 30s claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_zero_measured_duration_falls_back_to_the_model_figure() {
+        // CLI callers or a failed probe pass 0.0; behaviour must not regress to
+        // deleting everything.
+        let provider = ScriptedProvider::new(vec![&chunk_response_json(
+            "Demo",
+            60.0,
+            &[(0.0, 10.0, "one"), (40.0, 50.0, "two")],
+        )]);
+        let script = generate_narration(
+            &provider,
+            "sys",
+            user_msg_with_frames(3, 5.0),
+            "test",
+            "en",
+            0.0,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("generation succeeds");
+        assert_eq!(script.segments.len(), 2);
+        assert!((script.total_duration_seconds - 60.0).abs() < 0.01);
+    }
+
     fn chunk_response_json(title: &str, total: f64, segs: &[(f64, f64, &str)]) -> String {
         let seg_json: Vec<serde_json::Value> = segs
             .iter()
@@ -4732,6 +4978,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4784,6 +5031,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4817,6 +5065,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4867,6 +5116,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4907,6 +5157,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -4938,6 +5189,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5129,6 +5381,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5159,6 +5412,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5190,6 +5444,7 @@ mod tests {
             msg,
             "test",
             "ja",
+            300.0,
             vec![],
             None,
             None,
@@ -5214,6 +5469,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5239,6 +5495,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5272,6 +5529,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5297,6 +5555,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5325,6 +5584,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5360,6 +5620,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             None,
@@ -5407,6 +5668,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             vec![],
             None,
             Some(cb),
@@ -5426,11 +5688,25 @@ mod tests {
         );
         assert_eq!(first_msg.as_deref(), Some("Analyzing batch 1 of 3"));
 
-        // Last tick: after chunk 3 → fraction 1.0.
+        // Chunks must stop short of the top of the band. The remainder is
+        // reserved for polish and the final passes — when chunks owned the whole
+        // band the bar hit its ceiling and then froze for up to 90s, because the
+        // frontend clamps monotonic-forward and every later report was lower.
+        // All but the final (finalize) tick come from the chunk loop.
+        let max_chunk_tick = ticks[..ticks.len() - 1]
+            .iter()
+            .map(|(f, _)| *f)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_chunk_tick <= CHUNK_SPAN + 1e-6,
+            "chunk ticks reached {max_chunk_tick}, must stay within CHUNK_SPAN {CHUNK_SPAN}"
+        );
+        // And the final tick must be the reserved finalize step, above the chunk
+        // ceiling so the bar keeps advancing.
         let (last_frac, _) = ticks.last().unwrap();
         assert!(
-            (*last_frac - 1.0).abs() < 1e-6,
-            "last tick should reach 1.0, got {last_frac}"
+            (*last_frac - FINALIZE_FRACTION).abs() < 1e-6,
+            "last tick should be FINALIZE_FRACTION {FINALIZE_FRACTION}, got {last_frac}"
         );
 
         // Each chunk emits (start_msg, end_none) so we should see all
@@ -5513,6 +5789,7 @@ mod tests {
             msg,
             "test",
             "en",
+            300.0,
             resume,
             None,
             Some(cb),
@@ -6162,6 +6439,7 @@ mod tests {
             json!([{"type": "text", "text": "ctx"}]),
             "technical",
             "en",
+            10.0,
             Vec::new(),
             None,
             None,
@@ -6209,6 +6487,7 @@ mod tests {
             json!([{"type": "text", "text": "ctx"}]),
             "technical",
             "en",
+            10.0,
             Vec::new(),
             None,
             None,

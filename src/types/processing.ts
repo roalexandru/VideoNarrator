@@ -28,6 +28,19 @@ export type ProgressEvent =
   | { kind: "progress"; percent: number; message?: string }
   | { kind: "frame_extracted"; frame: Frame }
   | { kind: "segment_streamed"; segment: Segment }
+  /**
+   * Final frame paths, sent once extraction's temp directory has been promoted
+   * into the project. `frame_extracted` necessarily carries the temp path (it
+   * fires while extraction runs) and that directory is renamed away, so without
+   * this the thumbnails render blank.
+   */
+  | { kind: "frames_replaced"; frames: Frame[] }
+  /** What grounding actually applied. Fields are absent when the feature no-op'd. */
+  | {
+      kind: "grounding";
+      screen_text_screens?: number;
+      model_selected_moments?: number;
+    }
   /** Terminal event: the full normalized script. Replaces streaming preview. */
   | { kind: "segments_replaced"; segments: Segment[] }
   /**

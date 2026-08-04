@@ -12,6 +12,12 @@ interface ProcessingStore {
   frames: Frame[];
   streamingSegments: Segment[];
   error: string | null;
+  /** What grounding the backend actually applied this run. Absent counts mean
+   *  the feature was off or no-op'd (no OCR backend, survey fell back). */
+  grounding: {
+    screenTextScreens?: number;
+    modelSelectedMoments?: number;
+  } | null;
 
   setPhase: (phase: ProcessingPhase) => void;
   /** Set progress percent. Monotonic-forward: a smaller value is ignored
@@ -23,6 +29,11 @@ interface ProcessingStore {
    *  flow calls this before re-running: the backend re-extracts and re-emits
    *  every frame, so keeping the old ones would append duplicates (19 → 38 …). */
   clearFrames: () => void;
+  /** Swap in the final, durable frame paths after extraction is promoted out of
+   *  its temp directory. Replaces rather than appends — these are the same
+   *  frames the `frame_extracted` events already delivered, just relocated. */
+  replaceFrames: (frames: Frame[]) => void;
+  setGrounding: (g: ProcessingStore["grounding"]) => void;
   appendSegment: (segment: Segment) => void;
   /** Replace the streaming preview with the final, normalized segment list.
    *  Used for the terminal `segments_replaced` progress event so the UI
@@ -39,6 +50,7 @@ export const useProcessingStore = create<ProcessingStore>((set) => ({
   frames: [],
   streamingSegments: [],
   error: null,
+  grounding: null,
 
   setPhase: (phase) => set({ phase }),
   setProgress: (progress) =>
@@ -54,6 +66,8 @@ export const useProcessingStore = create<ProcessingStore>((set) => ({
   appendFrame: (frame) =>
     set((state) => ({ frames: [...state.frames, frame] })),
   clearFrames: () => set({ frames: [] }),
+  replaceFrames: (frames) => set({ frames }),
+  setGrounding: (grounding) => set({ grounding }),
   appendSegment: (segment) =>
     set((state) => ({
       streamingSegments: [...state.streamingSegments, segment],
@@ -68,5 +82,6 @@ export const useProcessingStore = create<ProcessingStore>((set) => ({
       frames: [],
       streamingSegments: [],
       error: null,
+      grounding: null,
     }),
 }));
