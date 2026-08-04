@@ -300,7 +300,7 @@ fn e2e_screen_text_layer_names_the_command() {
 
     let backend = crate::screen_text::platform_backend();
     assert_eq!(backend.name(), "macos-vision");
-    let block = crate::screen_text::build_text_layer(&frames, backend.as_ref());
+    let block = crate::screen_text::build_text_layer(&frames, backend.as_ref()).block;
 
     // With every frame identical, the text is in 100% of frames — so chrome
     // filtering removes it and the block is empty. That is correct behaviour and
@@ -333,7 +333,7 @@ fn e2e_screen_text_layer_names_the_command() {
             height: 90,
         },
     ];
-    let block = crate::screen_text::build_text_layer(&mixed, backend.as_ref());
+    let block = crate::screen_text::build_text_layer(&mixed, backend.as_ref()).block;
     let _ = std::fs::remove_file(&blank);
 
     assert!(block.contains("ON-SCREEN TEXT"), "no block produced");

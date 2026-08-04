@@ -850,6 +850,28 @@ pub enum ProgressEvent {
     /// The frontend replaces its streaming-segments preview with this list so
     /// users see the polished output after chunked generation's raw per-chunk
     /// stream.
+    /// Emitted after extracted frames are promoted out of the temp work
+    /// directory into the project.
+    ///
+    /// `FrameExtracted` necessarily carries the *temp* path — it fires while
+    /// extraction is still running. That directory is then renamed away, so the
+    /// UI's thumbnails 404 and render blank. This replaces the list with the
+    /// final, durable paths.
+    #[serde(rename = "frames_replaced")]
+    FramesReplaced { frames: Vec<Frame> },
+    /// What grounding was actually applied to this generation.
+    ///
+    /// Both features are silent when they no-op (no OCR backend, survey
+    /// fell back), which makes "is this even on?" unanswerable from the UI.
+    #[serde(rename = "grounding")]
+    Grounding {
+        /// Distinct screens of recognized text, when OCR ran and found any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        screen_text_screens: Option<usize>,
+        /// Moments the model chose, when the survey pass succeeded.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_selected_moments: Option<usize>,
+    },
     #[serde(rename = "segments_replaced")]
     SegmentsReplaced { segments: Vec<Segment> },
     /// Emitted once after an export finishes, reporting whether the rendered

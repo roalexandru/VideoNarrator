@@ -24,6 +24,20 @@ const C = { text: "#e0e0ea", dim: "#8b8ba0", muted: "#5a5a6e", border: "rgba(255
 // Without edits the main channel drives the full 0–100%.
 const EDIT_BUDGET = 35;
 
+/** Frames shown before the grid collapses behind a "+N" toggle. */
+const FRAME_GRID_LIMIT = 32;
+
+/** Chip styling for the grounding summary row. */
+const groundingChip: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 600,
+  color: "#a5b4fc",
+  background: "rgba(99,102,241,0.10)",
+  border: "1px solid rgba(99,102,241,0.22)",
+  borderRadius: 999,
+  padding: "3px 10px",
+};
+
 const PHASE_LABELS: Record<ProcessingPhase, string> = {
   idle: "Preparing...",
   applying_edits: "Applying video edits...",
@@ -133,6 +147,12 @@ export function ProcessingScreen() {
         if (e.message !== undefined) proc.setStatusMessage(e.message);
       }
       else if (e.kind === "frame_extracted") proc.appendFrame(e.frame);
+      else if (e.kind === "frames_replaced") proc.replaceFrames(e.frames);
+      else if (e.kind === "grounding")
+        proc.setGrounding({
+          screenTextScreens: e.screen_text_screens,
+          modelSelectedMoments: e.model_selected_moments,
+        });
       else if (e.kind === "segment_streamed") proc.appendSegment(e.segment);
       else if (e.kind === "segments_replaced") proc.replaceStreamingSegments(e.segments);
       else if (e.kind === "error") proc.setError(e.message);
@@ -336,6 +356,7 @@ export function ProcessingScreen() {
 
   const statusLine = proc.statusMessage ?? PHASE_LABELS[proc.phase];
 
+  const [showAllFrames, setShowAllFrames] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(true);
   useEffect(() => {
     getProviderStatus().then((statuses) => {
@@ -438,6 +459,26 @@ export function ProcessingScreen() {
         })}
       </div>
 
+      {/* Grounding — what actually applied this run. Both features no-op
+          silently (no OCR backend, survey fell back), so showing the real
+          counts is the only way to tell an active feature from an inert one. */}
+      {proc.grounding &&
+        (proc.grounding.screenTextScreens !== undefined ||
+          proc.grounding.modelSelectedMoments !== undefined) && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+            {proc.grounding.screenTextScreens !== undefined && (
+              <span style={groundingChip}>
+                Read on-screen text · {proc.grounding.screenTextScreens} screens
+              </span>
+            )}
+            {proc.grounding.modelSelectedMoments !== undefined && (
+              <span style={groundingChip}>
+                AI-selected moments · {proc.grounding.modelSelectedMoments}
+              </span>
+            )}
+          </div>
+        )}
+
       {/* Filmstrip — full width, auto-fills across the row */}
       {proc.frames.length > 0 && (
         <div style={{ marginBottom: 20 }}>
@@ -445,7 +486,7 @@ export function ProcessingScreen() {
             Extracted Frames
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))", gap: 6 }}>
-            {proc.frames.slice(0, 32).map((f) => (
+            {(showAllFrames ? proc.frames : proc.frames.slice(0, FRAME_GRID_LIMIT)).map((f) => (
               <div key={f.index} style={{
                 aspectRatio: "16/10", borderRadius: 6, overflow: "hidden", position: "relative",
                 border: `1px solid ${C.border}`,
@@ -464,10 +505,20 @@ export function ProcessingScreen() {
                 </div>
               </div>
             ))}
-            {proc.frames.length > 32 && (
-              <div style={{ aspectRatio: "16/10", background: "rgba(99,102,241,0.06)", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", color: C.accent, fontSize: 11, border: `1px solid rgba(99,102,241,0.15)` }}>
-                +{proc.frames.length - 32}
-              </div>
+            {proc.frames.length > FRAME_GRID_LIMIT && (
+              <button
+                type="button"
+                onClick={() => setShowAllFrames((v) => !v)}
+                aria-label={showAllFrames ? "Show fewer frames" : `Show all ${proc.frames.length} frames`}
+                style={{
+                  aspectRatio: "16/10", background: "rgba(99,102,241,0.06)", borderRadius: 6,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: C.accent, fontSize: 11, border: `1px solid rgba(99,102,241,0.15)`,
+                  cursor: "pointer", fontWeight: 600, padding: 0,
+                }}
+              >
+                {showAllFrames ? "Show less" : `+${proc.frames.length - FRAME_GRID_LIMIT}`}
+              </button>
             )}
           </div>
         </div>

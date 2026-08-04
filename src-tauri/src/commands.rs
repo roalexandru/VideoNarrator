@@ -695,6 +695,10 @@ pub async fn generate_narration(
         }
     }
 
+    // How many moments the survey pass chose, when it ran and succeeded. Stays
+    // `None` on a cache hit or any fallback, which is exactly what the UI should
+    // report.
+    let mut selected_moment_count: Option<usize> = None;
     let extraction = match cached {
         Some(hit) => hit,
         None => {
@@ -737,6 +741,7 @@ pub async fn generate_narration(
             } else {
                 None
             };
+            selected_moment_count = selected_moments.as_ref().map(|m| m.len());
 
             let channel_for_frames = channel.clone();
             let channel_for_ticks = channel.clone();
@@ -805,6 +810,15 @@ pub async fn generate_narration(
                     .collect(),
                 silence_spans: extracted.silence_spans,
             };
+
+            // Hand the UI the durable paths. The `FrameExtracted` events it
+            // already received point into `work_dir`, which the promotion above
+            // just renamed away — leaving every thumbnail a broken image.
+            channel
+                .send(ProgressEvent::FramesReplaced {
+                    frames: promoted.frames.clone(),
+                })
+                .ok();
 
             // Record what these frames are so an unchanged rerun can skip all of
             // the above. Best-effort: a failure costs a re-extract, not the run.
@@ -907,7 +921,7 @@ pub async fn generate_narration(
     // Read what is actually on screen. Runs over the full-resolution frames on
     // disk, not the downscaled copies sent to the model, since recovering small
     // UI text is the entire point.
-    let screen_text_block = if params.use_screen_text {
+    let text_layer = if params.use_screen_text {
         channel
             .send(ProgressEvent::progress_msg(28.0, "Reading on-screen text"))
             .ok();
@@ -919,8 +933,19 @@ pub async fn generate_narration(
         .await
         .unwrap_or_default()
     } else {
-        String::new()
+        screen_text::TextLayer::default()
     };
+    let screen_text_block = text_layer.block.clone();
+
+    // Tell the UI what grounding actually applied. Both features no-op silently
+    // (no OCR backend, or the survey fell back), so without this the user cannot
+    // tell an enabled feature from an inert one.
+    channel
+        .send(ProgressEvent::Grounding {
+            screen_text_screens: (text_layer.screens > 0).then_some(text_layer.screens),
+            model_selected_moments: selected_moment_count,
+        })
+        .ok();
 
     let system_prompt = format!(
         "{system_prompt}{}{preference_block}{screen_text_block}",
@@ -1019,6 +1044,7 @@ pub async fn generate_narration(
         user_message,
         &params.style,
         &params.primary_language,
+        video_metadata.duration_seconds,
         params.resume_segments.clone(),
         Some(on_segment),
         Some(on_progress_cb),
@@ -1041,7 +1067,12 @@ pub async fn generate_narration(
     // length, and `normalize_timeline` is what re-establishes those invariants.
     // A no-op on silent screencasts, which report one span covering everything.
     if !silence_spans.is_empty() {
-        let duration = script.total_duration_seconds;
+        // Measured length, never the model's claim — see generate_narration.
+        let duration = if video_metadata.duration_seconds > 0.0 {
+            video_metadata.duration_seconds
+        } else {
+            script.total_duration_seconds
+        };
         script.segments = ai_client::normalize_timeline(
             ai_client::snap_to_silence(
                 std::mem::take(&mut script.segments),

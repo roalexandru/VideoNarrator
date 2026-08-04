@@ -286,17 +286,32 @@ fn render_state(state: &ScreenState) -> String {
     )
 }
 
+/// What the OCR pass produced, so callers can report it to the user.
+///
+/// Returned rather than only logged: "is OCR actually on?" is not answerable
+/// from the UI otherwise, and a silently-empty layer is indistinguishable from a
+/// disabled one.
+#[derive(Debug, Clone, Default)]
+pub struct TextLayer {
+    /// The prompt block. Empty when nothing usable was recognized.
+    pub block: String,
+    /// Distinct screens after chrome filtering and duplicate collapsing. This is
+    /// the number the UI reports, because it is what the model actually receives
+    /// — raw line counts are inflated by chrome that gets filtered out.
+    pub screens: usize,
+}
+
 /// Run OCR over `frames` and produce the prompt block.
 ///
 /// Recognition is parallel across frames (pure CPU, and the caller is inside
-/// `spawn_blocking`). Returns an empty string when the backend recognizes
-/// nothing, which is the no-backend and the no-text-on-screen case alike — in
-/// both, generation proceeds exactly as it does without this layer.
-pub fn build_text_layer(frames: &[Frame], backend: &dyn OcrBackend) -> String {
+/// `spawn_blocking`). An empty `block` covers the no-backend and the
+/// no-text-on-screen cases alike — in both, generation proceeds exactly as it
+/// does without this layer.
+pub fn build_text_layer(frames: &[Frame], backend: &dyn OcrBackend) -> TextLayer {
     use rayon::prelude::*;
 
     if frames.is_empty() {
-        return String::new();
+        return TextLayer::default();
     }
 
     let recognized: Vec<FrameText> = frames
@@ -314,7 +329,7 @@ pub fn build_text_layer(frames: &[Frame], backend: &dyn OcrBackend) -> String {
             "on-screen text: nothing recognized (backend: {})",
             backend.name()
         );
-        return String::new();
+        return TextLayer::default();
     }
 
     let chrome = detect_chrome(&recognized);
@@ -329,7 +344,10 @@ pub fn build_text_layer(frames: &[Frame], backend: &dyn OcrBackend) -> String {
         chrome.len(),
         block.len()
     );
-    block
+    TextLayer {
+        block,
+        screens: states.len(),
+    }
 }
 
 /// The backend for this platform.
@@ -793,7 +811,8 @@ mod tests {
 
     #[test]
     fn end_to_end_filters_chrome_and_keeps_content() {
-        let block = build_text_layer(&frames(5), &StubBackend);
+        let layer = build_text_layer(&frames(5), &StubBackend);
+        let block = layer.block;
         assert!(block.contains("ON-SCREEN TEXT"));
         assert!(
             !block.contains("File Edit View Help"),
@@ -807,13 +826,13 @@ mod tests {
     fn end_to_end_is_empty_with_the_no_op_backend() {
         // The default on any platform without a recognizer: the layer is inert
         // and the prompt is byte-identical to before this feature.
-        assert!(build_text_layer(&frames(5), &NoOpBackend).is_empty());
+        assert!(build_text_layer(&frames(5), &NoOpBackend).block.is_empty());
         assert_eq!(NoOpBackend.name(), "none");
     }
 
     #[test]
     fn end_to_end_handles_no_frames() {
-        assert!(build_text_layer(&[], &StubBackend).is_empty());
+        assert!(build_text_layer(&[], &StubBackend).block.is_empty());
     }
 
     #[test]
