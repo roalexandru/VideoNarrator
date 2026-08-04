@@ -501,11 +501,19 @@ pub struct GenerationParams {
     /// of API calls rather than thirty — and each call keeps full context
     /// instead of a truncated summary of the previous one.
     ///
-    /// Off by default on purpose: tiling halves each frame's linear resolution,
-    /// and reading on-screen text is exactly what this app asks the model to do.
-    /// Whether 512 px cells stay legible on a terminal-heavy screencast is an
-    /// empirical question that needs an A/B on real footage, so this ships as an
-    /// opt-in rather than silently changing every generation.
+    /// **Deliberately still off by default**, unlike the other two flags below.
+    ///
+    /// Tiling halves each frame's linear resolution (1024 px → 512 px cells), and
+    /// reading on-screen text is exactly what this app asks the model to do. OCR
+    /// (`use_screen_text`) compensates for that loss — but only where a
+    /// recognizer exists, which today means macOS only. Enabling tiling globally
+    /// would therefore make Windows output measurably worse than macOS with
+    /// nothing offsetting it: a silent cross-platform quality split.
+    ///
+    /// The upside here is cost and latency, not quality. That makes it the one
+    /// flag whose benefit is purely economic while its risk is to the output, so
+    /// it stays opt-in until the A/B on a terminal-heavy screencast settles the
+    /// cell size (the fallback being 2x2 at 768 px).
     #[serde(default)]
     pub use_contact_sheets: bool,
 
@@ -517,11 +525,13 @@ pub struct GenerationParams {
     /// meaningful change. Only the chosen moments then pay the expensive
     /// frame-accurate extraction.
     ///
-    /// Off by default: it adds an API call before any narration is generated,
-    /// and the quality win depends on the model picking well — which is worth
-    /// measuring on real footage before it becomes the default. Any failure in
-    /// the survey falls back to today's even-spaced selection.
-    #[serde(default)]
+    /// On by default. It costs one cheap low-resolution call before narration
+    /// starts, and every failure path — survey extraction, the call itself,
+    /// unparseable output, an empty selection — falls back to the previous
+    /// even-spaced selection. So the downside is bounded at one wasted request
+    /// while the upside is the model spending its frame budget on the moments
+    /// that actually change.
+    #[serde(default = "default_true")]
     pub use_model_frame_selection: bool,
     /// Read the text visible on screen and give it to the model.
     ///
@@ -530,11 +540,20 @@ pub struct GenerationParams {
     /// the full-resolution frames makes it reliable — the difference between
     /// "runs a command" and "runs `pnpm tauri dev`".
     ///
-    /// Off by default: it costs an OCR pass over every frame and adds up to
-    /// ~10 KB to the prompt, and only macOS has a recognizer wired up so far.
-    /// Where no backend exists the flag is inert rather than broken.
-    #[serde(default)]
+    /// On by default. The OCR pass is local and parallel across frames, the
+    /// prompt cost is bounded at ~10 KB, and where no recognizer exists (today:
+    /// anything but macOS) the flag is inert rather than broken — the pipeline
+    /// runs, produces an empty pack, and generation proceeds as before.
+    #[serde(default = "default_true")]
     pub use_screen_text: bool,
+}
+
+/// Serde default for flags that ship enabled.
+///
+/// Needed because `bool`'s own `Default` is `false`, so an absent field in a
+/// project saved before the flag existed would silently opt out of it.
+fn default_true() -> bool {
+    true
 }
 
 // ── Export ──
@@ -596,6 +615,87 @@ pub struct ProjectFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Feature-flag defaults ───────────────────────────────────────────────
+    //
+    // These are the contract for what a caller gets when it says nothing. A
+    // project saved before a flag existed, the CLI, and any external caller all
+    // land here, so each default is asserted individually rather than trusted.
+
+    /// Minimal params JSON with none of the feature flags present — exactly what
+    /// a project saved before they existed deserializes from.
+    fn params_without_flags() -> serde_json::Value {
+        serde_json::json!({
+            "project_id": "11111111-1111-4111-8111-111111111111",
+            "video_path": "/tmp/v.mp4",
+            "document_paths": [],
+            "title": "T",
+            "description": "D",
+            "style": "technical",
+            "primary_language": "en",
+            "additional_languages": [],
+            "frame_config": {"density": "medium", "scene_threshold": 0.3, "max_frames": 30},
+            "ai_config": {"provider": "claude", "model": "claude-sonnet-5", "temperature": 0.7},
+            "custom_prompt": ""
+        })
+    }
+
+    #[test]
+    fn screen_text_and_frame_selection_default_on() {
+        let params: GenerationParams = serde_json::from_value(params_without_flags())
+            .expect("legacy params must still deserialize");
+        assert!(
+            params.use_screen_text,
+            "OCR grounding must be on for callers that don't mention it"
+        );
+        assert!(
+            params.use_model_frame_selection,
+            "model frame selection must be on for callers that don't mention it"
+        );
+    }
+
+    #[test]
+    fn contact_sheets_default_off() {
+        // Deliberate: tiling halves the resolution the model sees, and OCR only
+        // compensates on platforms with a recognizer. Enabling it globally would
+        // make Windows output worse than macOS with nothing offsetting it.
+        let params: GenerationParams = serde_json::from_value(params_without_flags()).unwrap();
+        assert!(!params.use_contact_sheets);
+    }
+
+    #[test]
+    fn strict_mode_still_defaults_off() {
+        // Unchanged by this release — it costs up to 12 extra API calls.
+        let params: GenerationParams = serde_json::from_value(params_without_flags()).unwrap();
+        assert!(!params.strict_mode);
+    }
+
+    #[test]
+    fn an_explicit_false_still_wins_over_the_default() {
+        // `default = "default_true"` must not override a caller that deliberately
+        // opted out, or the toggles in the UI would do nothing.
+        let mut raw = params_without_flags();
+        raw["use_screen_text"] = serde_json::json!(false);
+        raw["use_model_frame_selection"] = serde_json::json!(false);
+        let params: GenerationParams = serde_json::from_value(raw).unwrap();
+        assert!(!params.use_screen_text);
+        assert!(!params.use_model_frame_selection);
+    }
+
+    #[test]
+    fn an_explicit_true_enables_contact_sheets() {
+        let mut raw = params_without_flags();
+        raw["use_contact_sheets"] = serde_json::json!(true);
+        let params: GenerationParams = serde_json::from_value(raw).unwrap();
+        assert!(params.use_contact_sheets);
+    }
+
+    #[test]
+    fn default_true_helper_is_actually_true() {
+        // Guards against the classic typo of wiring `default = "default_true"`
+        // to a function that returns false.
+        assert!(default_true());
+    }
 
     #[test]
     fn test_serialize_narration_script() {

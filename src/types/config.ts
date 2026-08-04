@@ -111,4 +111,14 @@ export interface GenerationParams {
    *  segments whose narration doesn't match the frames get rewritten. Costs
    *  one multimodal call plus up to five refine calls per iteration. */
   strict_mode?: boolean;
+  /** Send frames as tiled contact sheets instead of one image per frame. Cuts
+   *  API calls ~9x but halves each frame's linear resolution — left off by
+   *  default because OCR only compensates for that on macOS. */
+  use_contact_sheets?: boolean;
+  /** Let the model choose which moments get full-resolution frames, via a cheap
+   *  low-resolution survey pass. Falls back to even spacing on any failure. */
+  use_model_frame_selection?: boolean;
+  /** Read on-screen text (OCR) and add it to the prompt, so narration can name
+   *  the actual command, file or error. Inert where no recognizer exists. */
+  use_screen_text?: boolean;
 }

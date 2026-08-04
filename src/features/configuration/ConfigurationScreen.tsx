@@ -341,6 +341,55 @@ export function ConfigurationScreen() {
         </label>
       </section>
 
+      {/* Grounding — on-screen text + model-chosen frames. Both default on. */}
+      <section style={{ marginBottom: 28 }}>
+        <label
+          style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer" }}
+        >
+          <input
+            type="checkbox"
+            checked={config.screenText}
+            onChange={(e) => config.setScreenText(e.target.checked)}
+            style={{ marginTop: 3, accentColor: C.accent }}
+          />
+          <div>
+            <div style={{ ...label, marginBottom: 2 }}>Read on-screen text</div>
+            <p style={{ fontSize: 11, color: C.muted, lineHeight: 1.5, margin: 0 }}>
+              Recognise the text in each frame — terminal output, code, error dialogs — and give it
+              to the model, so narration names the actual command or value instead of describing it
+              generically. Runs locally, no extra API calls. Currently macOS only; elsewhere it has
+              no effect.
+            </p>
+          </div>
+        </label>
+
+        <label
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 12,
+            cursor: "pointer",
+            marginTop: 16,
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={config.modelFrameSelection}
+            onChange={(e) => config.setModelFrameSelection(e.target.checked)}
+            style={{ marginTop: 3, accentColor: C.accent }}
+          />
+          <div>
+            <div style={{ ...label, marginBottom: 2 }}>Let AI pick key moments</div>
+            <p style={{ fontSize: 11, color: C.muted, lineHeight: 1.5, margin: 0 }}>
+              Scan the whole video at low resolution first and ask the model which moments matter,
+              instead of sampling at a fixed interval. Spends the frame budget on real transitions
+              rather than on a static screen. Adds one cheap API call; falls back to fixed sampling
+              if it fails.
+            </p>
+          </div>
+        </label>
+      </section>
+
       {/* Voice Summary Card */}
       <section style={{ marginBottom: 28 }}>
         <div style={label}>Voice</div>

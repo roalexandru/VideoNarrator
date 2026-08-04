@@ -26,6 +26,10 @@ describe("configStore", () => {
     expect(state.reasoningEffort).toBe("balanced");
     expect(state.ttsProvider).toBe("elevenlabs");
     expect(state.strictMode).toBe(false);
+    // Grounding features ship enabled — a regression here silently reverts
+    // narration to the pre-0.10 behaviour without any visible signal.
+    expect(state.screenText).toBe(true);
+    expect(state.modelFrameSelection).toBe(true);
   });
 
   it("sets style", () => {
@@ -76,11 +80,29 @@ describe("configStore", () => {
     expect(useConfigStore.getState().strictMode).toBe(false);
   });
 
+  it("toggles on-screen text reading", () => {
+    expect(useConfigStore.getState().screenText).toBe(true);
+    useConfigStore.getState().setScreenText(false);
+    expect(useConfigStore.getState().screenText).toBe(false);
+    useConfigStore.getState().setScreenText(true);
+    expect(useConfigStore.getState().screenText).toBe(true);
+  });
+
+  it("toggles model-driven frame selection", () => {
+    expect(useConfigStore.getState().modelFrameSelection).toBe(true);
+    useConfigStore.getState().setModelFrameSelection(false);
+    expect(useConfigStore.getState().modelFrameSelection).toBe(false);
+    useConfigStore.getState().setModelFrameSelection(true);
+    expect(useConfigStore.getState().modelFrameSelection).toBe(true);
+  });
+
   it("resets to initial state", () => {
     useConfigStore.getState().setStyle("technical");
     useConfigStore.getState().setTemperature(0.2);
     useConfigStore.getState().setAiProvider("openai");
     useConfigStore.getState().setStrictMode(true);
+    useConfigStore.getState().setScreenText(false);
+    useConfigStore.getState().setModelFrameSelection(false);
     useConfigStore.getState().reset();
 
     const state = useConfigStore.getState();
@@ -88,6 +110,9 @@ describe("configStore", () => {
     expect(state.temperature).toBe(0.7);
     expect(state.aiProvider).toBe("claude");
     expect(state.strictMode).toBe(false);
+    // Reset must restore the enabled defaults, not fall back to `false`.
+    expect(state.screenText).toBe(true);
+    expect(state.modelFrameSelection).toBe(true);
   });
 });
 
