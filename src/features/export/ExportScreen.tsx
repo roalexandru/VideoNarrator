@@ -7,9 +7,9 @@ import { useConfigStore } from "../../stores/configStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore } from "../../stores/editStore";
 import {
-  exportScript, getElevenLabsConfig, saveElevenLabsConfig, listElevenLabsVoices,
+  exportScript, getElevenLabsConfig, listElevenLabsVoices,
   generateTts, mergeAudioVideo, burnSubtitles, openFolder, getHomeDir,
-  getAzureTtsConfig, saveAzureTtsConfig, applyVideoEdits, cancelVideoOperation,
+  getAzureTtsConfig, applyVideoEdits, cancelVideoOperation,
   ffmpegSupportsSubtitleBurn,
   type ElevenLabsConfig, type ElevenLabsVoice, type AzureTtsConfig,
 } from "../../lib/tauri/commands";
@@ -223,22 +223,45 @@ export function ExportScreen() {
     });
   }, [projectTitle]);
 
-  // Load TTS config
-  useEffect(() => {
-    getElevenLabsConfig().then((cfg) => {
+  /**
+   * Read the persisted TTS configs into local state and return them.
+   *
+   * Settings is the sole owner of these configs — this screen only reads them
+   * (for the has-a-key gate, the speed readout and the provider label). It must
+   * never write them back: Settings renders as a sibling overlay, so opening it
+   * from here does not unmount this screen, and a snapshot taken at mount goes
+   * stale the moment the user picks a different voice.
+   *
+   * Callers that gate on the config re-read it rather than trusting that
+   * snapshot, since the voice may have changed since mount.
+   */
+  const loadTtsConfigs = useCallback(async () => {
+    let el: ElevenLabsConfig | null = null;
+    let az: AzureTtsConfig | null = null;
+    try {
+      const cfg = await getElevenLabsConfig();
       if (cfg?.api_key) {
+        el = cfg;
         setElConfig(cfg);
         listElevenLabsVoices(cfg.api_key).then(setElVoices).catch((err: unknown) => {
           console.error("Failed to load export config:", err);
         });
       }
-    }).catch((err: unknown) => {
+    } catch (err: unknown) {
       console.error("Failed to load export config:", err);
-    });
-    getAzureTtsConfig().then(setAzureConfig).catch((err: unknown) => {
+    }
+    try {
+      az = await getAzureTtsConfig();
+      setAzureConfig(az);
+    } catch (err: unknown) {
       console.error("Failed to load export config:", err);
-    });
+    }
+    return { el, az };
   }, []);
+
+  useEffect(() => {
+    loadTtsConfigs();
+  }, [loadTtsConfigs]);
 
   const changePath = async () => {
     const d = await open({ directory: true });
@@ -253,12 +276,12 @@ export function ExportScreen() {
   // ── Export Video pipeline ──
   const doExportVideo = async () => {
     if (!exp.outputDirectory || !originalVideoPath) return;
-    if (ttsProvider === "elevenlabs" && !elConfig) return;
-    if (ttsProvider === "azure" && !azureConfig) return;
+    // Re-read rather than trusting the mount-time snapshot: the user may have
+    // changed voice in Settings without this screen ever unmounting.
+    const { el, az } = await loadTtsConfigs();
+    if (ttsProvider === "elevenlabs" && !el) return;
+    if (ttsProvider === "azure" && !az) return;
     // builtin provider needs no config check
-
-    if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
-    if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
 
     const script = getScript();
     if (!script) return;
@@ -452,12 +475,12 @@ export function ExportScreen() {
   // ── Export Audio Only ──
   const doExportAudio = async () => {
     if (!exp.outputDirectory) return;
-    if (ttsProvider === "elevenlabs" && !elConfig) return;
-    if (ttsProvider === "azure" && !azureConfig) return;
+    // Re-read rather than trusting the mount-time snapshot: the user may have
+    // changed voice in Settings without this screen ever unmounting.
+    const { el, az } = await loadTtsConfigs();
+    if (ttsProvider === "elevenlabs" && !el) return;
+    if (ttsProvider === "azure" && !az) return;
     // builtin provider needs no config check
-
-    if (ttsProvider === "elevenlabs" && elConfig) await saveElevenLabsConfig(elConfig);
-    if (ttsProvider === "azure" && azureConfig) await saveAzureTtsConfig(azureConfig);
 
     const script = getScript();
     if (!script) return;

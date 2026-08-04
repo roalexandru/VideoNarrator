@@ -158,4 +158,99 @@ describe("ExportScreen", () => {
     const changeButtons = screen.getAllByText("Change");
     expect(changeButtons.length).toBeGreaterThanOrEqual(2);
   });
+
+  /**
+   * Regression: the Export screen must never write the TTS config back.
+   *
+   * Settings renders as a sibling overlay of the wizard (App.tsx), so opening it
+   * from Export's "Go to Settings" does not unmount this screen. Export used to
+   * persist its mount-time config snapshot on every export, which silently
+   * reverted whatever voice the user had just picked — a cloned voice would go
+   * back to the previously configured one.
+   */
+  describe("TTS config ownership", () => {
+    const CLONED = "8gF3HrlFgvtc7c3UAHnx";
+    const PREVIOUS = "JBFqnCBsd6RMkjVDRZzb";
+
+    /** Wire mocks where the persisted voice can change mid-test, and record writes. */
+    function setupVoiceMocks() {
+      const saved: unknown[] = [];
+      let reads = 0;
+      const state = {
+        api_key: "test-el-key",
+        voice_id: PREVIOUS,
+        model_id: "eleven_multilingual_v2",
+        stability: 0.5,
+        similarity_boost: 0.75,
+        style: 0,
+        speed: 1.0,
+      };
+      setupDefaultMocks({
+        get_elevenlabs_config: () => {
+          reads += 1;
+          return { ...state };
+        },
+        save_elevenlabs_config: (payload) => {
+          saved.push(payload);
+          return null;
+        },
+      });
+      return {
+        saved,
+        readCount: () => reads,
+        /** Simulate the user picking a different voice in the Settings overlay. */
+        pickVoiceInSettings: (id: string) => {
+          state.voice_id = id;
+        },
+      };
+    }
+
+    it("does not revert a voice picked in Settings while Export stays mounted", async () => {
+      const mocks = setupVoiceMocks();
+      const user = userEvent.setup();
+      render(<ExportScreen />);
+      await screen.findByText("Export Audio");
+
+      // User opens the Settings overlay from Export and picks their cloned
+      // voice. Export is never unmounted, so its snapshot still holds PREVIOUS.
+      mocks.pickVoiceInSettings(CLONED);
+
+      await user.click(screen.getByText("Export Audio"));
+
+      const reverted = mocks.saved.filter(
+        (p) =>
+          (p as { config?: { voice_id?: string } })?.config?.voice_id ===
+          PREVIOUS,
+      );
+      expect(reverted).toEqual([]);
+      expect(mocks.saved).toEqual([]);
+    });
+
+    it("re-reads the persisted config at export time", async () => {
+      const mocks = setupVoiceMocks();
+      const user = userEvent.setup();
+      render(<ExportScreen />);
+      await screen.findByText("Export Audio");
+
+      const afterMount = mocks.readCount();
+      expect(afterMount).toBeGreaterThan(0);
+
+      await user.click(screen.getByText("Export Audio"));
+
+      // Export must not gate on a snapshot that may be stale.
+      expect(mocks.readCount()).toBeGreaterThan(afterMount);
+    });
+
+    it("never writes the TTS config from the Export screen", async () => {
+      const mocks = setupVoiceMocks();
+      const user = userEvent.setup();
+      render(<ExportScreen />);
+      await screen.findByText("Export Video");
+
+      await user.click(screen.getByText("Export Video"));
+      await user.click(screen.getByText("Export Audio"));
+
+      expect(mocks.saved).toEqual([]);
+    });
+  });
 });
