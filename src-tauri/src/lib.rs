@@ -10,6 +10,8 @@ mod compositor;
 mod contact_sheet;
 mod cost_estimate;
 mod doc_processor;
+#[cfg(test)]
+mod e2e_tests;
 mod elevenlabs_client;
 mod error;
 mod export_engine;

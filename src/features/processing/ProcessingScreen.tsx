@@ -222,6 +222,8 @@ export function ProcessingScreen() {
       ai_config: { provider: config.aiProvider, model: config.model, temperature: effectiveTemperature, reasoning_effort: config.reasoningEffort },
       custom_prompt: config.customPrompt,
       strict_mode: config.strictMode,
+      use_screen_text: config.screenText,
+      use_model_frame_selection: config.modelFrameSelection,
       ...(resumeSegments.length > 0 ? { resume_segments: resumeSegments } : {}),
     };
     try {

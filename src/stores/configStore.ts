@@ -29,6 +29,14 @@ interface ConfigStore {
    *  the cost of one multimodal API call plus up to five refine calls per
    *  iteration. Off by default. */
   strictMode: boolean;
+  /** Read the text visible on screen (OCR) and give it to the model, so
+   *  narration can name the actual command, file or error instead of describing
+   *  it generically. On by default; inert on platforms without a recognizer. */
+  screenText: boolean;
+  /** Let the model pick which moments deserve full-resolution frames, via one
+   *  cheap low-resolution survey pass, instead of an even-spaced subsample.
+   *  On by default; falls back to even spacing on any failure. */
+  modelFrameSelection: boolean;
 
   setStyle: (style: NarrationStyleId) => void;
   toggleLanguage: (lang: LanguageCode) => void;
@@ -44,6 +52,8 @@ interface ConfigStore {
   setReasoningEffort: (effort: ReasoningEffort) => void;
   setTtsProvider: (provider: TtsProvider) => void;
   setStrictMode: (enabled: boolean) => void;
+  setScreenText: (enabled: boolean) => void;
+  setModelFrameSelection: (enabled: boolean) => void;
   reset: () => void;
 }
 
@@ -61,6 +71,8 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   reasoningEffort: "balanced",
   ttsProvider: "elevenlabs",
   strictMode: false,
+  screenText: true,
+  modelFrameSelection: true,
 
   setStyle: (style) => set({ style }),
 
@@ -88,6 +100,8 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   setReasoningEffort: (effort) => set({ reasoningEffort: effort }),
   setTtsProvider: (provider) => set({ ttsProvider: provider }),
   setStrictMode: (enabled) => set({ strictMode: enabled }),
+  setScreenText: (enabled) => set({ screenText: enabled }),
+  setModelFrameSelection: (enabled) => set({ modelFrameSelection: enabled }),
   reset: () =>
     set({
       style: "product_demo",
@@ -103,5 +117,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
       reasoningEffort: "balanced",
       ttsProvider: "elevenlabs",
       strictMode: false,
+      screenText: true,
+      modelFrameSelection: true,
     }),
 }));
