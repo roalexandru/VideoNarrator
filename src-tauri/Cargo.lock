@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "narrator"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "ab_glyph",
  "async-trait",
