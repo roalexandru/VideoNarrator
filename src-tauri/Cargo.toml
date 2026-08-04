@@ -45,7 +45,7 @@ chrono = { version = "0.4", features = ["serde"] }
 toml = "1"
 tempfile = "3"
 blake3 = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 rayon = "1.12"
 directories = "6"
 thiserror = "2"
@@ -56,7 +56,7 @@ futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 clap = { version = "4", features = ["derive"] }
 # Compositor: pure-Rust 2D rendering for the in-process effects pipeline.
-tiny-skia = "0.11"
+tiny-skia = "0.12"
 # Glyph rasterization for the text overlay effect.
 ab_glyph = "0.2"
 # Pure-Rust WAV I/O for the in-process audio mixer (Phase 5).

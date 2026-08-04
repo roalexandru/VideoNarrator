@@ -9,9 +9,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -59,7 +59,7 @@ jobs:
             friendly: Windows-x64
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Exclude build paths and toolchain processes from Defender. On Windows
       # runners this typically saves 20-30% of build I/O. Best-effort: a
@@ -83,7 +83,7 @@ jobs:
           Add-MpPreference -ExclusionProcess "pnpm.exe"
 
       - uses: pnpm/action-setup@v5
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
