@@ -1,25 +1,48 @@
 version: 2
 updates:
+  # Covers BOTH the root app and website/ — they are one pnpm workspace
+  # (pnpm-workspace.yaml lists "." and "website", single root pnpm-lock.yaml).
+  # Dependabot cannot update a pnpm workspace from a subdirectory, so a
+  # separate `directory: /website` entry leaves the root lockfile stale and
+  # every website PR fails CI with ERR_PNPM_OUTDATED_LOCKFILE.
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    groups:
+      npm-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: cargo
     directory: /src-tauri
     schedule:
       interval: weekly
-    open-pull-requests-limit: 5
-
-  - package-ecosystem: npm
-    directory: /website
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 3
+    groups:
+      actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Pinned at v0.6.2 on purpose (see 25dbe91). v1.x needs a manual
+      # migration + a real signed-release test run before it can land.
+      - dependency-name: tauri-apps/tauri-action
+        update-types:
+          - version-update:semver-major
