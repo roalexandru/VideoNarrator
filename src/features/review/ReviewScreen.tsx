@@ -1,11 +1,11 @@
-import { useRef, useEffect, useCallback, useState, useMemo } from "react";
+import { useRef, useEffect, useCallback, useState, useMemo, Fragment } from "react";
 import { useScriptStore } from "../../stores/scriptStore";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore } from "../../stores/editStore";
 import { useConfigStore } from "../../stores/configStore";
 import { useWizardStore } from "../../hooks/useWizardNavigation";
 import { secondsToTimestamp } from "../../lib/formatters";
-import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, refineScript, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
+import { listProjectFrames, generateTts, getHomeDir, translateScript, refineSegment, refineScript, generateChapters, listElevenLabsVoices, listAzureTtsVoices, listBuiltinVoices, getElevenLabsConfig, getAzureTtsConfig } from "../../lib/tauri/commands";
 import { convertFileSrc, Channel } from "@tauri-apps/api/core";
 import { ConfirmDialog } from "../../components/ui/ConfirmDialog";
 import { showToast } from "../../components/ui/Toast";
@@ -180,6 +180,48 @@ export function ReviewScreen() {
       setRefineAllLoading(false);
     }
   }, [refineAllInstruction, refineAllLoading, script, aiProvider, aiModel, aiTemperature, configStyle, customPrompt, activeLanguage, setScript]);
+
+  // ── Auto-chapters ──
+  // Chapters are navigation metadata, not script content, so generating them
+  // replaces only `script.chapters` and leaves segments (including unsaved
+  // edits) untouched.
+  /** segment index -> chapter title, for the inline headers in the list. */
+  const chapterByStartSegment = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const c of script?.chapters ?? []) m.set(c.start_segment, c.title);
+    return m;
+  }, [script?.chapters]);
+
+  const [chaptersLoading, setChaptersLoading] = useState(false);
+  const handleGenerateChapters = useCallback(async () => {
+    if (!script || chaptersLoading) return;
+    setChaptersLoading(true);
+    try {
+      const chapters = await generateChapters(script, {
+        provider: aiProvider,
+        model: aiModel,
+        temperature: aiTemperature,
+        reasoning_effort: aiReasoningEffort,
+      });
+      setScript(activeLanguage, { ...script, chapters });
+      if (chapters.length === 0) {
+        showToast("This video is too short to divide into chapters", "info");
+      } else {
+        showToast(`Generated ${chapters.length} chapters`, "success");
+      }
+      trackEvent("chapters_generated", {
+        provider: aiProvider,
+        model: aiModel,
+        chapters: chapters.length,
+        segments: script.segments.length,
+      });
+    } catch (err) {
+      console.error("Chapter generation failed:", err);
+      showToast(`Chapters failed: ${String(err).replace(/^(Error: )?/, "")}`, "error");
+    } finally {
+      setChaptersLoading(false);
+    }
+  }, [script, chaptersLoading, aiProvider, aiModel, aiTemperature, aiReasoningEffort, activeLanguage, setScript]);
 
   const handleTranslate = useCallback(async () => {
     if (!translateLang || !script || translating) return;
@@ -630,6 +672,20 @@ export function ReviewScreen() {
                   background: showRefineAll ? "rgba(99,102,241,0.1)" : "transparent",
                   color: C.dim, fontSize: 11, fontWeight: 600, cursor: "pointer",
                 }} title="Rewrite the entire script with a single instruction">✨ Refine with AI</button>
+              </div>
+              <div style={{ position: "relative" }}>
+                <button
+                  onClick={handleGenerateChapters}
+                  disabled={chaptersLoading}
+                  style={{
+                    padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border}`, fontFamily: "inherit",
+                    background: "transparent", color: C.dim, fontSize: 11, fontWeight: 600,
+                    cursor: chaptersLoading ? "default" : "pointer", opacity: chaptersLoading ? 0.5 : 1,
+                  }}
+                  title="Group segments into named chapters for a YouTube/podcast description"
+                >
+                  {chaptersLoading ? "Generating…" : "🔖 Chapters"}
+                </button>
                 {showRefineAll && (
                   <div style={{
                     position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 20,
@@ -854,8 +910,22 @@ export function ReviewScreen() {
           <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
             {segments.map((seg, i) => {
               const isCurrent = i === currentSegmentIdx || previewSegIdx === i;
+              const chapterTitle = chapterByStartSegment.get(i);
               return (
-                <div key={i} onClick={() => handleSegmentClick(i)} style={{
+                <Fragment key={i}>
+                {chapterTitle && (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "10px 10px 4px", marginTop: i === 0 ? 0 : 6,
+                    fontSize: 11, fontWeight: 700, letterSpacing: 0.6,
+                    textTransform: "uppercase", color: C.muted,
+                  }}>
+                    <span style={{ color: "#6366f1" }}>&#9679;</span>
+                    <span>{chapterTitle}</span>
+                    <span style={{ flex: 1, height: 1, background: C.border }} />
+                  </div>
+                )}
+                <div onClick={() => handleSegmentClick(i)} style={{
                   display: "flex", gap: 10, alignItems: "flex-start",
                   padding: "8px 10px", cursor: "pointer",
                   background: isCurrent ? "rgba(99,102,241,0.06)" : "transparent",
@@ -1027,6 +1097,7 @@ export function ReviewScreen() {
                     )}
                   </div>
                 </div>
+                </Fragment>
               );
             })}
           </div>

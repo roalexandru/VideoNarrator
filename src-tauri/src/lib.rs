@@ -132,6 +132,7 @@ pub fn run() {
             commands::generate_narration,
             commands::translate_script,
             commands::refine_segment,
+            commands::generate_chapters,
             commands::refine_script,
             commands::cancel_generation,
             commands::cancel_video_operation,

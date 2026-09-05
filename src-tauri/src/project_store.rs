@@ -1300,6 +1300,7 @@ mod tests {
         create_project(&cfg).unwrap();
 
         let script = NarrationScript {
+            chapters: None,
             title: "S1".into(),
             total_duration_seconds: 30.0,
             segments: vec![],
@@ -1333,6 +1334,7 @@ mod tests {
         std::fs::write(&outside, b"keep").unwrap();
 
         let script = NarrationScript {
+            chapters: None,
             title: "S1".into(),
             total_duration_seconds: 30.0,
             segments: vec![],
@@ -1456,6 +1458,7 @@ mod tests {
         create_project(&cfg).unwrap();
 
         let script = NarrationScript {
+            chapters: None,
             title: "s".into(),
             total_duration_seconds: 10.0,
             segments: vec![Segment {

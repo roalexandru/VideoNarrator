@@ -216,6 +216,29 @@ pub struct NarrationScript {
     /// persists to disk and the frontend doesn't need to recompute on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speech_rate_report: Option<Vec<crate::speech_rate::SegmentOverflow>>,
+    /// Named sections over the narration, for chapter markers. `None` means
+    /// chapters were never generated for this script — distinct from `Some([])`,
+    /// which means the model was asked and found the video too short or too
+    /// uniform to divide. Absent on scripts written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chapters: Option<Vec<Chapter>>,
+}
+
+/// One named section of the narration.
+///
+/// A chapter is identified only by where it *starts*. Its end is the next
+/// chapter's start (or the end of the script), which makes gaps and overlaps
+/// unrepresentable — the two failure modes a start/end pair invites when the
+/// model returns slightly inconsistent numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// Short label, e.g. "Connecting your data source".
+    pub title: String,
+    /// Where the chapter begins on the video timeline.
+    pub start_seconds: f64,
+    /// Index into `NarrationScript::segments` of the first segment covered.
+    #[serde(default)]
+    pub start_segment: usize,
 }
 
 /// A stretch of the source audio quiet enough to place narration over.
@@ -578,6 +601,31 @@ pub enum ExportFormat {
     #[serde(rename = "md")]
     Markdown,
     Ssml,
+    /// `H:MM:SS Title` markers for a YouTube/Vimeo/podcast description.
+    Chapters,
+}
+
+impl ExportFormat {
+    /// Filename suffix for this format.
+    ///
+    /// Separate from `Display` (which names the format in `ExportResult`)
+    /// because chapter markers are plain text but must not collide with a
+    /// `Txt` export selected in the same run — both would land on
+    /// `narration.txt` and one would silently overwrite the other.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            ExportFormat::Chapters => "chapters.txt",
+            other => match other {
+                ExportFormat::Json => "json",
+                ExportFormat::Srt => "srt",
+                ExportFormat::Vtt => "vtt",
+                ExportFormat::Txt => "txt",
+                ExportFormat::Markdown => "md",
+                ExportFormat::Ssml => "ssml",
+                ExportFormat::Chapters => unreachable!(),
+            },
+        }
+    }
 }
 
 impl std::fmt::Display for ExportFormat {
@@ -589,6 +637,7 @@ impl std::fmt::Display for ExportFormat {
             ExportFormat::Txt => write!(f, "txt"),
             ExportFormat::Markdown => write!(f, "md"),
             ExportFormat::Ssml => write!(f, "ssml"),
+            ExportFormat::Chapters => write!(f, "chapters"),
         }
     }
 }
@@ -700,6 +749,7 @@ mod tests {
     #[test]
     fn test_serialize_narration_script() {
         let script = NarrationScript {
+            chapters: None,
             title: "Roundtrip Test".to_string(),
             total_duration_seconds: 60.0,
             segments: vec![Segment {

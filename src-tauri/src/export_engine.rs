@@ -258,6 +258,58 @@ fn format_vtt_time(seconds: f64) -> String {
     format!("{h:02}:{m:02}:{s:02}.{ms:03}")
 }
 
+/// Chapter markers in the `H:MM:SS Title` form YouTube, Vimeo and most podcast
+/// hosts parse out of a description.
+///
+/// The first marker must be at 00:00 or the platform ignores the whole list,
+/// so a script whose first chapter starts later gets one synthesized from the
+/// script title. Chapters are emitted in timeline order regardless of the
+/// order the model returned them in.
+pub fn export_chapters(script: &NarrationScript) -> String {
+    let Some(chapters) = script.chapters.as_ref() else {
+        return String::new();
+    };
+    if chapters.is_empty() {
+        return String::new();
+    }
+
+    let mut ordered: Vec<&crate::models::Chapter> = chapters.iter().collect();
+    ordered.sort_by(|a, b| a.start_seconds.total_cmp(&b.start_seconds));
+
+    let mut output = String::new();
+    // YouTube requires the list to open at zero; without it the timestamps are
+    // rendered as plain text instead of chapter links.
+    if ordered[0].start_seconds > 0.05 {
+        output.push_str(&format!("{} {}\n", format_chapter_time(0.0), script.title));
+    }
+    for c in ordered {
+        let title = c.title.trim();
+        if title.is_empty() {
+            continue;
+        }
+        output.push_str(&format!(
+            "{} {}\n",
+            format_chapter_time(c.start_seconds.max(0.0)),
+            title
+        ));
+    }
+    output
+}
+
+/// `M:SS` under an hour, `H:MM:SS` at or past it — the form chapter parsers
+/// expect. Fractional seconds are floored, never rounded up past the mark.
+fn format_chapter_time(seconds: f64) -> String {
+    let total = seconds.max(0.0).floor() as u64;
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 fn format_human_time(seconds: f64) -> String {
     let m = (seconds / 60.0).floor() as u64;
     let s = seconds % 60.0;
@@ -269,8 +321,80 @@ mod tests {
     use super::*;
     use crate::models::*;
 
+    fn chaptered(chapters: Option<Vec<Chapter>>) -> NarrationScript {
+        let mut s = sample_script();
+        s.title = "Product Tour".to_string();
+        s.chapters = chapters;
+        s
+    }
+
+    fn ch(title: &str, start: f64) -> Chapter {
+        Chapter {
+            title: title.to_string(),
+            start_seconds: start,
+            start_segment: 0,
+        }
+    }
+
+    #[test]
+    fn chapters_export_uses_m_ss_under_an_hour() {
+        let out = export_chapters(&chaptered(Some(vec![ch("Intro", 0.0), ch("Setup", 75.0)])));
+        assert_eq!(out, "0:00 Intro\n1:15 Setup\n");
+    }
+
+    #[test]
+    fn chapters_export_switches_to_h_mm_ss_past_an_hour() {
+        let out = export_chapters(&chaptered(Some(vec![
+            ch("Intro", 0.0),
+            ch("Deep dive", 3725.0),
+        ])));
+        assert!(out.ends_with("1:02:05 Deep dive\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn chapters_export_synthesizes_a_zero_marker_when_the_first_starts_late() {
+        // YouTube ignores the whole list unless it opens at 00:00.
+        let out = export_chapters(&chaptered(Some(vec![ch("Setup", 30.0)])));
+        assert_eq!(out, "0:00 Product Tour\n0:30 Setup\n");
+    }
+
+    #[test]
+    fn chapters_export_orders_by_time_not_by_model_output_order() {
+        let out = export_chapters(&chaptered(Some(vec![ch("Later", 60.0), ch("First", 0.0)])));
+        assert_eq!(out, "0:00 First\n1:00 Later\n");
+    }
+
+    #[test]
+    fn chapters_export_floors_rather_than_rounding_past_the_mark() {
+        // 59.9s must not become 1:00 — that would point past the moment.
+        let out = export_chapters(&chaptered(Some(vec![ch("Intro", 0.0), ch("Next", 59.9)])));
+        assert!(out.ends_with("0:59 Next\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn chapters_export_skips_blank_titles() {
+        let out = export_chapters(&chaptered(Some(vec![ch("Intro", 0.0), ch("   ", 30.0)])));
+        assert_eq!(out, "0:00 Intro\n");
+    }
+
+    #[test]
+    fn chapters_export_is_empty_when_absent_or_none_generated() {
+        assert_eq!(export_chapters(&chaptered(None)), "");
+        assert_eq!(export_chapters(&chaptered(Some(vec![]))), "");
+    }
+
+    #[test]
+    fn chapters_extension_does_not_collide_with_a_txt_export() {
+        assert_ne!(
+            ExportFormat::Chapters.extension(),
+            ExportFormat::Txt.extension()
+        );
+        assert_eq!(ExportFormat::Chapters.extension(), "chapters.txt");
+    }
+
     fn sample_script() -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "Test Video".to_string(),
             total_duration_seconds: 30.0,
             segments: vec![
@@ -400,6 +524,7 @@ mod tests {
 
     fn test_script() -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "Test".to_string(),
             total_duration_seconds: 30.0,
             segments: vec![
@@ -523,6 +648,7 @@ mod tests {
     #[test]
     fn test_export_empty_segments() {
         let script = NarrationScript {
+            chapters: None,
             title: "Empty".to_string(),
             total_duration_seconds: 0.0,
             segments: vec![],
@@ -569,6 +695,7 @@ mod tests {
 
     fn make_script(segments: Vec<(&str, Vec<&str>)>) -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "T".into(),
             total_duration_seconds: 30.0,
             segments: segments
