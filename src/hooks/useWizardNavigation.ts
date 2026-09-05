@@ -27,6 +27,11 @@ export const useWizardStore = create<WizardState>((set) => ({
   goNext: () =>
     set((state) => {
       const next = Math.min(state.currentStep + 1, 5);
+      // Next at the last step clamps to where we already are. Tracking that
+      // reports a navigation that never happened, and `step_visited` is the
+      // single most common event — phantoms distort the whole funnel. Same
+      // guard `goToStep` has always had.
+      if (next === state.currentStep) return state;
       trackEvent("step_visited", { step: STEP_LABELS[next] || `step_${next}`, step_index: next });
       return {
         currentStep: next,
@@ -37,6 +42,8 @@ export const useWizardStore = create<WizardState>((set) => ({
   goBack: () =>
     set((state) => {
       const prev = Math.max(state.currentStep - 1, 0);
+      // Back at the first step clamps to itself — see `goNext`.
+      if (prev === state.currentStep) return state;
       trackEvent("step_visited", { step: STEP_LABELS[prev] || `step_${prev}`, step_index: prev });
       return {
         currentStep: prev,

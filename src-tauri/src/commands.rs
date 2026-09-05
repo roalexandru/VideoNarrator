@@ -304,6 +304,18 @@ pub fn track_event(
     state.track(name, props);
 }
 
+/// Hand the webview's locale to the telemetry client.
+///
+/// Rust cannot portably read the UI language, so `navigator.language` is the
+/// only real source. Called once at startup from `initTelemetry`.
+#[tauri::command]
+pub fn set_telemetry_locale(
+    locale: String,
+    state: tauri::State<'_, std::sync::Arc<crate::telemetry::TelemetryClient>>,
+) {
+    state.set_locale(locale);
+}
+
 // ── System commands ──
 
 #[tauri::command]
@@ -1975,6 +1987,7 @@ pub async fn generate_tts(
                 }
                 Err(e) => {
                     results.push(elevenlabs_client::TtsResult {
+                        measured: None,
                         segment_index: seg.index,
                         file_path: filepath.to_string_lossy().to_string(),
                         success: false,
@@ -2037,7 +2050,26 @@ pub async fn generate_tts(
                         ),
                     }
 
+                    // Hand the *measured* compression back so telemetry can
+                    // report what the export did instead of what the frontend
+                    // predicted from word counts. The overrun is derived from
+                    // the furthest measured segment end rather than the last
+                    // one, since a segment can overrun past its successor.
+                    let audio_end = stats
+                        .actual_timings
+                        .iter()
+                        .map(|t| t.end_seconds)
+                        .fold(0.0_f64, f64::max);
+                    let measured = elevenlabs_client::MeasuredNarration {
+                        segments_total: stats.segments_total,
+                        segments_compressed: stats.segments_compressed,
+                        segments_over_cap: stats.segments_over_cap,
+                        audio_overrun_ms: (((audio_end - video_dur).max(0.0)) * 1000.0).round()
+                            as u64,
+                    };
+
                     results.push(elevenlabs_client::TtsResult {
+                        measured: Some(measured),
                         segment_index: 0,
                         file_path: final_path.to_string_lossy().to_string(),
                         success: true,
@@ -2048,6 +2080,7 @@ pub async fn generate_tts(
                     tracing::error!("ffmpeg concat failed: {e}");
                     for (idx, path, _, _) in &segment_files {
                         results.push(elevenlabs_client::TtsResult {
+                            measured: None,
                             segment_index: *idx,
                             file_path: path.to_string_lossy().to_string(),
                             success: true,
@@ -2091,6 +2124,7 @@ pub async fn generate_tts(
             match generate_speech_for_provider(&seg_tts, &seg.text, &filepath).await {
                 Ok(()) => {
                     results.push(elevenlabs_client::TtsResult {
+                        measured: None,
                         segment_index: seg.index,
                         file_path: filepath.to_string_lossy().to_string(),
                         success: true,
@@ -2099,6 +2133,7 @@ pub async fn generate_tts(
                 }
                 Err(e) => {
                     results.push(elevenlabs_client::TtsResult {
+                        measured: None,
                         segment_index: seg.index,
                         file_path: filepath.to_string_lossy().to_string(),
                         success: false,
@@ -2444,19 +2479,33 @@ pub async fn open_folder(path: String) -> Result<(), NarratorError> {
             "Path is not a directory",
         )));
     }
+    // Only the program name varies per platform, so keep one spawn site
+    // rather than three cfg-gated ones. CI compiles Rust on ubuntu only, so a
+    // mistake inside a macOS- or Windows-only block would not surface until
+    // the release build; a single shared path is checked everywhere.
+    //
+    // No console suppression is needed for any of these: `explorer.exe` is a
+    // GUI-subsystem binary, and the other two are not Windows.
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(&path).spawn();
-    }
+    const OPENER: &str = "open";
     #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("explorer").arg(&path).spawn();
+    const OPENER: &str = "explorer";
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    const OPENER: &str = "xdg-open";
+
+    // `tokio::process` rather than `std::process`: dropping a
+    // `std::process::Child` does not wait on it, so every "open folder" click
+    // left a zombie in the process table for the lifetime of the app. Tokio
+    // hands an unwaited child to its orphan reaper instead.
+    match tokio::process::Command::new(OPENER).arg(&path).spawn() {
+        // The file manager runs independently of us; we only care that it
+        // started. Dropping the handle is safe because tokio reaps it.
+        Ok(_child) => Ok(()),
+        Err(e) => {
+            tracing::warn!("Could not open {path} in the file manager: {e}");
+            Err(NarratorError::IoError(e))
+        }
     }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
-    }
-    Ok(())
 }
 
 // ── Frame commands ──

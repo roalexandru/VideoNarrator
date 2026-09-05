@@ -112,11 +112,23 @@ export function predictExport(
    * against a wrong (inflated) video-duration, not a merely tight segment.
    */
   segmentsPastEnd: number;
+  /**
+   * How far into the video the last segment reaches.
+   *
+   * The caller compares this against `videoDuration`. A script that stops a
+   * quarter of the way in leaves most of the video silent, which is what a
+   * wrong (deflated) video duration looks like from this side — observed in
+   * production as a 220s video that generated a 53-second, 5-segment script
+   * with not one segment fitting its window. `segmentsPastEnd` catches the
+   * opposite (inflated) case; this catches this one.
+   */
+  scriptCoverageSeconds: number;
 } {
   let compressed = 0;
   let overCap = 0;
   let segmentsPastEnd = 0;
   let audioPos = 0;
+  let scriptCoverageSeconds = 0;
 
   for (const seg of segments) {
     const window = Math.max(0.5, seg.end_seconds - seg.start_seconds);
@@ -124,6 +136,11 @@ export function predictExport(
 
     if (videoDuration > 0 && seg.start_seconds >= videoDuration - 0.5) {
       segmentsPastEnd += 1;
+    }
+    // Max rather than last: segments are normally ordered, but a hand-edited
+    // or model-reordered script should not under-report its reach.
+    if (seg.end_seconds > scriptCoverageSeconds) {
+      scriptCoverageSeconds = seg.end_seconds;
     }
 
     // Silence gap before the segment, matching the Rust loop's `if gap > 0.05`
@@ -153,7 +170,7 @@ export function predictExport(
   // the audio longer than the video — only the `audioPos > videoDuration`
   // case does.
   const padSeconds = Math.max(0, audioPos - videoDuration);
-  return { compressed, overCap, padSeconds, segmentsPastEnd };
+  return { compressed, overCap, padSeconds, segmentsPastEnd, scriptCoverageSeconds };
 }
 
 // ── private helpers ────────────────────────────────────────────────────────

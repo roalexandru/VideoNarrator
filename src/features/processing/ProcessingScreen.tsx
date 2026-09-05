@@ -258,6 +258,11 @@ export function ProcessingScreen() {
         style: config.style,
         language: config.primaryLanguage,
         duration_s: Math.round(script.total_duration_seconds),
+        // The script's own duration was the only one reported, so a script
+        // that covered a quarter of its video was indistinguishable from a
+        // short video. Sending the source duration alongside makes the gap
+        // visible without having to join against `video_imported`.
+        video_duration_s: Math.round(project.videoFile?.duration ?? 0),
         wall_time_s: wallTime,
         has_edits: editSnapshot.clips.length > 1 || editSnapshot.clips.some((c) => c.speed !== 1.0),
         frame_density: config.frameDensity,

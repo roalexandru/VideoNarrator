@@ -432,14 +432,19 @@ export function ExportScreen() {
       setVideoPhase("done");
       trackEvent("export_completed", { type: "video", tts_provider: ttsProviderTelemetry, burn_subtitles: exp.burnSubtitles, replace_audio: exp.replaceAudio, wall_time_s: Math.round((Date.now() - exportStart) / 1000) });
 
-      // Predicted compression / padding stats — computed from the same
-      // deterministic math Export uses (see speechRate.predictExport).
-      // We don't plumb per-segment actuals back through IPC because the
-      // prediction is provably accurate for the non-error path.
+      // Compression / padding stats. The prediction below is still computed
+      // as the fallback, but the backend now returns what it *measured* and
+      // that wins when present.
+      //
+      // This used to say the prediction was "provably accurate for the
+      // non-error path", which is not quite right: `predictExport` estimates
+      // each segment's duration from its word count and an assumed speaking
+      // rate for the language, so it is only as accurate as that model of the
+      // TTS voice. The concat pass probes the rendered files and knows.
       const scriptLang = script.metadata.language || "en";
       const videoDur = script.total_duration_seconds || 0;
-      // Same speed multiplier the backend applies, so the prediction matches
-      // the actual compression/padding counters at export time.
+      // Same speed multiplier the backend applies, so the fallback prediction
+      // stays comparable to the measured counters.
       const ttsSpeed = (() => {
         if (ttsProviderRaw === "elevenlabs") return elConfig?.speed || 1.0;
         if (ttsProviderRaw === "azure") return azureConfig?.speed || 1.0;
@@ -448,11 +453,21 @@ export function ExportScreen() {
         return Number.parseFloat(parts[2] || "1.0") || 1.0;
       })();
       const prediction = predictExport(script.segments, scriptLang, videoDur, ttsSpeed);
+      // Prefer what the concat pass measured over what we predicted. The
+      // prediction is word-count arithmetic against an assumed speaking rate;
+      // the measured numbers come from probing the rendered TTS files, so the
+      // two can legitimately disagree — and it was the prediction being
+      // reported as if it were the outcome. `source` records which one this
+      // row is, so the series stays interpretable across the change.
+      const measured = ttsResults.find((r) => r.measured)?.measured;
       trackEvent("export_tts_compression", {
-        segments_total: script.segments.length,
-        segments_compressed: prediction.compressed,
-        segments_over_cap: prediction.overCap,
-        video_padded_ms: Math.round(prediction.padSeconds * 1000),
+        segments_total: measured?.segments_total ?? script.segments.length,
+        segments_compressed: measured?.segments_compressed ?? prediction.compressed,
+        segments_over_cap: measured?.segments_over_cap ?? prediction.overCap,
+        video_padded_ms: measured
+          ? measured.audio_overrun_ms
+          : Math.round(prediction.padSeconds * 1000),
+        source: measured ? "measured" : "predicted",
         language: scriptLang,
         tts_provider: ttsProviderTelemetry,
       });

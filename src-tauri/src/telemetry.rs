@@ -44,6 +44,14 @@ pub struct TelemetryClient {
     http: reqwest::Client,
     session_id: Mutex<String>,
     app_version: String,
+    /// BCP-47 tag reported by the webview, set once at startup.
+    ///
+    /// Aptabase has a first-class `locale` column and it was being sent as an
+    /// empty string, so every locale breakdown was blank while the real value
+    /// sat in `app_launched`'s custom props. Rust has no portable way to read
+    /// the UI language, but the frontend already has `navigator.language`, so
+    /// it hands it over once via `set_telemetry_locale`.
+    locale: Mutex<String>,
 }
 
 impl TelemetryClient {
@@ -52,12 +60,30 @@ impl TelemetryClient {
             http: build_http_client(),
             session_id: Mutex::new(new_session_id()),
             app_version,
+            locale: Mutex::new(String::new()),
         })
+    }
+
+    /// Record the webview's locale for subsequent events. Called once at
+    /// startup; events fired before it keep an empty locale rather than
+    /// blocking on it.
+    pub fn set_locale(&self, locale: String) {
+        // Guard against a junk value widening the column's cardinality; real
+        // tags are short ("en", "en-GB", "zh-Hant-TW").
+        if locale.is_empty() || locale.len() > 35 {
+            return;
+        }
+        *self.locale.lock().unwrap_or_else(|e| e.into_inner()) = locale;
     }
 
     pub fn track(&self, name: String, props: Option<Value>) {
         let session_id = self
             .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let locale = self
+            .locale
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
@@ -68,8 +94,13 @@ impl TelemetryClient {
             "systemProps": {
                 "isDebug": cfg!(debug_assertions),
                 "osName": std::env::consts::OS,
+                // Still empty: reading the OS *version* portably needs
+                // `tauri-plugin-os`, and pulling in a plugin plus its
+                // capability-ACL surface for one analytics column is not
+                // worth it. `osName` and `appVersion` already carry the
+                // breakdowns that get used.
                 "osVersion": "",
-                "locale": "",
+                "locale": locale,
                 "appVersion": self.app_version,
                 "sdkVersion": SDK_VERSION,
             },

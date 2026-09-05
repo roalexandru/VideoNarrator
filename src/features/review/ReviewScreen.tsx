@@ -832,7 +832,7 @@ export function ReviewScreen() {
       {/* EXPORT PREDICTION BANNER — tells the user what Export will produce
           before they click it, so "video is twice as long" is visible at
           Review time. */}
-      {segments.length > 0 && <ExportPredictionBanner prediction={exportPrediction} />}
+      {segments.length > 0 && <ExportPredictionBanner prediction={exportPrediction} videoDuration={duration > 0 ? duration : (script?.total_duration_seconds ?? 0)} />}
 
       {/* THUMBNAIL TIMELINE */}
       <div style={{ flexShrink: 0, padding: "6px 0" }}>
@@ -1158,13 +1158,23 @@ function SegmentSpeechChip({ overflow }: { overflow: { severity: Severity; predi
   );
 }
 
-function ExportPredictionBanner({ prediction }: { prediction: { compressed: number; overCap: number; padSeconds: number; segmentsPastEnd: number } }) {
-  const { compressed, overCap, padSeconds, segmentsPastEnd } = prediction;
+function ExportPredictionBanner({ prediction, videoDuration }: { prediction: { compressed: number; overCap: number; padSeconds: number; segmentsPastEnd: number; scriptCoverageSeconds: number }; videoDuration: number }) {
+  const { compressed, overCap, padSeconds, segmentsPastEnd, scriptCoverageSeconds } = prediction;
   const pastEnd = segmentsPastEnd > 0;
   const padded = padSeconds > 0.25;
   const anyCompressed = compressed > 0;
+  // The mirror image of `pastEnd`: narration that stops well before the video
+  // does, leaving the rest silent. Seen in production when the model wrote a
+  // 53-second script for a 220-second video. 60% is deliberately lenient —
+  // a short outro with no narration is a legitimate choice, a video that is
+  // two-thirds silent is not.
+  const uncovered =
+    videoDuration > 20 &&
+    scriptCoverageSeconds > 0 &&
+    scriptCoverageSeconds < videoDuration * 0.6;
+  const uncoveredSeconds = Math.max(0, videoDuration - scriptCoverageSeconds);
 
-  if (!pastEnd && !padded && !anyCompressed) {
+  if (!pastEnd && !padded && !anyCompressed && !uncovered) {
     // Don't show the banner when everything fits — keep the UI uncluttered.
     return null;
   }
@@ -1174,14 +1184,17 @@ function ExportPredictionBanner({ prediction }: { prediction: { compressed: numb
   // a script generated against an inflated video duration (e.g. a source file
   // whose audio track outlived its picture). Call it out specifically so the
   // user knows to regenerate, not just to shorten.
-  const severity: "error" | "warn" | "info" = pastEnd || padded ? "error" : anyCompressed ? "warn" : "info";
+  const severity: "error" | "warn" | "info" = pastEnd || padded || uncovered ? "error" : anyCompressed ? "warn" : "info";
   const border = severity === "error" ? "rgba(239,68,68,0.35)" : "rgba(249,115,22,0.35)";
   const bg = severity === "error" ? "rgba(239,68,68,0.08)" : "rgba(249,115,22,0.08)";
   const fg = severity === "error" ? "#fca5a5" : "#fdba74";
   const icon = severity === "error" ? "!" : "i";
 
   let message: string;
-  if (pastEnd) {
+  if (uncovered) {
+    const pct = Math.round((scriptCoverageSeconds / videoDuration) * 100);
+    message = `The narration ends at ${scriptCoverageSeconds.toFixed(0)}s but the video runs ${videoDuration.toFixed(0)}s — about ${pct}% covered, leaving ~${uncoveredSeconds.toFixed(0)}s silent. The script was likely written against a shorter duration; regenerate narration on the Processing step.`;
+  } else if (pastEnd) {
     const freeze = padSeconds > 0.25 ? ` — on export the last frame will be held for ~${padSeconds.toFixed(1)}s while narration continues` : "";
     message = `${segmentsPastEnd} segment${segmentsPastEnd === 1 ? "" : "s"} ${segmentsPastEnd === 1 ? "is" : "are"} scheduled past the end of the video${freeze}. The script was likely generated against a longer video — regenerate narration on the Processing step, or delete these segments.`;
   } else if (padded) {

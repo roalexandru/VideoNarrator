@@ -43,6 +43,27 @@ pub struct TtsResult {
     pub file_path: String,
     pub success: bool,
     pub error: Option<String>,
+    /// What the concat pass actually measured, present only on the combined
+    /// narration entry.
+    ///
+    /// `export_tts_compression` telemetry was built from the frontend's
+    /// word-count *estimate* while these real numbers — taken from probing
+    /// the rendered TTS files — were computed and thrown away. The estimate
+    /// and the outcome can disagree, and it was the estimate being analyzed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<MeasuredNarration>,
+}
+
+/// Compression actually applied while packing narration onto the timeline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MeasuredNarration {
+    pub segments_total: usize,
+    pub segments_compressed: usize,
+    pub segments_over_cap: usize,
+    /// Milliseconds by which the narration outran the video, so the export
+    /// has to hold the final frame. Derived from the last measured segment
+    /// end rather than predicted.
+    pub audio_overrun_ms: u64,
 }
 
 pub async fn list_voices(api_key: &str) -> Result<Vec<ElevenLabsVoice>, NarratorError> {

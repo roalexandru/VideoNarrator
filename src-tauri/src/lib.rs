@@ -180,6 +180,7 @@ pub fn run() {
             commands::estimate_generation_cost,
             commands::get_telemetry_enabled,
             commands::set_telemetry_enabled,
+            commands::set_telemetry_locale,
             commands::track_event,
             commands::list_builtin_voices,
         ])

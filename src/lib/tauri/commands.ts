@@ -431,6 +431,22 @@ export interface TtsResult {
   file_path: string;
   success: boolean;
   error?: string;
+  /**
+   * What the concat pass actually measured, present only on the combined
+   * narration entry. Prefer this over `predictExport`'s estimate when
+   * reporting what an export did — the estimate is word-count arithmetic,
+   * this comes from probing the rendered audio.
+   */
+  measured?: MeasuredNarration;
+}
+
+/** Compression actually applied while packing narration onto the timeline. */
+export interface MeasuredNarration {
+  segments_total: number;
+  segments_compressed: number;
+  segments_over_cap: number;
+  /** Milliseconds the narration outran the video by. */
+  audio_overrun_ms: number;
 }
 
 export const getElevenLabsConfig = () => invoke<ElevenLabsConfig | null>("get_elevenlabs_config");
