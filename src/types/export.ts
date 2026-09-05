@@ -1,6 +1,6 @@
 import type { NarrationScript } from "./script";
 
-export type ExportFormat = "json" | "srt" | "vtt" | "txt" | "md" | "ssml";
+export type ExportFormat = "json" | "srt" | "vtt" | "txt" | "md" | "ssml" | "chapters";
 
 export interface ExportOptions {
   formats: ExportFormat[];

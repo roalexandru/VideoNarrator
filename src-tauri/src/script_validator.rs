@@ -68,6 +68,7 @@ mod tests {
 
     fn mk_script(segments: Vec<(f64, f64, &str)>) -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "t".into(),
             total_duration_seconds: segments.last().map(|s| s.1).unwrap_or(0.0),
             segments: segments

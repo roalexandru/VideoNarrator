@@ -193,6 +193,49 @@ pub fn critique() -> ResponseSchema {
     }
 }
 
+/// Schema for the auto-chapter pass.
+///
+/// The model returns only a starting *segment index* per chapter, never a
+/// timestamp: it already has the segment list, and letting it invent seconds
+/// invites values that drift off the real segment boundaries. The caller looks
+/// the timestamp up from the segment it names.
+pub fn chapters() -> ResponseSchema {
+    ResponseSchema {
+        name: "chapter_list",
+        description: "Group consecutive narration segments into named chapters.",
+        schema: json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["chapters"],
+            "properties": {
+                "chapters": {
+                    "type": "array",
+                    "description": "Chapters in timeline order. Empty when the \
+                                    video is too short or too uniform to divide.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["title", "start_segment"],
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Short descriptive label, 2-6 words, \
+                                                no numbering and no trailing period."
+                            },
+                            "start_segment": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "description": "Index of the first narration segment \
+                                                belonging to this chapter."
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+    }
+}
+
 /// Schema for the frame-selection survey pass.
 ///
 /// The survey call picks *timestamps*, nothing else — asking for narration in

@@ -165,4 +165,5 @@ export const EXPORT_FORMATS: { id: ExportFormat; label: string; ext: string }[] 
   { id: "txt", label: "Plain Text", ext: ".txt" },
   { id: "md", label: "Markdown", ext: ".md" },
   { id: "ssml", label: "SSML (Speech)", ext: ".ssml" },
+  { id: "chapters", label: "Chapter Markers", ext: ".chapters.txt" },
 ];

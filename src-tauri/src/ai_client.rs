@@ -1389,6 +1389,7 @@ async fn generate_chunked(
 
         if merged_script.is_none() {
             let base = NarrationScript {
+                chapters: None,
                 title: chunk_script.title.clone(),
                 // NOT `chunk_script.total_duration_seconds`. The first chunk only
                 // sees its own frames and reports that slice's length, which the
@@ -1465,6 +1466,7 @@ async fn generate_chunked(
     // segments rather than an error.
     if merged_script.is_none() && !all_segments.is_empty() {
         merged_script = Some(NarrationScript {
+            chapters: None,
             title: String::new(),
             total_duration_seconds: all_segments.last().map(|s| s.end_seconds).unwrap_or(0.0),
             segments: Vec::new(),
@@ -3048,6 +3050,122 @@ fn parse_critique_response(raw: &str) -> Result<Vec<Mismatch>, NarratorError> {
     Ok(out)
 }
 
+/// Group a finished script's segments into named chapters.
+///
+/// Runs after generation rather than as part of it: asking one call to write
+/// narration *and* structure it produces a worse version of both, the same
+/// reason the frame-selection survey is its own pass.
+///
+/// The model returns segment indices, not timestamps — it already has the
+/// segment list, and letting it invent seconds invites values that drift off
+/// the real boundaries. Timestamps are looked up here from the segment each
+/// chapter names, so a chapter can never start somewhere no segment does.
+pub async fn generate_chapters(
+    provider: &dyn AiProvider,
+    script: &NarrationScript,
+) -> Result<Vec<Chapter>, NarratorError> {
+    // Nothing to divide. Cheaper to answer here than to pay for a round trip
+    // that will come back empty anyway.
+    if script.segments.len() < 3 {
+        return Ok(Vec::new());
+    }
+
+    let system_prompt = "You divide a narration script into chapters, the way a         product demo is broken into sections a viewer can jump between. Group         CONSECUTIVE segments; every chapter starts where the previous one ends.         Aim for 3-8 chapters for a typical video and never more than one per         three segments — chapters are navigation, not an outline of every         sentence. Title each by what the viewer sees happening in it, in 2-6         words, with no numbering and no trailing period. The first chapter must         start at segment 0. Return an empty list if the video is too short or         too uniform to divide meaningfully.";
+
+    let mut listing = String::with_capacity(script.segments.len() * 96);
+    for (i, seg) in script.segments.iter().enumerate() {
+        listing.push_str(&format!(
+            "[{i}] {:.1}s-{:.1}s: {}\n",
+            seg.start_seconds,
+            seg.end_seconds,
+            seg.text.trim()
+        ));
+    }
+
+    let user_message = json!(format!(
+        "Video title: {}\nTotal duration: {:.0}s\n\nSegments:\n{listing}",
+        script.title, script.total_duration_seconds
+    ));
+
+    let response = generate_with_retry(
+        provider,
+        system_prompt,
+        user_message,
+        None,
+        Some(&response_schema::chapters()),
+    )
+    .await?;
+
+    Ok(parse_chapters_response(&response, script))
+}
+
+/// Turn the model's `{title, start_segment}` list into chapters anchored to
+/// real segment boundaries.
+///
+/// Defensive on purpose — a chapter list is cosmetic, so every malformed entry
+/// is dropped rather than failing the whole call and losing the good ones.
+/// Out-of-range indices, duplicate starts, blank titles and out-of-order
+/// entries are all things models produce occasionally.
+fn parse_chapters_response(raw: &str, script: &NarrationScript) -> Vec<Chapter> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    let slice = extract_first_json_object(trimmed).unwrap_or(trimmed);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(slice) else {
+        tracing::warn!("chapter JSON parse failed; continuing without chapters");
+        return Vec::new();
+    };
+    let Some(arr) = value.get("chapters").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<Chapter> = Vec::with_capacity(arr.len());
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for item in arr {
+        let title = item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if title.is_empty() {
+            continue;
+        }
+        let Some(idx) = item
+            .get("start_segment")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+        else {
+            continue;
+        };
+        let Some(seg) = script.segments.get(idx) else {
+            continue; // hallucinated index past the end of the script
+        };
+        if !seen.insert(idx) {
+            continue; // two chapters cannot start on the same segment
+        }
+        out.push(Chapter {
+            title,
+            start_seconds: seg.start_seconds,
+            start_segment: idx,
+        });
+    }
+
+    out.sort_by_key(|c| c.start_segment);
+    // A list that does not open at the first segment leaves the opening
+    // narration in no chapter at all; anchor it rather than drop it.
+    if let Some(first) = out.first_mut() {
+        if first.start_segment != 0 {
+            first.start_segment = 0;
+            first.start_seconds = script.segments[0].start_seconds;
+        }
+    }
+    out
+}
+
 /// Refine a single narration segment using AI.
 /// Takes the segment text, a user instruction, and surrounding context,
 /// returns the refined text only (not a full script).
@@ -3726,6 +3844,87 @@ mod tests {
                 "anti-pattern list lost {pattern:?}"
             );
         }
+    }
+
+    fn script_with(n: usize) -> NarrationScript {
+        let segments = (0..n)
+            .map(|i| Segment {
+                index: i,
+                start_seconds: i as f64 * 10.0,
+                end_seconds: (i as f64 + 1.0) * 10.0,
+                text: format!("Segment {i}"),
+                visual_description: String::new(),
+                emphasis: vec![],
+                pace: Pace::default(),
+                pause_after_ms: 0,
+                frame_refs: vec![],
+                voice_override: None,
+            })
+            .collect();
+        NarrationScript {
+            title: "Demo".into(),
+            total_duration_seconds: n as f64 * 10.0,
+            segments,
+            metadata: ScriptMetadata::default(),
+            speech_rate_report: None,
+            chapters: None,
+        }
+    }
+
+    #[test]
+    fn chapters_are_anchored_to_real_segment_timestamps() {
+        let script = script_with(6);
+        let raw = r#"{"chapters":[{"title":"Intro","start_segment":0},
+                                  {"title":"Setup","start_segment":3}]}"#;
+        let got = parse_chapters_response(raw, &script);
+        assert_eq!(got.len(), 2);
+        // 30.0 comes from the segment, not from anything the model said.
+        assert_eq!(got[1].start_seconds, 30.0);
+        assert_eq!(got[1].start_segment, 3);
+    }
+
+    #[test]
+    fn chapters_drop_indices_past_the_end_of_the_script() {
+        let script = script_with(4);
+        let raw = r#"{"chapters":[{"title":"Intro","start_segment":0},
+                                  {"title":"Ghost","start_segment":99}]}"#;
+        let got = parse_chapters_response(raw, &script);
+        assert_eq!(got.len(), 1, "hallucinated index must not survive");
+        assert_eq!(got[0].title, "Intro");
+    }
+
+    #[test]
+    fn chapters_drop_duplicate_starts_and_blank_titles() {
+        let script = script_with(5);
+        let raw = r#"{"chapters":[{"title":"Intro","start_segment":0},
+                                  {"title":"Again","start_segment":0},
+                                  {"title":"   ","start_segment":2}]}"#;
+        let got = parse_chapters_response(raw, &script);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].title, "Intro");
+    }
+
+    #[test]
+    fn chapters_are_sorted_and_anchored_to_the_opening_segment() {
+        let script = script_with(6);
+        // Out of order, and nothing starts at segment 0.
+        let raw = r#"{"chapters":[{"title":"Later","start_segment":4},
+                                  {"title":"Middle","start_segment":2}]}"#;
+        let got = parse_chapters_response(raw, &script);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].title, "Middle", "must be sorted by segment");
+        // The opening narration must belong to some chapter.
+        assert_eq!(got[0].start_segment, 0);
+        assert_eq!(got[0].start_seconds, 0.0);
+    }
+
+    #[test]
+    fn chapters_survive_a_fenced_or_unparseable_response() {
+        let script = script_with(4);
+        let fenced = "```json\n{\"chapters\":[{\"title\":\"Intro\",\"start_segment\":0}]}\n```";
+        assert_eq!(parse_chapters_response(fenced, &script).len(), 1);
+        // Garbage is a dropped chapter list, never a failed export.
+        assert!(parse_chapters_response("not json at all", &script).is_empty());
     }
 
     #[test]
@@ -5823,6 +6022,7 @@ mod tests {
     #[tokio::test]
     async fn test_translate_script_success() {
         let original = NarrationScript {
+            chapters: None,
             title: "Original".into(),
             total_duration_seconds: 30.0,
             segments: vec![Segment {
@@ -5861,6 +6061,7 @@ mod tests {
     #[tokio::test]
     async fn test_translate_script_strips_code_fences() {
         let original = NarrationScript {
+            chapters: None,
             title: "T".into(),
             total_duration_seconds: 10.0,
             segments: vec![],
@@ -5885,6 +6086,7 @@ mod tests {
     #[tokio::test]
     async fn test_translate_script_invalid_json_errors() {
         let original = NarrationScript {
+            chapters: None,
             title: "T".into(),
             total_duration_seconds: 10.0,
             segments: vec![],
@@ -5953,6 +6155,7 @@ mod tests {
 
     fn sample_script() -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "Test".into(),
             total_duration_seconds: 30.0,
             segments: vec![

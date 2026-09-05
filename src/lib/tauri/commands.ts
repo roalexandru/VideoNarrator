@@ -151,6 +151,20 @@ export const refineScript = (
     projectId,
   });
 
+/**
+ * Group a finished script into named chapters for a description's chapter
+ * markers. Returns just the chapter list — the caller owns the script and may
+ * have unsaved segment edits that a whole replacement would clobber.
+ */
+export const generateChapters = (
+  script: NarrationScript,
+  aiConfig: AiConfig,
+) =>
+  invoke<import("../../types/script").Chapter[]>("generate_chapters", {
+    script,
+    aiConfig,
+  });
+
 /** A refinement instruction retained as a standing preference for a project. */
 export interface Preference {
   id: string;

@@ -1314,6 +1314,27 @@ pub async fn translate_script(
     ai_client::translate_script(provider.as_ref(), &script, &target_lang).await
 }
 
+/// Group a finished script into named chapters.
+///
+/// Returns the chapter list rather than a mutated script: the frontend owns
+/// the in-memory script and the user may have unsaved segment edits, so
+/// handing back a whole replacement script here would clobber them.
+#[tauri::command]
+pub async fn generate_chapters(
+    state: tauri::State<'_, AppState>,
+    script: NarrationScript,
+    ai_config: AiConfig,
+) -> Result<Vec<Chapter>, NarratorError> {
+    let keys = state.api_keys.lock().await;
+    let api_key = keys
+        .get(&ai_config.provider)
+        .ok_or_else(|| NarratorError::NoApiKey(ai_config.provider.to_string()))?
+        .clone();
+    drop(keys);
+    let provider = ai_client::create_provider(&ai_config, api_key);
+    ai_client::generate_chapters(provider.as_ref(), &script).await
+}
+
 #[tauri::command]
 pub async fn refine_segment(
     state: tauri::State<'_, AppState>,
@@ -2612,11 +2633,13 @@ pub async fn export_script(options: ExportOptions) -> Result<Vec<ExportResult>, 
                     ExportFormat::Txt => export_engine::export_txt(script),
                     ExportFormat::Markdown => export_engine::export_markdown(script),
                     ExportFormat::Ssml => export_engine::export_ssml(script),
+                    ExportFormat::Chapters => export_engine::export_chapters(script),
                 };
+                let ext = format.extension();
                 let filename = if options.languages.len() > 1 {
-                    format!("{basename}_{language}.{format}")
+                    format!("{basename}_{language}.{ext}")
                 } else {
-                    format!("{basename}.{format}")
+                    format!("{basename}.{ext}")
                 };
                 let filepath = output_dir.join(&filename);
                 match tokio::fs::write(&filepath, &content).await {
@@ -2811,6 +2834,7 @@ mod tests {
 
     fn sample_script() -> NarrationScript {
         NarrationScript {
+            chapters: None,
             title: "Test Script".to_string(),
             total_duration_seconds: 2.0,
             segments: vec![Segment {
