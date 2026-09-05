@@ -27,6 +27,9 @@ vi.mock("@tauri-apps/api/window", () => ({
     setFocus: vi.fn(),
     startDragging: vi.fn(),
     close: vi.fn(),
+    // App.tsx hooks this to send `session_end` at the real end of a session.
+    // Resolves to an unlisten fn, matching the Tauri API.
+    onCloseRequested: vi.fn().mockResolvedValue(() => {}),
   }),
 }));
 
@@ -306,6 +309,9 @@ export function setupDefaultMocks(
         return true;
 
       case "set_telemetry_enabled":
+        return null;
+
+      case "set_telemetry_locale":
         return null;
 
       case "track_event":

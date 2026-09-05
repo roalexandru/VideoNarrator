@@ -155,25 +155,82 @@ export default function App() {
       .catch(() => {});
   }, []);
 
-  // ── Track session duration on unload ──
-  // beforeunload is unreliable for async IPC; visibilitychange fires more reliably on app close
+  // ── Track session duration on close ──
+  //
+  // This used to fire from `visibilitychange -> hidden` behind a one-shot
+  // latch. On macOS that fires when the window is minimized, hidden with
+  // Cmd+H, or fully occluded — not just on quit — so the latch froze
+  // `duration_seconds` at however long the user had been in the app before
+  // they first switched away. Observed in production: a session reported 42
+  // seconds and then produced sixty more events over the next five and a half
+  // hours. Every session-length figure was wrong, and always short.
+  //
+  // `onCloseRequested` is the native window event and the correct signal for
+  // "the session is ending"; `beforeunload` stays as a backup for a webview
+  // teardown that skips it. A force-quit now reports nothing at all, which is
+  // the deliberate trade: a missing session is honest, a systematically
+  // truncated one silently corrupts the metric.
+  //
+  // Visibility changes are still watched, but only to accumulate how long the
+  // app was actually on screen — for a desktop app the user parks in the
+  // background, that is the more meaningful of the two numbers.
   useEffect(() => {
     let sent = false;
+    let activeMs = 0;
+    let visibleSince: number | null =
+      document.visibilityState === "hidden" ? null : Date.now();
+
+    const bankVisibleTime = () => {
+      if (visibleSince !== null) {
+        activeMs += Date.now() - visibleSince;
+        visibleSince = null;
+      }
+    };
+
     const sendSessionEnd = () => {
       if (sent) return;
       sent = true;
-      const duration = Math.round((Date.now() - sessionStart.current) / 1000);
-      trackEvent("session_end", { duration_seconds: duration });
+      bankVisibleTime();
+      trackEvent("session_end", {
+        duration_seconds: Math.round((Date.now() - sessionStart.current) / 1000),
+        active_seconds: Math.round(activeMs / 1000),
+      });
     };
+
     const handleVisibility = () => {
-      if (document.visibilityState === "hidden") sendSessionEnd();
+      if (document.visibilityState === "hidden") {
+        bankVisibleTime();
+      } else if (visibleSince === null) {
+        visibleSince = Date.now();
+      }
     };
-    const handleUnload = () => sendSessionEnd();
+
     document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("beforeunload", handleUnload);
+    window.addEventListener("beforeunload", sendSessionEnd);
+
+    // try/catch, not just `.catch()`: a missing `onCloseRequested` throws
+    // synchronously, before there is a promise to reject, and an exception
+    // escaping this effect takes the whole app down with it. `beforeunload`
+    // stays registered either way, so losing the native hook degrades the
+    // metric instead of breaking the render.
+    let unlistenClose: (() => void) | undefined;
+    try {
+      const closeHook = getCurrentWindow().onCloseRequested?.(() => {
+        sendSessionEnd();
+      });
+      closeHook
+        ?.then((unlisten) => {
+          unlistenClose = unlisten;
+        })
+        .catch(() => {});
+    } catch {
+      // No usable window handle — see above.
+    }
+
     return () => {
       document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("beforeunload", handleUnload);
+      window.removeEventListener("beforeunload", sendSessionEnd);
+      unlistenClose?.();
     };
   }, []);
 

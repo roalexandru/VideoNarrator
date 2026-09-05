@@ -21,6 +21,8 @@ const mockWindow = {
   startDragging: vi.fn(), unminimize: vi.fn(),
   isFullscreen: vi.fn().mockResolvedValue(false),
   setFullscreen: vi.fn(),
+  // App.tsx hooks this for `session_end`; resolves to an unlisten fn.
+  onCloseRequested: vi.fn().mockResolvedValue(() => {}),
 };
 
 vi.mock("@tauri-apps/api/window", () => ({

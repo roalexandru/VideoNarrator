@@ -22,6 +22,16 @@ export async function initTelemetry(): Promise<void> {
   } catch {
     telemetryEnabled = true;
   }
+  // Aptabase has a first-class `locale` column that was being sent empty,
+  // because Rust has no portable way to read the UI language. The webview
+  // does, so hand it over once. Fire-and-forget: a failure here costs one
+  // analytics dimension, not the session.
+  try {
+    const locale = navigator.language;
+    if (locale) await invoke("set_telemetry_locale", { locale });
+  } catch {
+    // ignored
+  }
 }
 
 export function setTelemetryEnabled(enabled: boolean): void {
@@ -58,22 +68,38 @@ export function trackError(
     errorMessage = error;
   }
 
-  // Strip potential PII from error messages: file paths, emails, URLs with keys
+  // Strip potential PII from error messages: file paths, emails, URLs with keys.
+  //
+  // `error_message` forwards arbitrary upstream provider text, so the redaction
+  // has to cover every vendor's key shape, not just OpenAI's `sk-` prefix.
+  // Gemini keys (`AIza…`), and Azure/ElevenLabs keys (bare 32-char hex) carry
+  // no prefix at all, and a JSON-quoted field like `"xi-api-key": "abc"` slips
+  // past a `key[=:]` pattern because the quote sits between the two.
   errorMessage = errorMessage
     .replace(/[A-Z]:\\[^\s"']+/gi, "[path]")       // Windows paths
     .replace(/\/[^\s"']*\/[^\s"']*/g, "[path]")     // Unix paths
     .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+/g, "[email]")
-    .replace(/key[=:]\s*\S+/gi, "key=[redacted]")
-    .replace(/sk-[a-zA-Z0-9]+/g, "[api_key]")       // OpenAI keys
+    // Quoted JSON key fields, e.g. "api-key": "value" / "xi-api-key":"value".
+    .replace(/"[^"\s]*(?:key|token|secret)"\s*:\s*"[^"]*"/gi, '"[redacted]":"[redacted]"')
+    .replace(/(key|token|secret)[=:]\s*\S+/gi, "$1=[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/sk-[a-zA-Z0-9_-]+/g, "[api_key]")     // OpenAI / Anthropic
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[api_key]") // Google / Gemini
+    // Azure and ElevenLabs keys are bare hex with no prefix to anchor on.
+    .replace(/\b[0-9a-f]{32,}\b/gi, "[api_key]")
     .slice(0, 500); // Cap length — 300 was truncating structured API errors
 
-  const retryCount = getErrorCount(context);
+  // Consecutive failures for this context, reset by `resetErrorCount` on the
+  // next success. Deliberately NOT called `retry_count`: nothing here retries,
+  // and the old name read as "we retried N times" when it means "this is the
+  // Nth failure in a row" — which inverts how you'd judge an error's severity.
+  const consecutiveFailures = getErrorCount(context);
 
   trackEvent("error", {
     context,
     error_type: errorType,
     error_message: errorMessage,
-    retry_count: retryCount,
+    consecutive_failures: consecutiveFailures,
     ...extra,
   });
 }

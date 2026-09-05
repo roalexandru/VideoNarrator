@@ -19,6 +19,54 @@ describe("trackError", () => {
     clearMocks();
   });
 
+  // ── Redaction of vendor key shapes (audit of a production export) ──
+  //
+  // `error_message` forwards arbitrary upstream provider text, so the
+  // redaction has to cover every vendor's key shape. Only OpenAI's `sk-`
+  // prefix was handled; these are the shapes that used to pass through.
+
+  const messageFor = (err: unknown): string => {
+    trackError("redact_ctx", err);
+    const call = ipcCalls.filter((c) => c.cmd === "track_event").pop();
+    const props = call!.payload.props as Record<string, unknown>;
+    return props.error_message as string;
+  };
+
+  it("redacts a Gemini AIza key", () => {
+    const msg = messageFor(new Error("bad key AIzaSyD-1234567890abcdefghijklmnopqrstu rejected"));
+    expect(msg).not.toContain("AIzaSyD");
+    expect(msg).toContain("[api_key]");
+  });
+
+  it("redacts a bare 32-char hex key (Azure / ElevenLabs shape)", () => {
+    const msg = messageFor(new Error("auth failed for 0123456789abcdef0123456789abcdef"));
+    expect(msg).not.toContain("0123456789abcdef0123456789abcdef");
+    expect(msg).toContain("[api_key]");
+  });
+
+  it("redacts a quoted JSON key field the key[=:] pattern missed", () => {
+    // The quote sits between `key` and `:`, so `key[=:]` never matched.
+    const msg = messageFor(new Error('request was {"xi-api-key": "abcdefghij"}'));
+    expect(msg).not.toContain("abcdefghij");
+  });
+
+  it("redacts a bearer token", () => {
+    const msg = messageFor(new Error("401 with Authorization: Bearer abc.def.ghi"));
+    expect(msg).not.toContain("abc.def.ghi");
+    expect(msg).toContain("[redacted]");
+  });
+
+  it("reports consecutive failures under a name that says what it counts", () => {
+    // Was `retry_count`, which read as "we retried N times" when it means
+    // "this is the Nth consecutive failure" — the opposite conclusion.
+    trackError("streak_ctx", new Error("one"));
+    trackError("streak_ctx", new Error("two"));
+    const call = ipcCalls.filter((c) => c.cmd === "track_event").pop();
+    const props = call!.payload.props as Record<string, unknown>;
+    expect(props.consecutive_failures).toBe(2);
+    expect(props.retry_count).toBeUndefined();
+  });
+
   // ── Error type detection ──
 
   it("sends error event with type and message for Error object", () => {
