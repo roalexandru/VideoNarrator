@@ -928,12 +928,47 @@ const ANCHOR_MIN_SILENCE: f64 = 0.5;
 const _: () = assert!(SILENCE_MIN_DURATION <= crate::ai_client::MIN_SNAP_GAP);
 const _: () = assert!(ANCHOR_MIN_SILENCE > SILENCE_MIN_DURATION);
 
+/// Noise floor `silencedetect` treats as silence, in dBFS.
+///
+/// -30 dB is deliberately conservative for the narration pass: screen
+/// recordings carry fan and room noise well above a true digital zero, and
+/// under-detecting a gap only costs a narration window, while over-detecting
+/// one would place speech on top of real audio.
+const SILENCE_NOISE_DB: f64 = -30.0;
+
 async fn detect_silence_spans(
     ffmpeg: &Path,
     video_path: &Path,
     cancel: &Option<Arc<AtomicBool>>,
 ) -> Result<Vec<SilenceSpan>, NarratorError> {
-    let filter = format!("silencedetect=n=-30dB:d={SILENCE_MIN_DURATION}");
+    detect_silence_spans_tuned(
+        ffmpeg,
+        video_path,
+        SILENCE_NOISE_DB,
+        SILENCE_MIN_DURATION,
+        cancel,
+    )
+    .await
+}
+
+/// `silencedetect` with a caller-chosen noise floor and minimum duration.
+///
+/// The narration pass wants every usable inter-phrase gap (0.15 s at -30 dB);
+/// dead-air trimming wants only stretches long enough that cutting them reads
+/// as tightening rather than clipping, and lets the user move both knobs. Both
+/// callers share this one ffmpeg pass so the parsing stays in one place.
+pub async fn detect_silence_spans_tuned(
+    ffmpeg: &Path,
+    video_path: &Path,
+    noise_db: f64,
+    min_duration: f64,
+    cancel: &Option<Arc<AtomicBool>>,
+) -> Result<Vec<SilenceSpan>, NarratorError> {
+    // ffmpeg wants the threshold as a signed dB value (e.g. `n=-30dB`), and a
+    // positive duration; clamp rather than trust the frontend.
+    let noise_db = noise_db.clamp(-90.0, 0.0);
+    let min_duration = min_duration.max(0.01);
+    let filter = format!("silencedetect=n={noise_db}dB:d={min_duration}");
     let mut cmd = Command::new(ffmpeg.as_os_str());
     cmd.no_window()
         .args(["-nostats", "-hide_banner", "-i"])

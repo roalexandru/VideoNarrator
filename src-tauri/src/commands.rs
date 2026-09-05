@@ -403,6 +403,65 @@ pub async fn probe_video(path: String) -> Result<VideoMetadata, NarratorError> {
     video_engine::probe_video(&resolved).await
 }
 
+/// Report the stretches of `path` quiet enough to cut, for Edit Video's
+/// dead-air trim.
+///
+/// The narration pipeline already runs `silencedetect`, but only at step 4
+/// (frame extraction) and only tuned to find places it is safe to *speak*.
+/// Trimming happens at step 2, before any of that exists, and wants a
+/// different question answered: which gaps are long enough that removing them
+/// reads as tightening rather than clipping. Same ffmpeg pass, caller-chosen
+/// knobs.
+///
+/// A video with no audio track is reported as `has_audio: false` with no spans
+/// rather than as an error: a silent screen recording has nothing to trim,
+/// which is a normal answer. It is kept distinct from "has audio, found no
+/// long-enough gaps" because those two read very differently to a user staring
+/// at a button that appeared to do nothing.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SilenceReport {
+    pub has_audio: bool,
+    pub spans: Vec<SilenceSpan>,
+}
+
+#[tauri::command]
+pub async fn detect_silence(
+    path: String,
+    noise_db: Option<f64>,
+    min_duration: Option<f64>,
+) -> Result<SilenceReport, NarratorError> {
+    let path = Path::new(&path);
+    if !path.exists() {
+        return Err(NarratorError::VideoProbeError("File not found".to_string()));
+    }
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let resolved = strip_extended_path_prefix(&resolved);
+
+    if !video_engine::probe_has_audio_stream(&resolved)
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(SilenceReport {
+            has_audio: false,
+            spans: Vec::new(),
+        });
+    }
+
+    let ffmpeg = video_engine::detect_ffmpeg()?;
+    let spans = video_engine::detect_silence_spans_tuned(
+        &ffmpeg,
+        &resolved,
+        noise_db.unwrap_or(-30.0),
+        min_duration.unwrap_or(0.8),
+        &None,
+    )
+    .await?;
+    Ok(SilenceReport {
+        has_audio: true,
+        spans,
+    })
+}
+
 /// Return whether a file exists at the given path. Used by Export to detect
 /// a missing cached edited video and trigger regeneration.
 #[tauri::command]

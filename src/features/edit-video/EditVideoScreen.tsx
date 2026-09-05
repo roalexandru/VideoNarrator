@@ -2,7 +2,7 @@ import { useRef, useEffect, useMemo, useState, useCallback } from "react";
 import { useProjectStore } from "../../stores/projectStore";
 import { useEditStore, clipOutputDuration, EFFECT_META } from "../../stores/editStore";
 import type { EasingPreset, ZoomPanEffect, EffectType, TimelineEffect } from "../../stores/editStore";
-import { extractEditThumbnails, applyVideoEdits, openFolder, cancelVideoOperation } from "../../lib/tauri/commands";
+import { extractEditThumbnails, applyVideoEdits, openFolder, cancelVideoOperation, detectSilence } from "../../lib/tauri/commands";
 import { buildEditPlan, editsRequireRender } from "../../lib/buildEditPlan";
 import { computeEditPlanHash } from "../../lib/editPlanHash";
 import { Channel } from "@tauri-apps/api/core";
@@ -11,7 +11,7 @@ import type { ProgressEvent } from "../../types/processing";
 import { Button } from "../../components/ui/Button";
 import { secondsToTimestamp } from "../../lib/formatters";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { trackError } from "../telemetry/analytics";
+import { trackEvent, trackError } from "../telemetry/analytics";
 import { computeZoomTransform, computeZoomAtTime } from "./easing";
 import { ZoomPanOverlay } from "./ZoomPanOverlay";
 import { EffectsOverlay } from "./EffectsOverlay";
@@ -131,6 +131,47 @@ export function EditVideoScreen() {
   // This lets the user save the cut+effects video standalone, without going
   // through narration generation.
   const [renderProgress, setRenderProgress] = useState<number | null>(null);
+
+  // ── Trim silence ──
+  // Cuts dead air out of the timeline. The heavy half (ffmpeg `silencedetect`)
+  // runs in Rust; the result is just narrower clip ranges, so it undoes like
+  // any other edit and needs no special handling downstream.
+  const [trimBusy, setTrimBusy] = useState(false);
+  const [trimNote, setTrimNote] = useState<string | null>(null);
+  const handleTrimSilence = useCallback(async () => {
+    if (!videoFile?.path) return;
+    setTrimBusy(true);
+    setTrimNote(null);
+    try {
+      const { hasAudio, spans } = await detectSilence(videoFile.path);
+      if (!hasAudio) {
+        setTrimNote("This recording has no audio track.");
+        return;
+      }
+      const es = useEditStore.getState();
+      const result = es.applySilenceTrim(spans, es.primaryMediaRefId);
+      if (result.cuts === 0) {
+        setTrimNote("No gaps long enough to trim.");
+        return;
+      }
+      const dropped = result.clipsDropped > 0 ? `, ${result.clipsDropped} clip${result.clipsDropped === 1 ? "" : "s"} removed` : "";
+      setTrimNote(
+        `Trimmed ${result.removedSeconds.toFixed(1)}s across ${result.cuts} cut${result.cuts === 1 ? "" : "s"}${dropped}.`,
+      );
+      trackEvent("silence_trimmed", {
+        cuts: result.cuts,
+        removed_s: Math.round(result.removedSeconds),
+        clips_dropped: result.clipsDropped,
+        clips_after: result.clips.length,
+      });
+    } catch (err) {
+      trackError("trim_silence", err);
+      setTrimNote("Could not analyze the audio.");
+    } finally {
+      setTrimBusy(false);
+    }
+  }, [videoFile?.path]);
+
   const handleRenderVideo = useCallback(async () => {
     if (!videoFile?.path) return;
     const defaultName = (videoFile.name || "edited").replace(/\.[^.]+$/, "") + "_edited.mp4";
@@ -659,6 +700,18 @@ export function EditVideoScreen() {
         <Button variant="secondary" size="sm"
           disabled={clips.length === 1 && clips[0].speed === 1.0 && !clips[0].skipFrames && Math.abs((clips[0].sourceEnd - clips[0].sourceStart) - videoDuration) < 0.5}
           onClick={() => { useEditStore.getState().reset(); if (videoDuration > 0) initFromVideo(videoDuration); }}>Revert to Original</Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={!videoFile?.path || trimBusy}
+          onClick={handleTrimSilence}
+          title="Detect silent stretches and cut them out of the timeline"
+        >
+          {trimBusy ? "Analyzing…" : "Trim Silence"}
+        </Button>
+        {trimNote && (
+          <span style={{ fontSize: 11, color: C.dim, whiteSpace: "nowrap" }}>{trimNote}</span>
+        )}
         {/* Secondary: render the edited video on its own (without narration).
             Useful for users who just want the cut+effects version. */}
         <Button
