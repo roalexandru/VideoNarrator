@@ -124,6 +124,7 @@ pub fn run() {
             commands::set_api_key,
             commands::validate_api_key_cmd,
             commands::probe_video,
+            commands::detect_silence,
             commands::check_file_readable,
             commands::compute_media_hash,
             commands::file_exists,

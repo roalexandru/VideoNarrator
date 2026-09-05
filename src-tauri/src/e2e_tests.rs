@@ -167,6 +167,65 @@ async fn e2e_parallel_encode_matches_serial_on_extracted_frames() {
     assert!(parallel.iter().all(|b| !b.is_empty()));
 }
 
+/// Dead-air trimming asks a different question than the narration pass does,
+/// so it gets its own threshold. Same fixture, two thresholds, opposite
+/// answers — that is the whole point of the `_tuned` variant existing.
+#[tokio::test]
+async fn e2e_detect_silence_honours_its_own_min_duration() {
+    let Some(ff) = ffmpeg() else {
+        eprintln!("skip: no ffmpeg");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("tone_then_quiet.mp4");
+    let audio = "sine=frequency=440:duration=3,apad=pad_dur=3";
+    if !make_video(&video, 6.0, "320x240", Some(audio)) {
+        eprintln!("skip: could not render fixture with audio");
+        return;
+    }
+
+    let loose = crate::video_engine::detect_silence_spans_tuned(&ff, &video, -30.0, 0.5, &None)
+        .await
+        .expect("detection must run");
+    assert!(
+        !loose.is_empty(),
+        "a ~3s gap must be visible at a 0.5s threshold"
+    );
+
+    let strict = crate::video_engine::detect_silence_spans_tuned(&ff, &video, -30.0, 10.0, &None)
+        .await
+        .expect("detection must run");
+    assert!(
+        strict.is_empty(),
+        "no gap in a 6s clip can be 10s long, got {strict:?}"
+    );
+}
+
+/// A silent screen recording is a normal input rather than a failure, and the
+/// UI needs it kept distinct from "has audio, found nothing worth cutting".
+#[tokio::test]
+async fn e2e_detect_silence_reports_a_missing_audio_track() {
+    let Some(_) = ffmpeg() else {
+        eprintln!("skip: no ffmpeg");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let video = dir.path().join("no_audio.mp4");
+    if !make_video(&video, 2.0, "320x240", None) {
+        eprintln!("skip: could not render silent fixture");
+        return;
+    }
+
+    let report = crate::commands::detect_silence(video.to_string_lossy().into_owned(), None, None)
+        .await
+        .expect("a video with no audio must not be an error");
+    assert!(
+        !report.has_audio,
+        "fixture was rendered without an audio stream"
+    );
+    assert!(report.spans.is_empty());
+}
+
 // ── Silence detection and snapping on real audio ────────────────────────────
 
 /// A video whose audio is loud-then-silent must yield a usable span, and

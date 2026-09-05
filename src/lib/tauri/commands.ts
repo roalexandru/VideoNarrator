@@ -34,6 +34,42 @@ export const validateApiKey = (provider: AiProvider, key: string) =>
 export const probeVideo = (path: string) =>
   invoke<VideoMetadata>("probe_video", { path });
 
+/** A stretch of source audio quiet enough to cut. Mirrors Rust `SilenceSpan`. */
+export interface SilenceSpan {
+  start: number;
+  end: number;
+}
+
+export interface SilenceReport {
+  /** False for a video with no audio track — nothing to trim, not a failure. */
+  hasAudio: boolean;
+  spans: SilenceSpan[];
+}
+
+/**
+ * Report the quiet stretches of a video, for Edit Video's dead-air trim.
+ *
+ * Runs its own `silencedetect` pass rather than reusing the narration one:
+ * that pass only happens at step 4 (frame extraction) and is tuned to find
+ * places it is safe to *speak*, whereas trimming runs at step 2 and needs
+ * gaps long enough that cutting them reads as tightening.
+ *
+ * `hasAudio: false` is kept distinct from an empty `spans` on a video that
+ * does have audio — "this recording is silent" and "no gap was long enough"
+ * need different words in the UI.
+ */
+export const detectSilence = async (
+  path: string,
+  opts?: { noiseDb?: number; minDuration?: number },
+): Promise<SilenceReport> => {
+  const r = await invoke<{ has_audio: boolean; spans: SilenceSpan[] }>("detect_silence", {
+    path,
+    noiseDb: opts?.noiseDb,
+    minDuration: opts?.minDuration,
+  });
+  return { hasAudio: r.has_audio, spans: r.spans };
+};
+
 /**
  * Verify the app can actually read the file (surfaces macOS TCC denials
  * which otherwise manifest as a silent black preview).

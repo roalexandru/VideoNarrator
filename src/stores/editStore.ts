@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { removeSilences, type SilenceTrimOptions, type SilenceTrimResult } from "../lib/removeSilences";
+import type { SilenceSpan } from "../lib/tauri/commands";
 
 // ── Zoom/Pan Types ──
 
@@ -165,6 +167,20 @@ interface EditStore {
   setClipSkipFrames: (index: number, skip: boolean) => void;
   setClipFps: (index: number, fps: number | null) => void;
   moveClip: (fromIndex: number, toIndex: number) => void;
+  /**
+   * Rebuild the timeline with detected silences cut out. Returns what changed
+   * so the caller can report it ("trimmed 12.4s across 7 cuts") — a silent
+   * no-op looks like a broken button.
+   *
+   * `spans` are source-time and belong to one media file, so pass the
+   * `mediaRefId` they were detected on; clips from other sources are left
+   * alone. Undoable like any other timeline edit.
+   */
+  applySilenceTrim: (
+    spans: SilenceSpan[],
+    analyzedMediaRefId: string | null,
+    options?: Partial<SilenceTrimOptions>,
+  ) => SilenceTrimResult;
   /** Append a video clip. `mediaRefId` must already be registered in the pool.
    *  For legacy-style calls that pass a raw path, register via registerMedia first. */
   addClip: (mediaRefId: string, sourceStart: number, sourceEnd: number) => void;
@@ -441,6 +457,31 @@ export const useEditStore = create<EditStore>((set, get) => ({
       clips.splice(toIndex, 0, moved);
       return { ...undo, clips, selectedClipIndex: toIndex };
     }),
+
+  applySilenceTrim: (spans, analyzedMediaRefId, options) => {
+    const state = get();
+    const result = removeSilences(
+      state.clips,
+      spans,
+      analyzedMediaRefId,
+      state.primaryMediaRefId,
+      options,
+    );
+    // A no-op must not burn an undo slot — otherwise Cmd+Z after a fruitless
+    // trim appears to do nothing.
+    if (result.cuts === 0) return result;
+    set((s) => ({
+      ...pushUndo(s),
+      clips: result.clips,
+      // Indices shifted underneath the selection; clearing beats pointing at
+      // a different clip than the user had highlighted.
+      selectedClipIndex: null,
+      // The cached render no longer matches the timeline.
+      editedVideoPath: null,
+      editedVideoPlanHash: null,
+    }));
+    return result;
+  },
 
   addClip: (mediaRefId, sourceStart, sourceEnd) =>
     set((state) => {
