@@ -49,8 +49,9 @@ OSX_INTEL_FFPROBE_BIN_SHA="5228e651e2bd67bb55819b27f6138351587b16d2b87446007bf35
 
 # Windows — pinned to a specific BtbN dated release + SHA-256 so a moving
 # `latest` tag or a compromised host can't land a different binary in a
-# user's build. There's a sidecar .sha256 file on every BtbN asset if you want
-# to re-verify the pin.
+# user's build. BtbN no longer publishes a sidecar `.sha256` for these assets
+# (it 404s), so re-verify by downloading the zip and hashing it, cross-checking
+# the byte size against what the releases API reports for the asset.
 #
 # ⚠️ THIS PIN EXPIRES. BtbN deletes its dated `autobuild-*` releases after a few
 # months, so a pin that works today 404s later and breaks the Windows release
@@ -62,8 +63,8 @@ OSX_INTEL_FFPROBE_BIN_SHA="5228e651e2bd67bb55819b27f6138351587b16d2b87446007bf35
 #   curl -fsSL -o /tmp/b.zip "<url>" && shasum -a 256 /tmp/b.zip
 # Keep the major.minor line (8.1) aligned with the macOS pins above so all three
 # platforms burn subtitles with the same libass/filter behavior.
-BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-03-14-02/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1.zip"
-BTBN_ZIP_SHA="20b16a056785b232f35363eba81c3fd6113d76ff39e46d98acfaf8440250467f"
+BTBN_ZIP_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-05-13-10/ffmpeg-n8.1.2-50-g1a748fe2cd-win64-gpl-8.1.zip"
+BTBN_ZIP_SHA="10fa00f886812dce2f64b5f4e817b1d17fe2596c2a9cb9ae5abb82d9ef85c7fb"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 log() { printf '\e[1;36m[fetch-ffmpeg]\e[0m %s\n' "$*"; }

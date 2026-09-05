@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.11.0 — Dead-air trimming, auto-chapters, telemetry correctness
+
+### Added
+- **Trim Silence** (Edit Video). Detects quiet stretches in the source and cuts them from the timeline. Undoable like any edit; only touches clips from the analyzed source, keeps 0.15 s of padding at each cut edge, drops fragments under 0.3 s, and never leaves an empty timeline.
+- **Auto-chapters** (Review). Groups the script's segments into named sections, shown as inline headers above the segment that starts each one.
+- **Chapter Markers export** (`.chapters.txt`). `H:MM:SS Title` lines for a YouTube/Vimeo/podcast description. Opens at 0:00 (synthesized from the title if the first chapter starts later), since platforms ignore lists that do not.
+
+### Fixed
+- **Session duration was always wrong, and always short.** `session_end` fired from `visibilitychange → hidden` behind a one-shot latch, so it reported however long the app had been open before the user first switched away — minimize and Cmd+H both trigger it. One production session reported 42 seconds and then ran 5h38m. Now fires on window close, and reports `active_seconds` alongside wall-clock duration. A force-quit reports nothing rather than a truncated value.
+- **Phantom navigation events.** "Next" on the last wizard step and "back" on the first clamp to the current step but still emitted `step_visited`, inflating 43% of all event volume with navigation that never happened.
+- **Telemetry requests could hang forever.** The Aptabase client set no connect or request timeout. A peer that completes the handshake and then never answers — captive portals do this — parked the request task, its socket and its buffers for the life of the process. Now 5 s connect / 10 s total.
+- **Narration that covers a fraction of the video is now flagged.** A 220 s video silently accepted a 53-second script with not one segment fitting its window. Review warns below 60% coverage, and `processing_completed` now carries the source duration.
+- **Compression telemetry reported predictions as measurements.** `export_tts_compression` was built from word-count estimates while the concat pass's real measurements were discarded. It now sends the measured numbers, tagged with their source.
+- **Error-message redaction missed most vendors' key shapes.** Only OpenAI's `sk-` prefix was handled; Gemini (`AIza…`), Azure/ElevenLabs (bare 32-char hex), quoted JSON key fields and bearer tokens now redact too. No key leaked in the audited export.
+- **`open_folder` leaked a process per click.** It dropped the `std::process::Child` without waiting, leaving a zombie for the life of the app.
+- **Dependabot could not update `website/`.** It is a pnpm workspace member, and Dependabot cannot update a workspace from a subdirectory — it edited `website/package.json` and left the root lockfile stale, so every website PR failed CI with `ERR_PNPM_OUTDATED_LOCKFILE` and the weekly job errored.
+
+### Changed
+- Telemetry `retry_count` is now `consecutive_failures`. It counts consecutive failures reset on success; nothing retries, and the old name inverted how you would read an error's severity.
+- Telemetry `locale` is now populated from the webview. `os_version` remains empty — reading it portably needs `tauri-plugin-os`, which is not worth the added capability surface.
+- Dependabot groups minor/patch updates per ecosystem, so a quiet week is 1–3 PRs instead of 13.
+- `tauri-apps/tauri-action` majors are ignored; v0.6.2 is pinned deliberately and v1.x needs a signed-release test run.
+
+### Security
+- `quinn-proto` 0.11.14 → 0.11.17 — four advisories, remote memory exhaustion (GHSA-qfwj-vfxf-92j2, GHSA-2hv7-gw8g-gpq5, GHSA-hmxj-32vh-65vr, GHSA-4w2j-m93h-cj5j).
+- `undici` pinned ≥ 7.29.0 — five advisories, one high (cross-user cache disclosure, CRLF injection, cookie injection, response desync).
+- `rand` 0.8.8 / 0.9.5 and `serde_with` 3.22.0 — unsoundness and a panic advisory.
+- Remaining open alerts (`rand` 0.7.3, `glib` 0.18.5) are not in any shipped artifact: the former is reached only through build-dependencies, the latter only on Linux. Both are pinned by upstream Tauri.
+
+### Dependencies
+- `zip` 4 → 8 (verified: archives written by the previous major still import), `base64` 0.22 → 0.23, `tokio` 1.53.1, `reqwest` 0.13.4, `clap` 4.6.6, `futures` 0.3.33, `vite` 8.2.2, `zustand` 5.0.15, `tailwindcss` 4.3.3, `@playwright/test` 1.62.1, plus 15 grouped cargo minor/patch bumps.
+
 ## v0.9.5 — Current-generation models + edit → render → export hardening
 
 ### Added
