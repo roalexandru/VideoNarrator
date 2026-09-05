@@ -27,6 +27,15 @@ jobs:
           fi
           echo "All versions match: $PKG_VERSION"
 
+      # `tauri build` refuses to run when a Tauri Rust crate and its npm
+      # counterpart disagree on major.minor, but nothing in this gate runs
+      # `tauri build` — so the mismatch reaches a release tag and fails every
+      # platform at once. That is how v0.11.0 first failed: a grouped cargo
+      # bump moved tauri-plugin-updater to 2.11.0 while the npm package stayed
+      # on 2.10.1. Pure version comparison, no build.
+      - name: Check Tauri Rust/npm version pairs
+        run: node scripts/check-tauri-pairs.mjs
+
   frontend-checks:
     runs-on: ubuntu-latest
     steps:
